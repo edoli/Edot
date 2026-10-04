@@ -2,8 +2,14 @@
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_USER};
 pub const EM_EXGETSEL: u32 = WM_USER + 52;
+#[cfg(test)]
+pub const EM_EXLINEFROMCHAR: u32 = WM_USER + 54;
 pub const EM_EXSETSEL: u32 = WM_USER + 55;
 pub const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
+pub const EM_SETCHARFORMAT: u32 = WM_USER + 68;
+pub const EM_SETTARGETDEVICE: u32 = WM_USER + 72;
+pub const EM_GETSCROLLPOS: u32 = WM_USER + 221;
+pub const EM_SETSCROLLPOS: u32 = WM_USER + 222;
 pub const EM_SETEVENTMASK: u32 = WM_USER + 69;
 pub const EM_REDO: u32 = WM_USER + 84;
 pub const EM_STOPGROUPTYPING: u32 = WM_USER + 88;
@@ -12,6 +18,51 @@ pub const EM_FINDTEXTEXW: u32 = WM_USER + 124;
 pub const EN_SELCHANGE: u32 = 0x0702;
 pub const ENM_CHANGE: isize = 1;
 pub const ENM_SELCHANGE: isize = 0x00080000;
+
+#[repr(C)]
+#[derive(Default)]
+struct CharFormat {
+    size: u32,
+    mask: u32,
+    effects: u32,
+    height: i32,
+    offset: i32,
+    color: u32,
+    charset: u8,
+    pitch: u8,
+    face: [u16; 32],
+}
+
+pub unsafe fn text_color(edit: HWND, color: u32) {
+    let format = CharFormat {
+        size: std::mem::size_of::<CharFormat>() as u32,
+        mask: 0x40000000,
+        color,
+        ..Default::default()
+    }; // CFM_COLOR; clear CFE_AUTOCOLOR
+    unsafe {
+        // Plain-text RichEdit has one format for the whole document. Changing
+        // its default format also colors existing text without selecting it.
+        SendMessageW(edit, EM_SETCHARFORMAT, 0, &format as *const _ as isize);
+    }
+}
+
+#[cfg(test)]
+pub unsafe fn format(edit: HWND) -> (String, u32) {
+    let mut format = CharFormat {
+        size: std::mem::size_of::<CharFormat>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        SendMessageW(edit, WM_USER + 58, 0, &mut format as *mut _ as isize);
+    }
+    let len = format
+        .face
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(format.face.len());
+    (String::from_utf16_lossy(&format.face[..len]), format.color)
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]

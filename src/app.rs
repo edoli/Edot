@@ -1,5 +1,6 @@
 use crate::drag::{DropTarget, DropZone};
 use crate::model::{Notebook, replace_file};
+use crate::settings::{self, Panel, Settings, ThemeMode};
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme};
 use crate::tooltip::Tooltip;
@@ -12,6 +13,7 @@ use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Graphics::Dwm::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::*;
 use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_OWNERDRAW};
@@ -28,6 +30,11 @@ const ID_EDIT: usize = 104;
 const ID_TREE: usize = 105;
 const ID_TABS: usize = 106;
 const ID_TAB_ADD: usize = 107;
+const ID_SETTINGS: usize = 120;
+const ID_SETTINGS_THEME: usize = 121;
+const ID_SETTINGS_FONT: usize = 122;
+const ID_SETTINGS_WRAP: usize = 123;
+const ID_SETTINGS_CLOSE: usize = 124;
 const ID_FIND: usize = 110;
 const ID_FIND_PREV: usize = 111;
 const ID_FIND_NEXT: usize = 112;
@@ -86,6 +93,10 @@ struct App {
     toggle: HWND,
     add: HWND,
     tab_add: HWND,
+    settings_button: HWND,
+    settings_panel: Option<Panel>,
+    settings_visible: bool,
+    settings: Settings,
     status: HWND,
     theme: Rc<Theme>,
     view_book: Rc<Notebook>,
@@ -336,6 +347,35 @@ unsafe extern "system" fn search_host_proc(
     }
 }
 
+unsafe extern "system" fn settings_host_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _: usize,
+    _: usize,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_COMMAND | WM_DRAWITEM | WM_MEASUREITEM | WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC
+            | WM_CTLCOLORLISTBOX => {
+                return SendMessageW(GetParent(hwnd), msg, wp, lp);
+            }
+            WM_ERASEBKGND => return 1,
+            WM_PAINT => {
+                ui::paint_window(hwnd, |dc| ui::with_view(|view| view.paint_settings(dc)));
+                return 0;
+            }
+            WM_NCDESTROY => {
+                ui::release_buffer(hwnd);
+                RemoveWindowSubclass(hwnd, Some(settings_host_proc), 1);
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
 unsafe extern "system" fn tree_host_proc(
     hwnd: HWND,
     msg: u32,
@@ -355,7 +395,7 @@ unsafe extern "system" fn tree_host_proc(
             ui::paint_window(hwnd, |dc| {
                 let mut area = RECT::default();
                 GetClientRect(hwnd, &mut area);
-                theme::fill(dc, area, theme::SIDEBAR);
+                ui::with_view(|v| theme::fill(dc, area, v.theme.colors.sidebar));
             });
             return 0;
         }
@@ -408,7 +448,7 @@ unsafe extern "system" fn tree_subclass(
             ui::paint_window(hwnd, |dc| {
                 let mut area = RECT::default();
                 GetClientRect(hwnd, &mut area);
-                theme::fill(dc, area, theme::SIDEBAR);
+                ui::with_view(|v| theme::fill(dc, area, v.theme.colors.sidebar));
                 DefSubclassProc(hwnd, WM_PRINTCLIENT, dc as usize, PRF_CLIENT as isize);
                 ui::with_view(|view| view.paint_drag_feedback(dc));
             });
@@ -568,7 +608,7 @@ unsafe extern "system" fn control_subclass(
                     },
                     area,
                     view.theme.ui,
-                    theme::rgb(146, 156, 174),
+                    view.theme.colors.muted,
                     DT_LEFT,
                 );
             });
@@ -587,7 +627,7 @@ unsafe extern "system" fn control_subclass(
 }
 
 impl App {
-    unsafe fn new(hwnd: HWND, data_dir: PathBuf, book: Notebook) -> Self {
+    unsafe fn new(hwnd: HWND, data_dir: PathBuf, book: Notebook, settings: Settings) -> Self {
         let controls_timing = startup::span("ui.controls");
         let common = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS;
         let toggle = unsafe {
@@ -661,6 +701,16 @@ impl App {
                 ID_TAB_ADD,
             )
         };
+        let settings_button = unsafe {
+            child(
+                hwnd,
+                wide("BUTTON").as_ptr(),
+                "설정",
+                common | WS_TABSTOP | BS_OWNERDRAW as u32,
+                0,
+                ID_SETTINGS,
+            )
+        };
         unsafe {
             SetWindowSubclass(tabs, Some(tab_subclass), 1, 0);
         }
@@ -678,7 +728,7 @@ impl App {
         unsafe {
             SetWindowSubclass(tree, Some(tree_subclass), 1, 0);
             EnableWindow(edit, 0);
-            for button in [toggle, add, tab_add] {
+            for button in [toggle, add, tab_add, settings_button] {
                 SetWindowSubclass(button, Some(control_subclass), 1, 1);
             }
             SetWindowSubclass(edit, Some(control_subclass), 1, 2);
@@ -773,8 +823,14 @@ impl App {
             toggle,
             add,
             tab_add,
+            settings_button,
+            settings_panel: None,
+            settings_visible: false,
+            theme: Rc::new(unsafe {
+                Theme::new(GetDpiForWindow(hwnd), settings.dark(), &settings.font)
+            }),
+            settings,
             status,
-            theme: Rc::new(unsafe { Theme::new(GetDpiForWindow(hwnd)) }),
             view_book: Rc::new(book.clone()),
             view_handles: Rc::new(HashMap::new()),
 
@@ -819,7 +875,7 @@ impl App {
         };
         unsafe {
             app.publish_view();
-            app.apply_theme();
+            app.apply_theme(true, true, true);
             app.rebuild_tree(None);
             app.restore_session();
             app.layout();
@@ -889,23 +945,24 @@ impl App {
         replace_file(&self.data_dir.join("session.tsv"), text.as_bytes())
     }
 
-    unsafe fn apply_theme(&self) {
+    unsafe fn apply_theme(&self, font: bool, colors: bool, wrap: bool) {
         unsafe {
-            for item in [self.toggle, self.add, self.tab_add, self.tree, self.tabs] {
+            for item in [
+                self.toggle,
+                self.add,
+                self.tab_add,
+                self.settings_button,
+                self.tree,
+                self.tabs,
+            ] {
                 SendMessageW(item, WM_SETFONT, self.theme.ui as WPARAM, 0);
             }
             for tab in &self.open {
                 if !tab.editor.is_null() {
-                    SendMessageW(tab.editor, WM_SETFONT, self.theme.editor as usize, 0);
+                    self.apply_editor_settings(tab.editor, font, colors, wrap);
                 }
             }
-            SendMessageW(self.edit, WM_SETFONT, self.theme.editor as WPARAM, 0);
-            SendMessageW(
-                self.edit,
-                editing::EM_SETBKGNDCOLOR,
-                0,
-                theme::WHITE as isize,
-            );
+            self.apply_editor_settings(self.empty_edit, font, colors, wrap);
             for item in [
                 self.find_input,
                 self.replace_input,
@@ -922,10 +979,400 @@ impl App {
                 SendMessageW(field, WM_SETFONT, self.theme.ui as usize, 0);
             }
             self.tooltip.style(self.theme.small, self.theme.px(420));
-            SendMessageW(self.tree, TVM_SETBKCOLOR, 0, theme::SIDEBAR as LPARAM);
-            SendMessageW(self.tree, TVM_SETTEXTCOLOR, 0, theme::INK as LPARAM);
+            SendMessageW(
+                self.tree,
+                TVM_SETBKCOLOR,
+                0,
+                self.theme.colors.sidebar as LPARAM,
+            );
+            SendMessageW(
+                self.tree,
+                TVM_SETTEXTCOLOR,
+                0,
+                self.theme.colors.ink as LPARAM,
+            );
             SendMessageW(self.tree, TVM_SETITEMHEIGHT, self.theme.px(29) as usize, 0);
             SendMessageW(self.tree, TVM_SETINDENT, self.theme.px(22) as usize, 0);
+            self.style_settings_panel();
+            self.style_title_bar();
+        }
+    }
+
+    unsafe fn apply_editor_settings(&self, editor: HWND, font: bool, colors: bool, wrap: bool) {
+        unsafe {
+            let visible = IsWindowVisible(editor) != 0;
+            let modified = SendMessageW(editor, EM_GETMODIFY, 0, 0);
+            let mut scroll = POINT::default();
+            SendMessageW(
+                editor,
+                editing::EM_GETSCROLLPOS,
+                0,
+                &mut scroll as *mut _ as LPARAM,
+            );
+            if visible {
+                SendMessageW(editor, WM_SETREDRAW, 0, 0);
+            }
+            if font {
+                SendMessageW(editor, WM_SETFONT, self.theme.editor as usize, 0);
+            }
+            // WM_SETFONT resets RichEdit's default foreground color as well.
+            if colors || font {
+                SendMessageW(
+                    editor,
+                    editing::EM_SETBKGNDCOLOR,
+                    0,
+                    self.theme.colors.white as isize,
+                );
+                editing::text_color(editor, self.theme.colors.ink);
+            }
+            if wrap {
+                // RichEdit's screen target uses 0 for wrapping to the client
+                // width and 1 for disabling wrapping. Text stays untouched.
+                let style = GetWindowLongPtrW(editor, GWL_STYLE) as u32;
+                let style = if self.settings.wrap {
+                    style & !WS_HSCROLL
+                } else {
+                    style | WS_HSCROLL
+                };
+                SetWindowLongPtrW(editor, GWL_STYLE, style as isize);
+                SendMessageW(
+                    editor,
+                    editing::EM_SETTARGETDEVICE,
+                    0,
+                    if self.settings.wrap { 0 } else { 1 },
+                );
+                SetWindowPos(
+                    editor,
+                    null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                );
+                if self.settings.wrap {
+                    ShowScrollBar(editor, SB_HORZ, 0);
+                    scroll.x = 0;
+                }
+            }
+            SendMessageW(
+                editor,
+                editing::EM_SETSCROLLPOS,
+                0,
+                &scroll as *const _ as LPARAM,
+            );
+            SendMessageW(editor, EM_SETMODIFY, modified as usize, 0);
+            if visible {
+                SendMessageW(editor, WM_SETREDRAW, 1, 0);
+                InvalidateRect(editor, null(), 0);
+            }
+        }
+    }
+
+    unsafe fn style_title_bar(&self) {
+        unsafe {
+            let dark = self.theme.dark as i32;
+            DwmSetWindowAttribute(
+                self.hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+                &dark as *const _ as *const _,
+                std::mem::size_of_val(&dark) as u32,
+            );
+        }
+    }
+
+    unsafe fn style_settings_panel(&self) {
+        if let Some(panel) = self.settings_panel {
+            unsafe {
+                for control in [
+                    panel.theme,
+                    panel.font,
+                    panel.wrap,
+                    panel.close,
+                    panel.theme_label,
+                    panel.font_label,
+                ] {
+                    SendMessageW(control, WM_SETFONT, self.theme.ui as usize, 0);
+                }
+                SetWindowTextW(
+                    panel.wrap,
+                    wide(if self.settings.wrap {
+                        "자동 줄 바꿈: 켜짐"
+                    } else {
+                        "자동 줄 바꿈: 꺼짐"
+                    })
+                    .as_ptr(),
+                );
+                InvalidateRect(panel.host, null(), 0);
+                InvalidateRect(panel.wrap, null(), 0);
+                RedrawWindow(
+                    panel.host,
+                    null(),
+                    null_mut(),
+                    RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE,
+                );
+            }
+        }
+    }
+
+    unsafe fn show_settings(&mut self, show: bool) {
+        unsafe {
+            if show && self.settings_panel.is_none() {
+                self.tooltip.dismiss();
+                let common = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS;
+                let host = child(
+                    self.hwnd,
+                    wide("STATIC").as_ptr(),
+                    "설정",
+                    WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                    0,
+                    125,
+                );
+                SetWindowSubclass(host, Some(settings_host_proc), 1, 0);
+                let combo = |label: &str, id| {
+                    child(
+                        host,
+                        wide("COMBOBOX").as_ptr(),
+                        label,
+                        common
+                            | WS_TABSTOP
+                            | WS_VSCROLL
+                            | CBS_DROPDOWNLIST as u32
+                            | CBS_OWNERDRAWFIXED as u32
+                            | CBS_HASSTRINGS as u32,
+                        0,
+                        id,
+                    )
+                };
+                let theme = combo("앱 테마", ID_SETTINGS_THEME);
+                let font = combo("본문 글꼴", ID_SETTINGS_FONT);
+                let wrap = child(
+                    host,
+                    wide("BUTTON").as_ptr(),
+                    "자동 줄 바꿈",
+                    common | WS_TABSTOP | BS_OWNERDRAW as u32,
+                    0,
+                    ID_SETTINGS_WRAP,
+                );
+                let close = child(
+                    host,
+                    wide("BUTTON").as_ptr(),
+                    "닫기",
+                    common | WS_TABSTOP | BS_OWNERDRAW as u32,
+                    0,
+                    ID_SETTINGS_CLOSE,
+                );
+                let theme_label = child(host, wide("STATIC").as_ptr(), "앱 테마", common, 0, 0);
+                let font_label = child(host, wide("STATIC").as_ptr(), "본문 글꼴", common, 0, 0);
+                for control in [wrap, close] {
+                    SetWindowSubclass(control, Some(control_subclass), 1, 1);
+                }
+                for label in ["밝게", "어둡게", "시스템 설정 사용"] {
+                    SendMessageW(theme, CB_ADDSTRING, 0, wide(label).as_ptr() as LPARAM);
+                }
+                let mut fonts = settings::installed_fonts(self.hwnd);
+                if !fonts.contains(&self.settings.font) {
+                    fonts.push(self.settings.font.clone());
+                    fonts.sort_unstable();
+                }
+                for name in &fonts {
+                    SendMessageW(font, CB_ADDSTRING, 0, wide(name).as_ptr() as LPARAM);
+                }
+                SendMessageW(
+                    font,
+                    CB_SETCURSEL,
+                    fonts
+                        .iter()
+                        .position(|name| name == &self.settings.font)
+                        .unwrap_or(0),
+                    0,
+                );
+                SendMessageW(
+                    theme,
+                    CB_SETCURSEL,
+                    match self.settings.theme {
+                        ThemeMode::Light => 0,
+                        ThemeMode::Dark => 1,
+                        ThemeMode::System => 2,
+                    },
+                    0,
+                );
+                self.settings_panel = Some(Panel {
+                    host,
+                    theme,
+                    font,
+                    wrap,
+                    close,
+                    theme_label,
+                    font_label,
+                });
+                self.style_settings_panel();
+            }
+            self.settings_visible = show;
+            if show {
+                self.find_visible = false;
+                ShowWindow(self.search_host, SW_HIDE);
+            }
+            self.publish_view();
+            self.layout_settings();
+            if let Some(panel) = self.settings_panel {
+                SetFocus(if show {
+                    panel.theme
+                } else if self.active.is_some() {
+                    self.edit
+                } else {
+                    self.settings_button
+                });
+            }
+            InvalidateRect(self.settings_button, null(), 0);
+        }
+    }
+
+    unsafe fn layout_settings(&self) {
+        let Some(panel) = self.settings_panel else {
+            return;
+        };
+        unsafe {
+            if !self.settings_visible {
+                ShowWindow(panel.host, SW_HIDE);
+                return;
+            }
+            let p = |v| self.theme.px(v);
+            let mut area = RECT::default();
+            GetClientRect(self.hwnd, &mut area);
+            let width = p(360).min(area.right - p(24));
+            SetWindowPos(
+                panel.host,
+                HWND_TOP,
+                area.right - width - p(12),
+                p(42),
+                width,
+                p(272),
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            for (control, x, y, w, h) in [
+                (panel.close, width - p(66), p(12), p(48), p(28)),
+                (panel.theme_label, p(20), p(52), width - p(40), p(22)),
+                (panel.theme, p(20), p(76), width - p(40), p(230)),
+                (panel.font_label, p(20), p(117), width - p(40), p(22)),
+                (panel.font, p(20), p(141), width - p(40), p(280)),
+                (panel.wrap, p(20), p(191), width - p(40), p(30)),
+            ] {
+                SetWindowPos(
+                    control,
+                    null_mut(),
+                    x,
+                    y,
+                    w,
+                    h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            RedrawWindow(
+                panel.host,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE,
+            );
+        }
+    }
+
+    unsafe fn change_setting(&mut self, id: usize) {
+        let Some(panel) = self.settings_panel else {
+            return;
+        };
+        let mut next = self.settings.clone();
+        unsafe {
+            match id {
+                ID_SETTINGS_THEME => {
+                    next.theme = match SendMessageW(panel.theme, CB_GETCURSEL, 0, 0) {
+                        0 => ThemeMode::Light,
+                        1 => ThemeMode::Dark,
+                        _ => ThemeMode::System,
+                    }
+                }
+                ID_SETTINGS_FONT => {
+                    let index = SendMessageW(panel.font, CB_GETCURSEL, 0, 0);
+                    if index < 0 {
+                        return;
+                    }
+                    let len = SendMessageW(panel.font, CB_GETLBTEXTLEN, index as usize, 0);
+                    if !(1..32).contains(&len) {
+                        return;
+                    }
+                    let mut text = vec![0u16; len as usize + 1];
+                    SendMessageW(
+                        panel.font,
+                        CB_GETLBTEXT,
+                        index as usize,
+                        text.as_mut_ptr() as LPARAM,
+                    );
+                    next.font = String::from_utf16_lossy(&text[..len as usize]);
+                }
+                ID_SETTINGS_WRAP => next.wrap = !next.wrap,
+                _ => return,
+            }
+        }
+        if next == self.settings {
+            return;
+        }
+        if let Err(error) = next.save(&self.data_dir) {
+            unsafe {
+                SendMessageW(
+                    panel.theme,
+                    CB_SETCURSEL,
+                    match self.settings.theme {
+                        ThemeMode::Light => 0,
+                        ThemeMode::Dark => 1,
+                        ThemeMode::System => 2,
+                    },
+                    0,
+                );
+                let index = SendMessageW(
+                    panel.font,
+                    CB_FINDSTRINGEXACT,
+                    usize::MAX,
+                    wide(&self.settings.font).as_ptr() as LPARAM,
+                );
+                SendMessageW(panel.font, CB_SETCURSEL, index as usize, 0);
+            }
+            report(self.hwnd, "설정을 저장하지 못했습니다.", error);
+            return;
+        }
+        unsafe {
+            self.apply_settings(next);
+        }
+    }
+
+    unsafe fn apply_settings(&mut self, next: Settings) {
+        let font = next.font != self.settings.font;
+        let wrap = next.wrap != self.settings.wrap;
+        let dark = next.dark();
+        let colors = dark != self.theme.dark;
+        self.settings = next;
+        unsafe {
+            if font || colors {
+                let theme = Rc::new(Theme::new(self.theme.dpi, dark, &self.settings.font));
+                let old = std::mem::replace(&mut self.theme, theme);
+                self.publish_view();
+                self.apply_theme(font, colors, wrap);
+                drop(old);
+                RedrawWindow(
+                    self.hwnd,
+                    null(),
+                    null_mut(),
+                    RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE,
+                );
+            } else if wrap {
+                for tab in &self.open {
+                    if !tab.editor.is_null() {
+                        self.apply_editor_settings(tab.editor, false, false, true);
+                    }
+                }
+                self.apply_editor_settings(self.empty_edit, false, false, true);
+            }
+            self.publish_view();
+            self.style_settings_panel();
         }
     }
 
@@ -956,6 +1403,10 @@ impl App {
             toggle: self.toggle,
             add: self.add,
             tab_add: self.tab_add,
+            settings_button: self.settings_button,
+            settings_panel: self.settings_panel,
+            settings_visible: self.settings_visible,
+            word_wrap: self.settings.wrap,
             status: self.status,
             theme: Rc::clone(&self.theme),
             book: Rc::clone(&self.view_book),
@@ -1028,7 +1479,7 @@ impl App {
             let left = self.sidebar_edge(w);
             let content_x = if self.sidebar_visible { left + 1 } else { 0 };
             let tabs_x = content_x + if self.sidebar_visible { 0 } else { p(42) };
-            let available = (w - tabs_x - p(38)).max(1);
+            let available = (w - tabs_x - p(78)).max(1);
             let mut tabs = TabLayout::new(
                 available,
                 self.open.len(),
@@ -1077,6 +1528,7 @@ impl App {
                     (h - p(70)).max(0),
                 ),
                 (self.tabs, tabs_x, 0, tabs.viewport, p(36)),
+                (self.settings_button, w - p(36), p(3), p(30), p(29)),
                 (
                     self.tab_add,
                     tabs_x + tabs.viewport + p(3),
@@ -1166,6 +1618,7 @@ impl App {
                 }
             }
             self.layout_search();
+            self.layout_settings();
             RedrawWindow(
                 self.hwnd,
                 null(),
@@ -1626,8 +2079,7 @@ impl App {
         self.loading = true;
         let text_timing = startup::span("editor.load_text");
         unsafe {
-            SendMessageW(editor, WM_SETFONT, self.theme.editor as usize, 0);
-            SendMessageW(editor, editing::EM_SETBKGNDCOLOR, 0, theme::WHITE as isize);
+            self.apply_editor_settings(editor, true, true, true);
             SetWindowTextW(editor, wide(&text).as_ptr());
             SendMessageW(editor, EM_EMPTYUNDOBUFFER, 0, 0);
         }
@@ -2091,6 +2543,11 @@ impl App {
     }
 
     unsafe fn show_find(&mut self, replace: bool) {
+        if self.settings_visible {
+            unsafe {
+                self.show_settings(false);
+            }
+        }
         if self.active.is_none() {
             return;
         }
@@ -2290,6 +2747,18 @@ impl App {
 
     unsafe fn command(&mut self, id: usize, code: usize) {
         match id {
+            ID_SETTINGS => unsafe {
+                self.show_settings(!self.settings_visible);
+            },
+            ID_SETTINGS_CLOSE => unsafe {
+                self.show_settings(false);
+            },
+            ID_SETTINGS_THEME | ID_SETTINGS_FONT if code == CBN_SELCHANGE as usize => unsafe {
+                self.change_setting(id);
+            },
+            ID_SETTINGS_WRAP => unsafe {
+                self.change_setting(id);
+            },
             ID_FIND if code == EN_CHANGE as usize => unsafe {
                 self.find_next(false, true);
             },
@@ -2573,12 +3042,19 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             });
             1
         }
-        WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
+        WM_MEASUREITEM if lp != 0 => {
+            unsafe {
+                (*(lp as *mut MEASUREITEMSTRUCT)).itemHeight =
+                    (24 * GetDpiForWindow(hwnd).max(96) / 96).max(1);
+            }
+            1
+        }
+        WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX => {
             let mut brush = 0;
             ui::with_view(|view| unsafe {
                 let dc = wp as HDC;
-                SetTextColor(dc, theme::INK);
-                SetBkColor(dc, theme::WHITE);
+                SetTextColor(dc, view.theme.colors.ink);
+                SetBkColor(dc, view.theme.colors.white);
                 brush = view.theme.white_brush as LRESULT;
             });
             if brush != 0 {
@@ -2589,8 +3065,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_DPICHANGED => {
             with_app(|app| unsafe {
-                let old = std::mem::replace(&mut app.theme, Rc::new(Theme::new(hi(wp) as u32)));
-                app.apply_theme();
+                let theme = Rc::new(Theme::new(
+                    hi(wp) as u32,
+                    app.settings.dark(),
+                    &app.settings.font,
+                ));
+                let old = std::mem::replace(&mut app.theme, theme);
+                app.publish_view();
+                app.apply_theme(true, true, true);
                 drop(old);
                 let suggested = &*(lp as *const RECT);
                 SetWindowPos(
@@ -2605,6 +3087,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 app.layout();
             });
             0
+        }
+        WM_SETTINGCHANGE | WM_THEMECHANGED => {
+            with_app(|app| unsafe {
+                if app.settings.theme == ThemeMode::System {
+                    app.apply_settings(app.settings.clone());
+                }
+            });
+            unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
         }
         WM_GETMINMAXINFO => {
             let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as i32;
@@ -2812,7 +3302,43 @@ fn shortcut(msg: &MSG) -> bool {
     let key = msg.wParam as u32;
     let mut handled = false;
     with_app(|app| unsafe {
-        if !ctrl
+        if ctrl && key == VK_OEM_COMMA as u32 {
+            app.show_settings(!app.settings_visible);
+            handled = true;
+        } else if app.settings_visible && key == VK_ESCAPE as u32 {
+            let dropped = app.settings_panel.is_some_and(|panel| {
+                SendMessageW(panel.theme, CB_GETDROPPEDSTATE, 0, 0) != 0
+                    || SendMessageW(panel.font, CB_GETDROPPEDSTATE, 0, 0) != 0
+            });
+            if !dropped {
+                app.show_settings(false);
+                handled = true;
+            }
+        } else if app.settings_visible && !ctrl && key == VK_TAB as u32 {
+            if let Some(panel) = app.settings_panel {
+                let controls = [panel.theme, panel.font, panel.wrap, panel.close];
+                let current = controls
+                    .iter()
+                    .position(|&control| control == msg.hwnd)
+                    .unwrap_or(0);
+                SetFocus(
+                    controls[if shift {
+                        (current + 3) % 4
+                    } else {
+                        (current + 1) % 4
+                    }],
+                );
+                handled = true;
+            }
+        } else if app.settings_visible
+            && key == VK_RETURN as u32
+            && app
+                .settings_panel
+                .is_some_and(|panel| msg.hwnd == panel.wrap || msg.hwnd == panel.close)
+        {
+            app.command(GetDlgCtrlID(msg.hwnd) as usize, BN_CLICKED as usize);
+            handled = true;
+        } else if !ctrl
             && key == VK_TAB as u32
             && app.find_visible
             && IsChild(app.search_host, msg.hwnd) != 0
@@ -2984,6 +3510,19 @@ pub fn run() {
         }
     };
     drop(load_timing);
+    let settings_timing = startup::span("settings.load");
+    let settings = match Settings::load(&data_dir) {
+        Ok(settings) => settings,
+        Err(error) => {
+            report(
+                null_mut(),
+                "설정을 읽지 못했습니다. 설정 파일을 확인해주세요.",
+                error,
+            );
+            return;
+        }
+    };
+    drop(settings_timing);
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let canonical = fs::canonicalize(&data_dir).unwrap_or_else(|_| data_dir.clone());
@@ -3079,7 +3618,7 @@ pub fn run() {
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
         APP.with(|cell| {
-            *cell.borrow_mut() = Some(App::new(hwnd, data_dir, book));
+            *cell.borrow_mut() = Some(App::new(hwnd, data_dir, book, settings));
         });
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
@@ -3094,6 +3633,202 @@ pub fn run() {
             }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        }
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+    use std::time::Instant;
+
+    // Direct native-control integration test. It creates an invisible window
+    // and isolated notes, and records synchronous application costs (no paint).
+    #[test]
+    #[ignore = "Windows native controls and opt-in performance measurement"]
+    fn settings_preserve_editors_and_measure_transitions() {
+        unsafe {
+            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let controls = INITCOMMONCONTROLSEX {
+                dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES,
+            };
+            InitCommonControlsEx(&controls);
+            assert!(!LoadLibraryW(wide("Msftedit.dll").as_ptr()).is_null());
+            let root =
+                std::env::temp_dir().join(format!("edot-settings-native-{}", std::process::id()));
+            fs::create_dir_all(&root).unwrap();
+            for repeat in [100, 6000] {
+                let dir = root.join(repeat.to_string());
+                let mut book = Notebook::load(&dir).unwrap();
+                let id = book.add(0, "설정 테스트".into());
+                let second = book.add(0, "숨겨진 편집기".into());
+                let lazy = book.add(0, "아직 읽지 않은 탭".into());
+                let content =
+                    ("가나다 🙂 ABC 0123456789 ".to_owned() + &"long line text ".repeat(16) + "\n")
+                        .repeat(repeat);
+                for note in [id, second, lazy] {
+                    fs::write(book.file(&dir, note), &content).unwrap();
+                }
+                book.save(&dir).unwrap();
+                let hwnd = child(
+                    null_mut(),
+                    wide("STATIC").as_ptr(),
+                    "settings-test",
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                );
+                assert!(!hwnd.is_null());
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    1100,
+                    760,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                let mut app = App::new(
+                    hwnd,
+                    dir.clone(),
+                    book,
+                    Settings {
+                        theme: ThemeMode::Light,
+                        ..Default::default()
+                    },
+                );
+                app.open_note(second);
+                let hidden_editor = app.edit;
+                app.open_note(id);
+                let editor = app.edit;
+                app.open.push(OpenTab {
+                    id: lazy,
+                    text: String::new(),
+                    dirty: false,
+                    editor: null_mut(),
+                });
+                let before = window_text(editor);
+                let hidden_before = window_text(hidden_editor);
+                let disk_before = fs::read(app.book.file(&dir, id)).unwrap();
+                let original_second_line = SendMessageW(editor, EM_LINEINDEX, 1, 0);
+                editing::select(editor, editing::CharRange { start: 4, end: 7 });
+                SendMessageW(editor, EM_REPLACESEL, 1, wide("편집").as_ptr() as LPARAM);
+                let edited = window_text(editor);
+                let selection = editing::selection(editor);
+                assert_ne!(edited, before);
+                assert_ne!(SendMessageW(editor, EM_CANUNDO, 0, 0), 0);
+                let modified = SendMessageW(editor, EM_GETMODIFY, 0, 0);
+                let mut dark = app.settings.clone();
+                dark.theme = ThemeMode::Dark;
+                app.apply_settings(dark);
+                assert_eq!(editing::format(editor).1, app.theme.colors.ink);
+                assert_eq!(editing::format(hidden_editor).1, app.theme.colors.ink);
+                let mut font = app.settings.clone();
+                font.font = "Arial".into();
+                app.apply_settings(font);
+                assert_eq!(
+                    editing::format(editor),
+                    ("Arial".into(), app.theme.colors.ink)
+                );
+                assert_eq!(
+                    editing::format(hidden_editor),
+                    ("Arial".into(), app.theme.colors.ink)
+                );
+                let mut nowrap = app.settings.clone();
+                nowrap.wrap = false;
+                app.apply_settings(nowrap);
+                assert!(SendMessageW(editor, EM_LINEINDEX, 1, 0) > original_second_line);
+                assert_ne!(GetWindowLongPtrW(editor, GWL_STYLE) as u32 & WS_HSCROLL, 0);
+                assert_eq!(editing::selection(editor), selection);
+                assert_eq!(SendMessageW(editor, EM_GETMODIFY, 0, 0), modified);
+                assert_eq!(window_text(editor), edited);
+                assert_eq!(window_text(hidden_editor), hidden_before);
+                assert!(app.open[2].editor.is_null());
+                assert_eq!(fs::read(app.book.file(&dir, id)).unwrap(), disk_before);
+                SendMessageW(editor, WM_UNDO, 0, 0);
+                assert_eq!(window_text(editor), before);
+                assert_eq!(IsWindowVisible(hidden_editor), 0);
+                // Settings also apply to lazily loaded editors.
+                assert!(app.load_editor(2));
+                assert_eq!(
+                    editing::format(app.open[2].editor),
+                    ("Arial".into(), app.theme.colors.ink)
+                );
+                // Measure one loaded editor, as in the startup comparison.
+                for tab in app.open.drain(1..) {
+                    DestroyWindow(tab.editor);
+                }
+                app.active = Some(0);
+                app.edit = hidden_editor;
+                app.layout();
+                let last_char = content.encode_utf16().count() as isize - 1;
+                for feature in ["theme", "font", "wrap"] {
+                    let mut values = Vec::new();
+                    for iteration in 0..16 {
+                        let mut next = app.settings.clone();
+                        match feature {
+                            "theme" => {
+                                next.theme = if next.theme == ThemeMode::Dark {
+                                    ThemeMode::Light
+                                } else {
+                                    ThemeMode::Dark
+                                }
+                            }
+                            "font" => {
+                                next.font = if next.font == "Arial" {
+                                    "Consolas"
+                                } else {
+                                    "Arial"
+                                }
+                                .into()
+                            }
+                            _ => next.wrap = !next.wrap,
+                        }
+                        let start = Instant::now();
+                        app.apply_settings(next);
+                        // Force layout through the last character so deferred
+                        // RichEdit work is included, even for a hidden window.
+                        SendMessageW(app.edit, editing::EM_EXLINEFROMCHAR, 0, last_char);
+                        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                        if iteration > 0 {
+                            values.push(elapsed);
+                        }
+                    }
+                    values.sort_by(f64::total_cmp);
+                    println!(
+                        "settings_bench\tbytes={}\tfeature={}\tmedian_ms={:.3}\tmin_ms={:.3}\tmax_ms={:.3}",
+                        content.len(),
+                        feature,
+                        values[7],
+                        values[0],
+                        values[14]
+                    );
+                }
+                let start = Instant::now();
+                let fonts = settings::installed_fonts(hwnd);
+                println!(
+                    "font_enumeration\tcount={}\tms={:.3}",
+                    fonts.len(),
+                    start.elapsed().as_secs_f64() * 1000.0
+                );
+                assert!(fonts.iter().any(|font| font == "Consolas"));
+                let mut saves = Vec::new();
+                for _ in 0..15 {
+                    let start = Instant::now();
+                    app.settings.save(&dir).unwrap();
+                    saves.push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+                saves.sort_by(f64::total_cmp);
+                println!(
+                    "settings_save\tmedian_ms={:.3}\tmin_ms={:.3}\tmax_ms={:.3}",
+                    saves[7], saves[0], saves[14]
+                );
+                ui::clear();
+                DestroyWindow(hwnd);
+                drop(app);
+            }
+            fs::remove_dir_all(root).unwrap();
         }
     }
 }

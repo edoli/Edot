@@ -28,6 +28,10 @@ pub struct View {
     pub toggle: HWND,
     pub add: HWND,
     pub tab_add: HWND,
+    pub settings_button: HWND,
+    pub settings_panel: Option<crate::settings::Panel>,
+    pub settings_visible: bool,
+    pub word_wrap: bool,
     pub status: HWND,
     pub theme: Rc<Theme>,
     pub book: Rc<Notebook>,
@@ -70,6 +74,9 @@ pub fn with_view(f: impl FnOnce(&View)) {
 pub fn clear() {
     VIEW.with(|v| v.borrow_mut().take());
     BUFFERS.with(|b| b.borrow_mut().clear());
+}
+pub fn release_buffer(hwnd: HWND) {
+    BUFFERS.with(|buffers| buffers.borrow_mut().remove(&(hwnd as isize)));
 }
 
 struct BackBuffer {
@@ -220,13 +227,19 @@ impl View {
             }
             let top = (row.bottom + p(4)).min((area.bottom - p(32)).max(0));
             let banner = rect(p(2), top, area.right - p(2), top + p(29));
-            theme::rounded(dc, banner, theme::SELECTED, theme::BLUE, p(6));
+            theme::rounded(
+                dc,
+                banner,
+                self.theme.colors.selected,
+                self.theme.colors.blue,
+                p(6),
+            );
             theme::text(
                 dc,
                 "＋ 최상위로 이동",
                 banner,
                 self.theme.small,
-                theme::BLUE,
+                self.theme.colors.blue,
                 DT_CENTER,
             );
         }
@@ -235,7 +248,7 @@ impl View {
         unsafe {
             let mut area = RECT::default();
             GetClientRect(self.tree_scroll, &mut area);
-            theme::fill(dc, area, theme::SIDEBAR);
+            theme::fill(dc, area, self.theme.colors.sidebar);
             let count = SendMessageW(self.tree, TVM_GETVISIBLECOUNT, 0, 0).max(1) as i32;
             let total = self.visible.len() as i32;
             if total <= count {
@@ -250,8 +263,8 @@ impl View {
             theme::rounded(
                 dc,
                 rect(0, top, area.right, top + thumb),
-                theme::rgb(168, 181, 198),
-                theme::rgb(168, 181, 198),
+                self.theme.colors.muted,
+                self.theme.colors.muted,
                 area.right,
             );
         }
@@ -271,28 +284,33 @@ impl View {
             let mut area = RECT::default();
             GetClientRect(self.hwnd, &mut area);
             let edge = self.sidebar_edge(area.right);
-            theme::fill(dc, area, theme::WHITE);
-            theme::fill(dc, rect(0, 0, area.right, p(36)), theme::BAR);
+            theme::fill(dc, area, self.theme.colors.white);
+            theme::fill(dc, rect(0, 0, area.right, p(36)), self.theme.colors.bar);
             theme::line(
                 dc,
                 &[(edge, p(36) - 1), (area.right, p(36) - 1)],
-                theme::BORDER,
+                self.theme.colors.border,
                 1,
             );
             if self.sidebar_visible {
-                theme::fill(dc, rect(0, 0, edge, area.bottom), theme::SIDEBAR);
-                theme::line(dc, &[(edge, 0), (edge, area.bottom)], theme::BORDER, 1);
+                theme::fill(dc, rect(0, 0, edge, area.bottom), self.theme.colors.sidebar);
+                theme::line(
+                    dc,
+                    &[(edge, 0), (edge, area.bottom)],
+                    self.theme.colors.border,
+                    1,
+                );
             }
             if self.active.is_none() {
                 let cx = edge + (area.right - edge) / 2;
                 let cy = area.bottom / 2 - p(40);
-                theme::document(dc, cx - p(20), cy - p(54), p(40), theme::BLUE);
+                theme::document(dc, cx - p(20), cy - p(54), p(40), self.theme.colors.blue);
                 theme::text(
                     dc,
                     "생각을 가볍게 기록하세요",
                     rect(edge, cy, area.right, cy + p(38)),
                     self.theme.heading,
-                    theme::INK,
+                    self.theme.colors.ink,
                     DT_CENTER,
                 );
                 theme::text(
@@ -300,7 +318,7 @@ impl View {
                     "메모를 선택하거나 Ctrl + N으로 새 메모를 만드세요",
                     rect(edge, cy + p(40), area.right, cy + p(72)),
                     self.theme.ui,
-                    theme::MUTED,
+                    self.theme.colors.muted,
                     DT_CENTER,
                 );
             }
@@ -312,22 +330,22 @@ impl View {
             let p = |n| self.theme.px(n);
             let mut area = RECT::default();
             GetClientRect(self.search_host, &mut area);
-            theme::fill(dc, area, theme::WHITE);
+            theme::fill(dc, area, self.theme.colors.white);
             if !self.find_visible {
                 return;
             }
             theme::rounded(
                 dc,
                 rect(p(3), p(4), area.right, area.bottom),
-                theme::rgb(232, 236, 242),
-                theme::rgb(232, 236, 242),
+                self.theme.colors.hover,
+                self.theme.colors.hover,
                 p(12),
             );
             theme::rounded(
                 dc,
                 rect(0, 0, area.right - p(3), area.bottom - p(4)),
-                theme::WHITE,
-                theme::rgb(207, 215, 227),
+                self.theme.colors.white,
+                self.theme.colors.border,
                 p(12),
             );
             if area.right > p(250) {
@@ -340,7 +358,7 @@ impl View {
                     },
                     rect(p(16), p(6), area.right - p(154), p(38)),
                     self.theme.ui,
-                    theme::INK,
+                    self.theme.colors.ink,
                     DT_LEFT,
                 );
             }
@@ -351,11 +369,11 @@ impl View {
                 theme::rounded(
                     dc,
                     rect(p(16), p(top), area.right - p(20), p(top + 34)),
-                    theme::WHITE,
+                    self.theme.colors.white,
                     if GetFocus() == field {
-                        theme::BLUE
+                        self.theme.colors.blue
                     } else {
-                        theme::BORDER
+                        self.theme.colors.border
                     },
                     p(7),
                 );
@@ -366,7 +384,7 @@ impl View {
                 &self.find_message,
                 rect(p(16), p(message_y), area.right - p(20), p(message_y + 24)),
                 self.theme.small,
-                theme::MUTED,
+                self.theme.colors.muted,
                 DT_LEFT,
             );
         }
@@ -377,11 +395,11 @@ impl View {
             let p = |v| self.theme.px(v);
             let mut area = RECT::default();
             GetClientRect(self.tabs, &mut area);
-            theme::fill(dc, area, theme::BAR);
+            theme::fill(dc, area, self.theme.colors.bar);
             theme::line(
                 dc,
                 &[(0, area.bottom - 1), (area.right, area.bottom - 1)],
-                theme::BORDER,
+                self.theme.colors.border,
                 1,
             );
             let mut mouse = POINT::default();
@@ -400,24 +418,24 @@ impl View {
                     theme::rounded(
                         dc,
                         rect(left, 1, right, area.bottom + p(4)),
-                        theme::WHITE,
-                        theme::BORDER,
+                        self.theme.colors.white,
+                        self.theme.colors.border,
                         p(6),
                     );
                     theme::line(
                         dc,
                         &[(left + p(4), 2), (right - p(4), 2)],
-                        theme::BLUE,
+                        self.theme.colors.blue,
                         p(2),
                     );
                 } else {
                     if PtInRect(&item, mouse) != 0 {
-                        theme::fill(dc, item, theme::HOVER);
+                        theme::fill(dc, item, self.theme.colors.hover);
                     }
                     theme::line(
                         dc,
                         &[(right - 1, p(7)), (right - 1, area.bottom - p(7))],
-                        theme::BORDER,
+                        self.theme.colors.border,
                         1,
                     );
                 }
@@ -426,7 +444,11 @@ impl View {
                     left + p(9),
                     (p(36) - p(15)) / 2,
                     p(15),
-                    if active { theme::BLUE } else { theme::MUTED },
+                    if active {
+                        self.theme.colors.blue
+                    } else {
+                        self.theme.colors.muted
+                    },
                 );
                 let title = self
                     .book
@@ -438,14 +460,20 @@ impl View {
                     title,
                     rect(left + p(30), 0, right - p(25), p(36)),
                     self.theme.tab,
-                    theme::INK,
+                    self.theme.colors.ink,
                     DT_LEFT,
                 );
                 let close_area = rect(right - p(24), p(7), right - p(3), p(29));
                 if PtInRect(&close_area, mouse) != 0 {
-                    theme::rounded(dc, close_area, theme::HOVER, theme::HOVER, p(4));
+                    theme::rounded(
+                        dc,
+                        close_area,
+                        self.theme.colors.hover,
+                        self.theme.colors.hover,
+                        p(4),
+                    );
                 }
-                theme::close(dc, right - p(17), p(14), p(8), theme::MUTED);
+                theme::close(dc, right - p(17), p(14), p(8), self.theme.colors.muted);
             }
             RestoreDC(dc, saved);
             if self.tab_layout.overflow {
@@ -456,13 +484,13 @@ impl View {
                 theme::fill(
                     dc,
                     rect(0, area.bottom - p(4), area.right, area.bottom),
-                    theme::BORDER,
+                    self.theme.colors.border,
                 );
                 theme::rounded(
                     dc,
                     rect(x, area.bottom - p(4), x + thumb, area.bottom),
-                    theme::MUTED,
-                    theme::MUTED,
+                    self.theme.colors.muted,
+                    self.theme.colors.muted,
                     p(4),
                 );
             }
@@ -485,7 +513,7 @@ impl View {
             GetClientRect(GetParent(self.tree), &mut client);
             area.left = 0;
             area.right = client.right;
-            theme::fill(dc, area, theme::SIDEBAR);
+            theme::fill(dc, area, self.theme.colors.sidebar);
             let selected = custom.nmcd.uItemState & CDIS_SELECTED != 0;
             let inside = self
                 .drop_target
@@ -496,16 +524,16 @@ impl View {
                     dc,
                     rect(2, area.top + 1, area.right - 2, area.bottom - 1),
                     if selected || inside {
-                        theme::SELECTED
+                        self.theme.colors.selected
                     } else {
-                        theme::HOVER
+                        self.theme.colors.hover
                     },
                     if inside {
-                        theme::BLUE
+                        self.theme.colors.blue
                     } else if selected {
-                        theme::SELECTED
+                        self.theme.colors.selected
                     } else {
-                        theme::HOVER
+                        self.theme.colors.hover
                     },
                     p(6),
                 );
@@ -524,7 +552,12 @@ impl View {
             if custom.iLevel > 0 {
                 for level in 0..custom.iLevel {
                     let gx = p(11 + level * 22);
-                    theme::line(dc, &[(gx, area.top), (gx, area.bottom)], theme::BORDER, 1);
+                    theme::line(
+                        dc,
+                        &[(gx, area.top), (gx, area.bottom)],
+                        self.theme.colors.border,
+                        1,
+                    );
                 }
             }
             if children {
@@ -545,7 +578,7 @@ impl View {
                             (cx, cy + p(2)),
                             (cx + p(4), cy - p(2)),
                         ],
-                        theme::INK,
+                        self.theme.colors.ink,
                         p(1),
                     );
                 } else {
@@ -556,7 +589,7 @@ impl View {
                             (cx + p(2), cy),
                             (cx - p(2), cy + p(4)),
                         ],
-                        theme::INK,
+                        self.theme.colors.ink,
                         p(1),
                     );
                 }
@@ -567,7 +600,11 @@ impl View {
                     x,
                     y,
                     p(18),
-                    if selected { theme::BLUE } else { theme::MUTED },
+                    if selected {
+                        self.theme.colors.blue
+                    } else {
+                        self.theme.colors.muted
+                    },
                 );
             }
             let editing = SendMessageW(self.tree, TVM_GETEDITCONTROL, 0, 0) != 0
@@ -578,7 +615,7 @@ impl View {
                     &note.title,
                     rect(x + p(27), area.top, area.right - p(20), area.bottom),
                     self.theme.ui,
-                    theme::INK,
+                    self.theme.colors.ink,
                     DT_LEFT,
                 );
             }
@@ -590,9 +627,9 @@ impl View {
                         dc,
                         rect(gx, gy, gx + p(2), gy + p(2)),
                         if self.dragging == Some(id) {
-                            theme::BLUE
+                            self.theme.colors.blue
                         } else {
-                            theme::rgb(157, 170, 189)
+                            self.theme.colors.muted
                         },
                     );
                 }
@@ -605,15 +642,55 @@ impl View {
                 } else {
                     area.bottom - p(2)
                 };
-                theme::line(dc, &[(x, y), (area.right - p(4), y)], theme::BLUE, p(2));
+                theme::line(
+                    dc,
+                    &[(x, y), (area.right - p(4), y)],
+                    self.theme.colors.blue,
+                    p(2),
+                );
                 theme::rounded(
                     dc,
                     rect(x - p(3), y - p(3), x + p(3), y + p(3)),
-                    theme::BLUE,
-                    theme::BLUE,
+                    self.theme.colors.blue,
+                    self.theme.colors.blue,
                     p(6),
                 );
             }
+        }
+    }
+
+    pub unsafe fn paint_settings(&self, dc: HDC) {
+        let Some(panel) = self.settings_panel else {
+            return;
+        };
+        unsafe {
+            let p = |v| self.theme.px(v);
+            let mut area = RECT::default();
+            GetClientRect(panel.host, &mut area);
+            theme::fill(dc, area, self.theme.colors.white);
+            theme::rounded(
+                dc,
+                rect(0, 0, area.right, area.bottom),
+                self.theme.colors.white,
+                self.theme.colors.border,
+                p(8),
+            );
+            theme::text(
+                dc,
+                "설정",
+                rect(p(20), p(10), area.right - p(80), p(40)),
+                self.theme.heading,
+                self.theme.colors.ink,
+                DT_LEFT,
+            );
+            theme::text(
+                dc,
+                "변경 사항은 바로 적용되고 저장됩니다.",
+                rect(p(20), p(233), area.right - p(20), p(259)),
+                self.theme.small,
+                self.theme.colors.muted,
+                DT_LEFT,
+            );
         }
     }
 
@@ -622,9 +699,91 @@ impl View {
             let p = |v| self.theme.px(v);
             let dc = draw.hDC;
             let area = draw.rcItem;
+            if let Some(panel) = self.settings_panel {
+                if draw.hwndItem == panel.theme || draw.hwndItem == panel.font {
+                    let selected = draw.itemState & ODS_SELECTED != 0;
+                    theme::fill(
+                        dc,
+                        area,
+                        if selected {
+                            self.theme.colors.selected
+                        } else {
+                            self.theme.colors.white
+                        },
+                    );
+                    if draw.itemID != u32::MAX {
+                        let mut label = [0u16; 32];
+                        let len =
+                            SendMessageW(draw.hwndItem, CB_GETLBTEXTLEN, draw.itemID as usize, 0);
+                        if (0..32).contains(&len) {
+                            SendMessageW(
+                                draw.hwndItem,
+                                CB_GETLBTEXT,
+                                draw.itemID as usize,
+                                label.as_mut_ptr() as isize,
+                            );
+                            theme::text(
+                                dc,
+                                &String::from_utf16_lossy(&label[..len as usize]),
+                                rect(area.left + p(8), area.top, area.right - p(4), area.bottom),
+                                self.theme.ui,
+                                self.theme.colors.ink,
+                                DT_LEFT,
+                            );
+                        }
+                    }
+                    if draw.itemState & ODS_FOCUS != 0 {
+                        DrawFocusRect(dc, &area);
+                    }
+                    return;
+                }
+                if draw.hwndItem == panel.wrap {
+                    let focused = draw.itemState & ODS_FOCUS != 0;
+                    theme::fill(dc, area, self.theme.colors.white);
+                    theme::text(
+                        dc,
+                        "자동 줄 바꿈",
+                        rect(p(2), 0, area.right - p(56), area.bottom),
+                        self.theme.ui,
+                        self.theme.colors.ink,
+                        DT_LEFT,
+                    );
+                    let x = area.right - p(44);
+                    let y = (area.bottom - p(22)) / 2;
+                    let color = if self.word_wrap {
+                        self.theme.colors.blue
+                    } else {
+                        self.theme.colors.muted
+                    };
+                    theme::rounded(
+                        dc,
+                        rect(x, y, area.right - p(2), y + p(22)),
+                        color,
+                        if focused {
+                            self.theme.colors.ink
+                        } else {
+                            color
+                        },
+                        p(22),
+                    );
+                    let knob = if self.word_wrap {
+                        area.right - p(22)
+                    } else {
+                        x + p(3)
+                    };
+                    theme::rounded(
+                        dc,
+                        rect(knob, y + p(3), knob + p(16), y + p(19)),
+                        theme::WHITE,
+                        theme::WHITE,
+                        p(16),
+                    );
+                    return;
+                }
+            }
             if draw.hwndItem == self.status {
-                theme::fill(dc, area, theme::BAR);
-                theme::line(dc, &[(0, 0), (area.right, 0)], theme::BORDER, 1);
+                theme::fill(dc, area, self.theme.colors.bar);
+                theme::line(dc, &[(0, 0), (area.right, 0)], self.theme.colors.border, 1);
                 if self.dragging.is_some() {
                     theme::text(
                         dc,
@@ -632,9 +791,9 @@ impl View {
                         rect(p(12), 0, area.right - p(8), area.bottom),
                         self.theme.small,
                         if self.drop_target.is_some() {
-                            theme::BLUE
+                            self.theme.colors.blue
                         } else {
-                            theme::MUTED
+                            self.theme.colors.muted
                         },
                         DT_LEFT,
                     );
@@ -647,13 +806,13 @@ impl View {
                         .get(tab.id)
                         .map(|n| n.title.as_str())
                         .unwrap_or("");
-                    theme::document(dc, p(18), p(10), p(16), theme::MUTED);
+                    theme::document(dc, p(18), p(10), p(16), self.theme.colors.muted);
                     theme::text(
                         dc,
                         title,
                         rect(p(44), 0, p(182).min(area.right / 3), area.bottom),
                         self.theme.small,
-                        theme::INK,
+                        self.theme.colors.ink,
                         DT_LEFT,
                     );
                     if area.right > p(660) {
@@ -662,7 +821,7 @@ impl View {
                             &self.status_text,
                             rect(p(190), 0, area.right - p(420), area.bottom),
                             self.theme.small,
-                            theme::MUTED,
+                            self.theme.colors.muted,
                             DT_LEFT,
                         );
                     }
@@ -686,7 +845,7 @@ impl View {
                             area.bottom,
                         ),
                         self.theme.small,
-                        theme::MUTED,
+                        self.theme.colors.muted,
                         DT_RIGHT,
                     );
                 } else {
@@ -695,7 +854,7 @@ impl View {
                         "Edot   ·   Plain Text",
                         rect(p(18), 0, area.right, area.bottom),
                         self.theme.small,
-                        theme::MUTED,
+                        self.theme.colors.muted,
                         DT_LEFT,
                     );
                 }
@@ -718,24 +877,24 @@ impl View {
                     if hovered || pressed {
                         theme::rgb(25, 99, 220)
                     } else {
-                        theme::BLUE
+                        self.theme.colors.blue
                     }
                 } else if checked || pressed {
-                    theme::SELECTED
+                    self.theme.colors.selected
                 } else if hovered {
-                    theme::HOVER
+                    self.theme.colors.hover
                 } else {
-                    theme::WHITE
+                    self.theme.colors.white
                 };
-                theme::fill(dc, area, theme::WHITE);
+                theme::fill(dc, area, self.theme.colors.white);
                 theme::rounded(
                     dc,
                     rect(1, 1, area.right - 1, area.bottom - 1),
                     color,
                     if focused {
-                        theme::BLUE
+                        self.theme.colors.blue
                     } else if index == 4 {
-                        theme::BORDER
+                        self.theme.colors.border
                     } else {
                         color
                     },
@@ -753,11 +912,11 @@ impl View {
                                 (cx, cy + direction * p(2)),
                                 (cx + p(4), cy - direction * p(2)),
                             ],
-                            theme::INK,
+                            self.theme.colors.ink,
                             p(1),
                         );
                     }
-                    3 => theme::close(dc, cx - p(4), cy - p(4), p(8), theme::MUTED),
+                    3 => theme::close(dc, cx - p(4), cy - p(4), p(8), self.theme.colors.muted),
                     _ => theme::text(
                         dc,
                         match index {
@@ -770,36 +929,42 @@ impl View {
                         if primary {
                             theme::WHITE
                         } else if checked {
-                            theme::BLUE
+                            self.theme.colors.blue
                         } else {
-                            theme::INK
+                            self.theme.colors.ink
                         },
                         DT_CENTER,
                     ),
                 }
                 return;
             }
-            let base = if (draw.hwndItem != self.toggle && draw.hwndItem != self.add)
+            let base = if self
+                .settings_panel
+                .is_some_and(|panel| draw.hwndItem == panel.close)
+            {
+                self.theme.colors.white
+            } else if (draw.hwndItem != self.toggle && draw.hwndItem != self.add)
                 || !self.sidebar_visible
             {
-                theme::BAR
+                self.theme.colors.bar
             } else {
-                theme::SIDEBAR
+                self.theme.colors.sidebar
             };
             theme::fill(dc, area, base);
-            let color = if pressed {
-                theme::SELECTED
-            } else if hovered {
-                theme::HOVER
-            } else if draw.hwndItem == self.add {
-                theme::WHITE
-            } else {
-                base
-            };
+            let color =
+                if pressed || (draw.hwndItem == self.settings_button && self.settings_visible) {
+                    self.theme.colors.selected
+                } else if hovered {
+                    self.theme.colors.hover
+                } else if draw.hwndItem == self.add {
+                    self.theme.colors.white
+                } else {
+                    base
+                };
             let border = if focused {
-                theme::BLUE
+                self.theme.colors.blue
             } else if draw.hwndItem == self.add {
-                theme::BORDER
+                self.theme.colors.border
             } else {
                 color
             };
@@ -811,14 +976,28 @@ impl View {
                 p(6),
             );
             if draw.hwndItem == self.add {
-                theme::plus(dc, p(12), (area.bottom - p(12)) / 2, p(12), theme::INK);
+                theme::plus(
+                    dc,
+                    p(12),
+                    (area.bottom - p(12)) / 2,
+                    p(12),
+                    self.theme.colors.ink,
+                );
                 theme::text(
                     dc,
                     "새 메모",
                     rect(p(34), 0, area.right - p(8), area.bottom),
                     self.theme.ui,
-                    theme::INK,
+                    self.theme.colors.ink,
                     DT_LEFT,
+                );
+            } else if draw.hwndItem == self.settings_button {
+                theme::gear(
+                    dc,
+                    (area.right - p(18)) / 2,
+                    (area.bottom - p(18)) / 2,
+                    p(18),
+                    self.theme.colors.ink,
                 );
             } else if draw.hwndItem == self.tab_add {
                 theme::plus(
@@ -826,7 +1005,7 @@ impl View {
                     (area.right - p(14)) / 2,
                     (area.bottom - p(14)) / 2,
                     p(14),
-                    theme::INK,
+                    self.theme.colors.ink,
                 );
             } else if draw.hwndItem != self.toggle {
                 let mut label = [0u16; 64];
@@ -836,7 +1015,7 @@ impl View {
                     &String::from_utf16_lossy(&label[..n]),
                     area,
                     self.theme.small,
-                    theme::INK,
+                    self.theme.colors.ink,
                     DT_CENTER,
                 );
             } else {
@@ -856,7 +1035,7 @@ impl View {
                     theme::line(
                         dc,
                         &[(edge, cy - step), (tip, cy), (edge, cy + step)],
-                        theme::INK,
+                        self.theme.colors.ink,
                         p(1),
                     );
                 }

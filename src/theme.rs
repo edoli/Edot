@@ -15,8 +15,52 @@ pub const BLUE: COLORREF = rgb(38, 116, 245);
 pub const SELECTED: COLORREF = rgb(221, 235, 255);
 pub const HOVER: COLORREF = rgb(232, 237, 244);
 
+#[derive(Clone, Copy)]
+pub struct Colors {
+    pub white: COLORREF,
+    pub sidebar: COLORREF,
+    pub bar: COLORREF,
+    pub border: COLORREF,
+    pub ink: COLORREF,
+    pub muted: COLORREF,
+    pub blue: COLORREF,
+    pub selected: COLORREF,
+    pub hover: COLORREF,
+}
+impl Colors {
+    fn new(dark: bool) -> Self {
+        if dark {
+            Self {
+                white: rgb(30, 33, 39),
+                sidebar: rgb(24, 27, 33),
+                bar: rgb(21, 24, 29),
+                border: rgb(62, 68, 80),
+                ink: rgb(229, 233, 240),
+                muted: rgb(159, 171, 190),
+                blue: rgb(107, 164, 255),
+                selected: rgb(43, 65, 98),
+                hover: rgb(45, 50, 60),
+            }
+        } else {
+            Self {
+                white: WHITE,
+                sidebar: SIDEBAR,
+                bar: BAR,
+                border: BORDER,
+                ink: INK,
+                muted: MUTED,
+                blue: BLUE,
+                selected: SELECTED,
+                hover: HOVER,
+            }
+        }
+    }
+}
+
 pub struct Theme {
     pub dpi: u32,
+    pub dark: bool,
+    pub colors: Colors,
     pub ui: HFONT,
     pub tab: HFONT,
     pub editor: HFONT,
@@ -27,8 +71,9 @@ pub struct Theme {
 }
 
 impl Theme {
-    pub unsafe fn new(dpi: u32) -> Self {
+    pub unsafe fn new(dpi: u32, dark: bool, editor_font: &str) -> Self {
         let dpi = dpi.max(96);
+        let colors = Colors::new(dark);
         let font = |name: &str, size: i32, weight: i32| {
             let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
             unsafe {
@@ -52,13 +97,15 @@ impl Theme {
         };
         Self {
             dpi,
+            dark,
+            colors,
             ui: font("Segoe UI", 15, 400),
             tab: font("Segoe UI", 13, 400),
-            editor: font("Consolas", 18, 400),
+            editor: font(editor_font, 18, 400),
             small: font("Segoe UI", 13, 400),
             heading: font("Segoe UI", 21, 600),
-            white_brush: unsafe { CreateSolidBrush(WHITE) },
-            sidebar_brush: unsafe { CreateSolidBrush(SIDEBAR) },
+            white_brush: unsafe { CreateSolidBrush(colors.white) },
+            sidebar_brush: unsafe { CreateSolidBrush(colors.sidebar) },
         }
     }
     pub fn px(&self, value: i32) -> i32 {
@@ -250,5 +297,30 @@ pub unsafe fn plus(dc: HDC, x: i32, y: i32, size: i32, color: COLORREF) {
             color,
             (size / 8).max(1),
         );
+    }
+}
+
+pub unsafe fn gear(dc: HDC, x: i32, y: i32, size: i32, color: COLORREF) {
+    let cx = x + size / 2;
+    let cy = y + size / 2;
+    let radius = size as f64 / 2.0;
+    let mut points = [(0, 0); 33];
+    for (i, point) in points.iter_mut().enumerate() {
+        let angle = i as f64 * std::f64::consts::TAU / 32.0;
+        let r = radius * if i % 4 == 1 || i % 4 == 2 { 1.0 } else { 0.73 };
+        *point = (
+            cx + (r * angle.cos()).round() as i32,
+            cy + (r * angle.sin()).round() as i32,
+        );
+    }
+    unsafe {
+        line(dc, &points, color, (size / 12).max(1));
+        let saved = SaveDC(dc);
+        SelectObject(dc, GetStockObject(NULL_BRUSH));
+        SelectObject(dc, GetStockObject(DC_PEN));
+        SetDCPenColor(dc, color);
+        let r = (size / 5).max(2);
+        Ellipse(dc, cx - r, cy - r, cx + r + 1, cy + r + 1);
+        RestoreDC(dc, saved);
     }
 }
