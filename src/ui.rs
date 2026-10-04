@@ -840,17 +840,22 @@ impl View {
                     DT_CENTER,
                 );
             } else {
-                let cx = area.right / 2;
-                let cy = area.bottom / 2;
-                let direction = if self.sidebar_visible { -1 } else { 1 };
-                for offset in [-3, 3] {
+                // Use the same pixel distance on both axes to keep a 45-degree
+                // diagonal even when DPI scaling rounds the coordinates.
+                let step = p(4);
+                let spacing = p(6);
+                let left = (area.left + area.right - step - spacing) / 2;
+                let cy = (area.top + area.bottom) / 2;
+                for offset in [0, spacing] {
+                    let x = left + offset;
+                    let (edge, tip) = if self.sidebar_visible {
+                        (x + step, x)
+                    } else {
+                        (x, x + step)
+                    };
                     theme::line(
                         dc,
-                        &[
-                            (cx + p(offset) - direction * p(2), cy - p(5)),
-                            (cx + p(offset) + direction * p(2), cy),
-                            (cx + p(offset) - direction * p(2), cy + p(5)),
-                        ],
+                        &[(edge, cy - step), (tip, cy), (edge, cy + step)],
                         theme::INK,
                         p(1),
                     );

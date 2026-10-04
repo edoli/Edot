@@ -1720,6 +1720,13 @@ impl App {
     }
 
     unsafe fn rename_selected(&self) {
+        let editor = unsafe { SendMessageW(self.tree, TVM_GETEDITCONTROL, 0, 0) } as HWND;
+        if !editor.is_null() {
+            unsafe {
+                SetFocus(editor);
+            }
+            return;
+        }
         let handle = unsafe { SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0) };
         if handle != 0 {
             unsafe {
@@ -1727,6 +1734,38 @@ impl App {
                 SendMessageW(self.tree, TVM_EDITLABELW, 0, handle);
                 PostMessageW(self.hwnd, POSITION_RENAME, 0, 0);
             }
+        }
+    }
+
+    unsafe fn rename_from_focus(&mut self, focus: HWND) {
+        unsafe {
+            if SendMessageW(self.tree, TVM_GETEDITCONTROL, 0, 0) != 0 {
+                self.rename_selected();
+                return;
+            }
+            let target = if focus == self.tree || IsChild(self.tree, focus) != 0 {
+                self.selected_id()
+            } else {
+                self.active.map(|index| self.open[index].id)
+            };
+            let Some(id) = target else {
+                return;
+            };
+            let Some((&handle, _)) = self.handles.iter().find(|&(_, &value)| value == id) else {
+                return;
+            };
+            self.tooltip.hide();
+            if !self.sidebar_visible {
+                self.sidebar_visible = true;
+                self.layout();
+            }
+            SendMessageW(self.tree, TVM_SELECTITEM, TVGN_CARET as usize, handle);
+            SendMessageW(self.tree, TVM_ENSUREVISIBLE, 0, handle);
+            if self.refresh_tree_visibility() {
+                self.layout();
+            }
+            InvalidateRect(self.tree_scroll, null(), 0);
+            self.rename_selected();
         }
     }
 
@@ -2312,15 +2351,20 @@ impl App {
                     self.layout();
                 }
             }
-            ID_ADD | MENU_NEW_CHILD => {
+            ID_ADD | ID_TAB_ADD => {
+                let parent = unsafe { self.selected_id() }
+                    .and_then(|id| self.book.get(id))
+                    .map_or(0, |note| note.parent);
+                unsafe {
+                    self.create_note(parent);
+                }
+            }
+            MENU_NEW_CHILD => {
                 let parent = unsafe { self.selected_id() }.unwrap_or(0);
                 unsafe {
                     self.create_note(parent);
                 }
             }
-            ID_TAB_ADD => unsafe {
-                self.create_note(0);
-            },
             MENU_NEW_ROOT => unsafe {
                 self.create_note(0);
             },
@@ -2862,8 +2906,7 @@ fn shortcut(msg: &MSG) -> bool {
             );
             handled = true;
         } else if ctrl && key == b'N' as u32 {
-            let parent = app.selected_id().unwrap_or(0);
-            app.create_note(parent);
+            app.command(ID_ADD, 0);
             handled = true;
         } else if ctrl && key == b'S' as u32 {
             app.save_all();
@@ -2904,8 +2947,8 @@ fn shortcut(msg: &MSG) -> bool {
                 app.edit
             });
             handled = true;
-        } else if key == VK_F2 as u32 && msg.hwnd == app.tree {
-            app.rename_selected();
+        } else if key == VK_F2 as u32 {
+            app.rename_from_focus(msg.hwnd);
             handled = true;
         } else if key == VK_DELETE as u32 && msg.hwnd == app.tree {
             app.delete_selected();
