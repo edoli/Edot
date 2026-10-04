@@ -1,3 +1,4 @@
+use crate::drag::{DropTarget, DropZone};
 use crate::model::Notebook;
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme, rect};
@@ -8,6 +9,7 @@ use std::rc::Rc;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::UI::Controls::*;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Clone)]
@@ -41,6 +43,16 @@ pub struct View {
     pub visible: Rc<Vec<isize>>,
     pub find_visible: bool,
     pub replace_visible: bool,
+    pub resizing: bool,
+    pub tree_hover: Option<isize>,
+    pub dragging: Option<u64>,
+    pub drop_target: Option<DropTarget>,
+    pub search_host: HWND,
+    pub find_input: HWND,
+    pub replace_input: HWND,
+    pub search_buttons: [HWND; 6],
+    pub find_case_sensitive: bool,
+    pub find_message: String,
 }
 thread_local! {
     static VIEW: RefCell<Option<View>> = const {RefCell::new(None)};
@@ -150,6 +162,75 @@ pub unsafe fn paint_window(hwnd: HWND, draw: impl FnOnce(HDC)) {
     }
 }
 impl View {
+    pub unsafe fn splitter_hit(&self, point: POINT) -> bool {
+        let mut area = RECT::default();
+        unsafe {
+            GetClientRect(self.hwnd, &mut area);
+        }
+        self.sidebar_visible
+            && point.y > self.theme.px(36)
+            && point.y < area.bottom
+            && (point.x - self.sidebar_edge(area.right)).abs() <= self.theme.px(4)
+    }
+
+    fn drag_description(&self) -> String {
+        let source = self
+            .dragging
+            .and_then(|id| self.book.get(id))
+            .map(|n| n.title.as_str())
+            .unwrap_or("");
+        let action = match self.drop_target {
+            Some(target) => {
+                let title = target
+                    .note
+                    .and_then(|id| self.book.get(id))
+                    .map(|n| n.title.as_str())
+                    .unwrap_or("");
+                match target.zone {
+                    DropZone::Before => format!("{title} 위에 놓기"),
+                    DropZone::After => format!("{title} 아래에 놓기"),
+                    DropZone::Inside => format!("{title}의 하위로 이동"),
+                    DropZone::Root => "최상위로 이동".to_owned(),
+                }
+            }
+            None => "이 위치에는 놓을 수 없습니다".to_owned(),
+        };
+        format!("{source} → {action}   ·   Esc: 취소")
+    }
+
+    pub unsafe fn paint_drag_feedback(&self, dc: HDC) {
+        if !matches!(
+            self.drop_target,
+            Some(DropTarget {
+                zone: DropZone::Root,
+                ..
+            })
+        ) {
+            return;
+        }
+        unsafe {
+            let p = |n| self.theme.px(n);
+            let mut area = RECT::default();
+            GetClientRect(GetParent(self.tree), &mut area);
+            let last = SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_LASTVISIBLE as usize, 0);
+            let mut row = RECT::default();
+            *(&mut row as *mut RECT as *mut HTREEITEM) = last;
+            if last != 0 {
+                SendMessageW(self.tree, TVM_GETITEMRECT, 0, &mut row as *mut _ as isize);
+            }
+            let top = (row.bottom + p(4)).min((area.bottom - p(32)).max(0));
+            let banner = rect(p(2), top, area.right - p(2), top + p(29));
+            theme::rounded(dc, banner, theme::SELECTED, theme::BLUE, p(6));
+            theme::text(
+                dc,
+                "＋ 최상위로 이동",
+                banner,
+                self.theme.small,
+                theme::BLUE,
+                DT_CENTER,
+            );
+        }
+    }
     pub unsafe fn paint_tree_scroll(&self, dc: HDC) {
         unsafe {
             let mut area = RECT::default();
@@ -177,10 +258,9 @@ impl View {
     }
     fn sidebar_edge(&self, width: i32) -> i32 {
         if self.sidebar_visible {
-            self.theme.px(self.sidebar_width).min(
-                (width - self.theme.px(if self.find_visible { 340 } else { 220 }))
-                    .max(self.theme.px(150)),
-            )
+            self.theme
+                .px(self.sidebar_width)
+                .min((width - self.theme.px(220)).max(self.theme.px(150)))
         } else {
             0
         }
@@ -203,34 +283,6 @@ impl View {
                 theme::fill(dc, rect(0, 0, edge, area.bottom), theme::SIDEBAR);
                 theme::line(dc, &[(edge, 0), (edge, area.bottom)], theme::BORDER, 1);
             }
-            if self.find_visible {
-                let bottom = if self.replace_visible { p(116) } else { p(76) };
-                theme::fill(dc, rect(edge + 1, p(36), area.right, bottom), theme::BAR);
-                theme::text(
-                    dc,
-                    "검색",
-                    rect(edge + p(20), p(36), edge + p(66), p(76)),
-                    self.theme.small,
-                    theme::MUTED,
-                    DT_LEFT,
-                );
-                if self.replace_visible {
-                    theme::text(
-                        dc,
-                        "바꾸기",
-                        rect(edge + p(16), p(76), edge + p(70), p(116)),
-                        self.theme.small,
-                        theme::MUTED,
-                        DT_LEFT,
-                    );
-                }
-                theme::line(
-                    dc,
-                    &[(edge + 1, bottom - 1), (area.right, bottom - 1)],
-                    theme::BORDER,
-                    1,
-                );
-            }
             if self.active.is_none() {
                 let cx = edge + (area.right - edge) / 2;
                 let cy = area.bottom / 2 - p(40);
@@ -252,6 +304,71 @@ impl View {
                     DT_CENTER,
                 );
             }
+        }
+    }
+
+    pub unsafe fn paint_search(&self, dc: HDC) {
+        unsafe {
+            let p = |n| self.theme.px(n);
+            let mut area = RECT::default();
+            GetClientRect(self.search_host, &mut area);
+            theme::fill(dc, area, theme::WHITE);
+            if !self.find_visible {
+                return;
+            }
+            theme::rounded(
+                dc,
+                rect(p(3), p(4), area.right, area.bottom),
+                theme::rgb(232, 236, 242),
+                theme::rgb(232, 236, 242),
+                p(12),
+            );
+            theme::rounded(
+                dc,
+                rect(0, 0, area.right - p(3), area.bottom - p(4)),
+                theme::WHITE,
+                theme::rgb(207, 215, 227),
+                p(12),
+            );
+            if area.right > p(250) {
+                theme::text(
+                    dc,
+                    if self.replace_visible {
+                        "찾기 및 바꾸기"
+                    } else {
+                        "찾기"
+                    },
+                    rect(p(16), p(6), area.right - p(154), p(38)),
+                    self.theme.ui,
+                    theme::INK,
+                    DT_LEFT,
+                );
+            }
+            for (field, top) in [(self.find_input, 42), (self.replace_input, 88)] {
+                if field == self.replace_input && !self.replace_visible {
+                    continue;
+                }
+                theme::rounded(
+                    dc,
+                    rect(p(16), p(top), area.right - p(20), p(top + 34)),
+                    theme::WHITE,
+                    if GetFocus() == field {
+                        theme::BLUE
+                    } else {
+                        theme::BORDER
+                    },
+                    p(7),
+                );
+            }
+            let message_y = if self.replace_visible { 174 } else { 84 };
+            theme::text(
+                dc,
+                &self.find_message,
+                rect(p(16), p(message_y), area.right - p(20), p(message_y + 24)),
+                self.theme.small,
+                theme::MUTED,
+                DT_LEFT,
+            );
         }
     }
 
@@ -369,13 +486,27 @@ impl View {
             area.left = 0;
             area.right = client.right;
             theme::fill(dc, area, theme::SIDEBAR);
-            let selected = custom.nmcd.uItemState & (CDIS_SELECTED | CDIS_DROPHILITED) != 0;
-            if selected {
+            let selected = custom.nmcd.uItemState & CDIS_SELECTED != 0;
+            let inside = self
+                .drop_target
+                .is_some_and(|target| target.note == Some(id) && target.zone == DropZone::Inside);
+            let hovered = self.dragging.is_none() && self.tree_hover == Some(handle);
+            if selected || inside || hovered {
                 theme::rounded(
                     dc,
                     rect(2, area.top + 1, area.right - 2, area.bottom - 1),
-                    theme::SELECTED,
-                    theme::SELECTED,
+                    if selected || inside {
+                        theme::SELECTED
+                    } else {
+                        theme::HOVER
+                    },
+                    if inside {
+                        theme::BLUE
+                    } else if selected {
+                        theme::SELECTED
+                    } else {
+                        theme::HOVER
+                    },
                     p(6),
                 );
             }
@@ -458,9 +589,30 @@ impl View {
                     theme::fill(
                         dc,
                         rect(gx, gy, gx + p(2), gy + p(2)),
-                        theme::rgb(157, 170, 189),
+                        if self.dragging == Some(id) {
+                            theme::BLUE
+                        } else {
+                            theme::rgb(157, 170, 189)
+                        },
                     );
                 }
+            }
+            if let Some(target) = self.drop_target.filter(|target| target.note == Some(id))
+                && matches!(target.zone, DropZone::Before | DropZone::After)
+            {
+                let y = if target.zone == DropZone::Before {
+                    area.top + p(1)
+                } else {
+                    area.bottom - p(2)
+                };
+                theme::line(dc, &[(x, y), (area.right - p(4), y)], theme::BLUE, p(2));
+                theme::rounded(
+                    dc,
+                    rect(x - p(3), y - p(3), x + p(3), y + p(3)),
+                    theme::BLUE,
+                    theme::BLUE,
+                    p(6),
+                );
             }
         }
     }
@@ -473,6 +625,21 @@ impl View {
             if draw.hwndItem == self.status {
                 theme::fill(dc, area, theme::BAR);
                 theme::line(dc, &[(0, 0), (area.right, 0)], theme::BORDER, 1);
+                if self.dragging.is_some() {
+                    theme::text(
+                        dc,
+                        &self.drag_description(),
+                        rect(p(12), 0, area.right - p(8), area.bottom),
+                        self.theme.small,
+                        if self.drop_target.is_some() {
+                            theme::BLUE
+                        } else {
+                            theme::MUTED
+                        },
+                        DT_LEFT,
+                    );
+                    return;
+                }
                 if let Some(index) = self.active {
                     let tab = &self.open[index];
                     let title = self
@@ -540,6 +707,78 @@ impl View {
             let hovered = PtInRect(&area, mouse) != 0;
             let pressed = draw.itemState & ODS_SELECTED != 0;
             let focused = draw.itemState & ODS_FOCUS != 0;
+            if let Some(index) = self
+                .search_buttons
+                .iter()
+                .position(|&button| button == draw.hwndItem)
+            {
+                let checked = index == 0 && self.find_case_sensitive;
+                let primary = index == 5;
+                let color = if primary {
+                    if hovered || pressed {
+                        theme::rgb(25, 99, 220)
+                    } else {
+                        theme::BLUE
+                    }
+                } else if checked || pressed {
+                    theme::SELECTED
+                } else if hovered {
+                    theme::HOVER
+                } else {
+                    theme::WHITE
+                };
+                theme::fill(dc, area, theme::WHITE);
+                theme::rounded(
+                    dc,
+                    rect(1, 1, area.right - 1, area.bottom - 1),
+                    color,
+                    if focused {
+                        theme::BLUE
+                    } else if index == 4 {
+                        theme::BORDER
+                    } else {
+                        color
+                    },
+                    p(6),
+                );
+                let cx = area.right / 2;
+                let cy = area.bottom / 2;
+                match index {
+                    1 | 2 => {
+                        let direction = if index == 1 { -1 } else { 1 };
+                        theme::line(
+                            dc,
+                            &[
+                                (cx - p(4), cy - direction * p(2)),
+                                (cx, cy + direction * p(2)),
+                                (cx + p(4), cy - direction * p(2)),
+                            ],
+                            theme::INK,
+                            p(1),
+                        );
+                    }
+                    3 => theme::close(dc, cx - p(4), cy - p(4), p(8), theme::MUTED),
+                    _ => theme::text(
+                        dc,
+                        match index {
+                            0 => "Aa",
+                            4 => "바꾸기",
+                            _ => "모두 바꾸기",
+                        },
+                        area,
+                        self.theme.small,
+                        if primary {
+                            theme::WHITE
+                        } else if checked {
+                            theme::BLUE
+                        } else {
+                            theme::INK
+                        },
+                        DT_CENTER,
+                    ),
+                }
+                return;
+            }
             let base = if (draw.hwndItem != self.toggle && draw.hwndItem != self.add)
                 || !self.sidebar_visible
             {

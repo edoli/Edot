@@ -1,6 +1,8 @@
+use crate::drag::{DropTarget, DropZone};
 use crate::model::{Notebook, replace_file};
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme};
+use crate::tooltip::Tooltip;
 use crate::{editing, startup, ui};
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -50,6 +52,7 @@ const MENU_UP: usize = 205;
 const MENU_DOWN: usize = 206;
 const MENU_OUTDENT: usize = 207;
 const AUTOSAVE_TIMER: usize = 1;
+const DRAG_SCROLL_TIMER: usize = 2;
 const POSITION_RENAME: u32 = WM_APP + 1;
 const REFRESH_UI: u32 = WM_APP + 2;
 
@@ -96,6 +99,8 @@ struct App {
     tab_hover: Cell<Option<(usize, bool)>>,
     tab_drag: bool,
     tree_scroll_drag: bool,
+    tooltip: Tooltip,
+    search_host: HWND,
     find_input: HWND,
     find_prev: HWND,
     find_next: HWND,
@@ -106,6 +111,8 @@ struct App {
     replace_all: HWND,
     find_visible: bool,
     replace_visible: bool,
+    find_case_sensitive: bool,
+    find_message: String,
     last_query: String,
     last_match: Option<editing::CharRange>,
     status_text: RefCell<String>,
@@ -120,6 +127,8 @@ struct App {
     sidebar_visible: bool,
     resizing: bool,
     dragging: Option<u64>,
+    tree_hover: Option<isize>,
+    drop_target: Option<DropTarget>,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -260,6 +269,7 @@ unsafe extern "system" fn tab_subclass(
                     if hover != app.tab_hover.replace(hover) {
                         InvalidateRect(hwnd, null(), 0);
                     }
+                    app.hover_tab_tooltip(point_x(lp), point_y(lp));
                 });
                 let mut track = TRACKMOUSEEVENT {
                     cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -272,6 +282,7 @@ unsafe extern "system" fn tab_subclass(
             }
             WM_MOUSELEAVE => {
                 with_app(|app| {
+                    app.tooltip.leave(hwnd);
                     if app.tab_hover.replace(None).is_some() {
                         InvalidateRect(hwnd, null(), 0);
                     }
@@ -291,6 +302,33 @@ unsafe extern "system" fn tab_subclass(
             WM_GETDLGCODE => return DLGC_WANTARROWS as isize,
             WM_NCDESTROY => {
                 RemoveWindowSubclass(hwnd, Some(tab_subclass), id);
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+unsafe extern "system" fn search_host_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    _: usize,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_COMMAND | WM_DRAWITEM | WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC | WM_NOTIFY => {
+                return SendMessageW(GetParent(hwnd), msg, wp, lp);
+            }
+            WM_ERASEBKGND => return 1,
+            WM_PAINT => {
+                ui::paint_window(hwnd, |dc| ui::with_view(|view| view.paint_search(dc)));
+                return 0;
+            }
+            WM_NCDESTROY => {
+                RemoveWindowSubclass(hwnd, Some(search_host_proc), id);
             }
             _ => {}
         }
@@ -372,6 +410,7 @@ unsafe extern "system" fn tree_subclass(
                 GetClientRect(hwnd, &mut area);
                 theme::fill(dc, area, theme::SIDEBAR);
                 DefSubclassProc(hwnd, WM_PRINTCLIENT, dc as usize, PRF_CLIENT as isize);
+                ui::with_view(|view| view.paint_drag_feedback(dc));
             });
             ui::with_view(|v| {
                 InvalidateRect(v.tree_scroll, null(), 0);
@@ -383,8 +422,43 @@ unsafe extern "system" fn tree_subclass(
             with_app(|app| app.scroll_tree(-delta / 40));
             return 0;
         }
+        if msg == WM_MOUSEMOVE {
+            let mut tracking = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                ..Default::default()
+            };
+            TrackMouseEvent(&mut tracking);
+            with_app(|app| {
+                let hovered = app.hit_tree().map(|(_, _, handle)| handle);
+                if app.tree_hover != hovered {
+                    app.tree_hover = hovered;
+                    app.publish_view();
+                    RedrawWindow(
+                        hwnd,
+                        null(),
+                        null_mut(),
+                        RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE,
+                    );
+                }
+                app.hover_tree_tooltip();
+            });
+        }
+        if msg == WM_MOUSELEAVE {
+            with_app(|app| {
+                app.tooltip.leave(hwnd);
+                if app.tree_hover.take().is_some() {
+                    app.publish_view();
+                    InvalidateRect(hwnd, null(), 0);
+                }
+            });
+        }
         if msg == WM_NCDESTROY {
             RemoveWindowSubclass(hwnd, Some(tree_subclass), id);
+        }
+        if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
+            with_app(|app| app.tooltip.hide());
         }
         let result = DefSubclassProc(hwnd, msg, wp, lp);
         if msg == WM_KEYDOWN {
@@ -462,6 +536,9 @@ unsafe extern "system" fn control_subclass(
             with_app(|app| app.editor_menu());
             return 0;
         }
+        if reference == 3 && matches!(msg, WM_SETFOCUS | WM_KILLFOCUS) {
+            InvalidateRect(GetParent(hwnd), null(), 0);
+        }
 
         if reference == 1 && msg == WM_MOUSEMOVE {
             let mut tracking = TRACKMOUSEEVENT {
@@ -477,6 +554,26 @@ unsafe extern "system" fn control_subclass(
             InvalidateRect(hwnd, null(), 0);
         }
         let result = DefSubclassProc(hwnd, msg, wp, lp);
+        if reference == 3 && msg == WM_PAINT && GetWindowTextLengthW(hwnd) == 0 {
+            let dc = GetDC(hwnd);
+            ui::with_view(|view| {
+                let mut area = RECT::default();
+                GetClientRect(hwnd, &mut area);
+                theme::text(
+                    dc,
+                    if hwnd == view.find_input {
+                        "찾을 내용"
+                    } else {
+                        "바꿀 내용"
+                    },
+                    area,
+                    view.theme.ui,
+                    theme::rgb(146, 156, 174),
+                    DT_LEFT,
+                );
+            });
+            ReleaseDC(hwnd, dc);
+        }
         if reference == 2 && matches!(msg, WM_KEYUP | WM_LBUTTONUP) {
             with_app(|app| {
                 InvalidateRect(app.status, null(), 0);
@@ -538,7 +635,8 @@ impl App {
                     | TVS_EDITLABELS
                     | TVS_FULLROWSELECT
                     | TVS_NOHSCROLL
-                    | TVS_SHOWSELALWAYS,
+                    | TVS_SHOWSELALWAYS
+                    | TVS_NOTOOLTIPS,
                 0,
                 ID_TREE,
             )
@@ -598,30 +696,43 @@ impl App {
         unsafe {
             SetWindowSubclass(tree_scroll, Some(scroll_subclass), 1, 0);
         }
-        let search_style = WS_CHILD | WS_CLIPSIBLINGS;
-        let find_input = unsafe {
+        let search_host = unsafe {
             child(
                 hwnd,
+                wide("STATIC").as_ptr(),
+                "찾기 및 바꾸기",
+                WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                0,
+                118,
+            )
+        };
+        unsafe {
+            SetWindowSubclass(search_host, Some(search_host_proc), 1, 0);
+        }
+        let search_style = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS;
+        let find_input = unsafe {
+            child(
+                search_host,
                 wide("EDIT").as_ptr(),
                 "",
                 search_style | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-                WS_EX_CLIENTEDGE,
+                0,
                 ID_FIND,
             )
         };
         let replace_input = unsafe {
             child(
-                hwnd,
+                search_host,
                 wide("EDIT").as_ptr(),
                 "",
                 search_style | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-                WS_EX_CLIENTEDGE,
+                0,
                 ID_REPLACE_INPUT,
             )
         };
         let button = |label: &str, id| unsafe {
             child(
-                hwnd,
+                search_host,
                 wide("BUTTON").as_ptr(),
                 label,
                 search_style | WS_TABSTOP | BS_OWNERDRAW as u32,
@@ -632,21 +743,22 @@ impl App {
         let find_prev = button("이전", ID_FIND_PREV);
         let find_next = button("다음", ID_FIND_NEXT);
         let find_close = button("닫기", ID_FIND_CLOSE);
-        let find_case = unsafe {
-            child(
-                hwnd,
-                wide("BUTTON").as_ptr(),
-                "대소문자",
-                search_style | WS_TABSTOP | BS_AUTOCHECKBOX as u32,
-                0,
-                ID_FIND_CASE,
-            )
-        };
+        let find_case = button("대소문자 구분", ID_FIND_CASE);
         let replace_one = button("바꾸기", ID_REPLACE_ONE);
         let replace_all = button("모두 바꾸기", ID_REPLACE_ALL);
         unsafe {
-            for button in [find_prev, find_next, find_close, replace_one, replace_all] {
+            for button in [
+                find_prev,
+                find_next,
+                find_close,
+                find_case,
+                replace_one,
+                replace_all,
+            ] {
                 SetWindowSubclass(button, Some(control_subclass), 1, 1);
+            }
+            for field in [find_input, replace_input] {
+                SetWindowSubclass(field, Some(control_subclass), 1, 3);
             }
         }
         drop(controls_timing);
@@ -674,6 +786,8 @@ impl App {
             tab_hover: Cell::new(None),
             tab_drag: false,
             tree_scroll_drag: false,
+            tooltip: unsafe { Tooltip::new(hwnd) },
+            search_host,
             find_input,
             find_prev,
             find_next,
@@ -684,6 +798,8 @@ impl App {
             replace_all,
             find_visible: false,
             replace_visible: false,
+            find_case_sensitive: false,
+            find_message: "Enter로 다음 결과를 찾습니다".into(),
             last_query: String::new(),
             last_match: None,
             status_text: RefCell::new("준비됨".into()),
@@ -698,6 +814,8 @@ impl App {
             sidebar_visible: true,
             resizing: false,
             dragging: None,
+            tree_hover: None,
+            drop_target: None,
         };
         unsafe {
             app.publish_view();
@@ -800,6 +918,10 @@ impl App {
             ] {
                 SendMessageW(item, WM_SETFONT, self.theme.small as usize, 0);
             }
+            for field in [self.find_input, self.replace_input] {
+                SendMessageW(field, WM_SETFONT, self.theme.ui as usize, 0);
+            }
+            self.tooltip.style(self.theme.small, self.theme.px(420));
             SendMessageW(self.tree, TVM_SETBKCOLOR, 0, theme::SIDEBAR as LPARAM);
             SendMessageW(self.tree, TVM_SETTEXTCOLOR, 0, theme::INK as LPARAM);
             SendMessageW(self.tree, TVM_SETITEMHEIGHT, self.theme.px(29) as usize, 0);
@@ -809,10 +931,9 @@ impl App {
 
     fn sidebar_edge(&self, width: i32) -> i32 {
         if self.sidebar_visible {
-            self.theme.px(self.sidebar_width).min(
-                (width - self.theme.px(if self.find_visible { 340 } else { 220 }))
-                    .max(self.theme.px(150)),
-            )
+            self.theme
+                .px(self.sidebar_width)
+                .min((width - self.theme.px(220)).max(self.theme.px(150)))
         } else {
             0
         }
@@ -850,6 +971,23 @@ impl App {
             visible: Rc::clone(&self.visible),
             find_visible: self.find_visible,
             replace_visible: self.replace_visible,
+            resizing: self.resizing,
+            tree_hover: self.tree_hover,
+            dragging: self.dragging,
+            drop_target: self.drop_target,
+            search_host: self.search_host,
+            find_input: self.find_input,
+            replace_input: self.replace_input,
+            search_buttons: [
+                self.find_case,
+                self.find_prev,
+                self.find_next,
+                self.find_close,
+                self.replace_one,
+                self.replace_all,
+            ],
+            find_case_sensitive: self.find_case_sensitive,
+            find_message: self.find_message.clone(),
         });
     }
     fn sync_tree_view(&mut self) {
@@ -904,13 +1042,7 @@ impl App {
             }
             self.tab_layout.set(tabs);
             self.publish_view();
-            let extra = if self.find_visible {
-                if self.replace_visible { p(80) } else { p(40) }
-            } else {
-                0
-            };
-            let editor_y = p(58) + extra;
-            let search_width = (w - content_x - p(280)).max(p(60));
+            let editor_y = p(58);
             let mut positions = vec![
                 (
                     self.toggle,
@@ -966,56 +1098,6 @@ impl App {
                     (w - content_x).max(0),
                     p(32),
                 ),
-                (
-                    self.find_input,
-                    content_x + p(64),
-                    p(43),
-                    search_width,
-                    p(25),
-                ),
-                (
-                    self.find_prev,
-                    content_x + p(72) + search_width,
-                    p(42),
-                    p(36),
-                    p(27),
-                ),
-                (
-                    self.find_next,
-                    content_x + p(112) + search_width,
-                    p(42),
-                    p(36),
-                    p(27),
-                ),
-                (
-                    self.find_case,
-                    content_x + p(156) + search_width,
-                    p(42),
-                    p(72),
-                    p(27),
-                ),
-                (self.find_close, w - p(43), p(42), p(35), p(27)),
-                (
-                    self.replace_input,
-                    content_x + p(64),
-                    p(83),
-                    search_width,
-                    p(25),
-                ),
-                (
-                    self.replace_one,
-                    content_x + p(72) + search_width,
-                    p(82),
-                    p(64),
-                    p(27),
-                ),
-                (
-                    self.replace_all,
-                    content_x + p(140) + search_width,
-                    p(82),
-                    p(92),
-                    p(27),
-                ),
             ];
             let mut batch = BeginDeferWindowPos(positions.len() as i32);
             for (hwnd, x, y, cx, cy) in positions.drain(..) {
@@ -1042,7 +1124,7 @@ impl App {
                         y,
                         cx,
                         cy,
-                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS,
                     );
                 }
             }
@@ -1066,7 +1148,7 @@ impl App {
                     0,
                     tree_width,
                     tree_height,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS,
                 );
             }
             let visible_rows = ((h - p(70)) / p(29).max(1)).max(1) as usize;
@@ -1078,32 +1160,199 @@ impl App {
                     self.sidebar_visible && self.visible.len() > visible_rows,
                 ),
                 (self.edit, self.active.is_some()),
-                (self.find_input, self.find_visible),
-                (self.find_prev, self.find_visible),
-                (self.find_next, self.find_visible),
-                (self.find_case, self.find_visible),
-                (self.find_close, self.find_visible),
-                (
-                    self.replace_input,
-                    self.find_visible && self.replace_visible,
-                ),
-                (self.replace_one, self.find_visible && self.replace_visible),
-                (self.replace_all, self.find_visible && self.replace_visible),
             ] {
                 if (IsWindowVisible(hwnd) != 0) != show {
                     ShowWindow(hwnd, if show { SW_SHOWNA } else { SW_HIDE });
                 }
             }
+            self.layout_search();
             RedrawWindow(
                 self.hwnd,
                 null(),
                 null_mut(),
-                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE,
+                RDW_INVALIDATE
+                    | RDW_ALLCHILDREN
+                    | RDW_NOERASE
+                    | if self.resizing { RDW_UPDATENOW } else { 0 },
             );
         }
     }
+    unsafe fn layout_search(&self) {
+        unsafe {
+            self.tooltip.dismiss();
+            if !self.find_visible || self.active.is_none() {
+                if IsWindowVisible(self.search_host) != 0 {
+                    ShowWindow(self.search_host, SW_HIDE);
+                    RedrawWindow(
+                        self.edit,
+                        null(),
+                        null_mut(),
+                        RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE,
+                    );
+                }
+                return;
+            }
+            let p = |n| self.theme.px(n);
+            let mut client = RECT::default();
+            GetClientRect(self.hwnd, &mut client);
+            let left = if self.sidebar_visible {
+                self.sidebar_edge(client.right) + 1
+            } else {
+                0
+            };
+            let width = p(480).min((client.right - left - p(24)).max(0));
+            let height = p(if self.replace_visible { 210 } else { 122 });
+            SetWindowPos(
+                self.search_host,
+                HWND_TOP,
+                client.right - width - p(12),
+                p(46),
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS,
+            );
+            let positions = [
+                (self.find_input, p(22), p(48), (width - p(48)).max(0), p(24)),
+                (
+                    self.replace_input,
+                    p(22),
+                    p(94),
+                    (width - p(48)).max(0),
+                    p(24),
+                ),
+                (self.find_case, width - p(143), p(8), p(28), p(28)),
+                (self.find_prev, width - p(109), p(8), p(28), p(28)),
+                (self.find_next, width - p(75), p(8), p(28), p(28)),
+                (self.find_close, width - p(41), p(8), p(28), p(28)),
+                (
+                    self.replace_one,
+                    p(16),
+                    p(136),
+                    (width - p(128)).clamp(p(52), p(88)),
+                    p(30),
+                ),
+                (self.replace_all, width - p(110), p(136), p(94), p(30)),
+            ];
+            let mut batch = BeginDeferWindowPos(positions.len() as i32);
+            for (control, x, y, w, h) in positions {
+                if !batch.is_null() {
+                    batch = DeferWindowPos(
+                        batch,
+                        control,
+                        null_mut(),
+                        x,
+                        y,
+                        w,
+                        h,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS,
+                    );
+                }
+            }
+            if !batch.is_null() {
+                EndDeferWindowPos(batch);
+            }
+            for control in [self.replace_input, self.replace_one, self.replace_all] {
+                ShowWindow(
+                    control,
+                    if self.replace_visible {
+                        SW_SHOWNA
+                    } else {
+                        SW_HIDE
+                    },
+                );
+            }
+            ShowWindow(
+                self.search_host,
+                if self.find_visible && self.active.is_some() {
+                    SW_SHOWNA
+                } else {
+                    SW_HIDE
+                },
+            );
+            RedrawWindow(
+                self.search_host,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_NOERASE,
+            );
+            // Repaint the part of the document exposed when the panel closes or shrinks.
+            InvalidateRect(self.edit, null(), 0);
+        }
+    }
+
+    unsafe fn search_message(&mut self, message: &str) {
+        self.find_message = message.to_owned();
+        self.publish_view();
+        unsafe {
+            InvalidateRect(self.search_host, null(), 0);
+        }
+    }
+
+    unsafe fn hover_tab_tooltip(&mut self, x: i32, y: i32) {
+        unsafe {
+            if self.tab_drag || self.dragging.is_some() || y >= self.theme.px(32) {
+                self.tooltip.hide();
+                return;
+            }
+            let layout = self.tab_layout.get();
+            if let Some(index) = layout.hit(x) {
+                let (left, right) = layout.bounds(index);
+                let id = self.open[index].id;
+                if let Some(note) = self.book.get(id) {
+                    self.tooltip.hover(
+                        self.tabs,
+                        id,
+                        theme::rect(
+                            left.max(0),
+                            0,
+                            right.min(layout.viewport),
+                            self.theme.px(32),
+                        ),
+                        &note.title,
+                        POINT { x, y },
+                    );
+                    return;
+                }
+            }
+            self.tooltip.hide();
+        }
+    }
+
+    unsafe fn hover_tree_tooltip(&mut self) {
+        unsafe {
+            if self.dragging.is_some() || SendMessageW(self.tree, TVM_GETEDITCONTROL, 0, 0) != 0 {
+                self.tooltip.hide();
+                return;
+            }
+            if let Some((id, _, handle)) = self.hit_tree() {
+                let mut bounds = RECT::default();
+                *(&mut bounds as *mut RECT as *mut HTREEITEM) = handle;
+                SendMessageW(
+                    self.tree,
+                    TVM_GETITEMRECT,
+                    0,
+                    &mut bounds as *mut _ as isize,
+                );
+                let mut host = RECT::default();
+                GetClientRect(self.tree_host, &mut host);
+                bounds.left = 0;
+                bounds.right = host.right;
+                let mut point = POINT::default();
+                GetCursorPos(&mut point);
+                ScreenToClient(self.tree, &mut point);
+                if let Some(note) = self.book.get(id) {
+                    self.tooltip
+                        .hover(self.tree, id, bounds, &note.title, point);
+                    return;
+                }
+            }
+            self.tooltip.hide();
+        }
+    }
+
     unsafe fn tab_click(&mut self, x: i32, y: i32) {
         unsafe {
+            self.tooltip.hide();
             let layout = self.tab_layout.get();
             if layout.overflow && y >= self.theme.px(32) {
                 self.tab_drag = true;
@@ -1121,6 +1370,9 @@ impl App {
         }
     }
     unsafe fn scroll_tabs(&self, delta: i32) {
+        unsafe {
+            self.tooltip.dismiss();
+        }
         let mut tabs = self.tab_layout.get();
         tabs.scroll(delta * self.theme.px(100) / 120);
         self.tab_layout.set(tabs);
@@ -1144,6 +1396,7 @@ impl App {
     }
     unsafe fn scroll_tree(&self, rows: i32) {
         unsafe {
+            self.tooltip.dismiss();
             let first = SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE as usize, 0);
             let current = self.visible.iter().position(|&h| h == first).unwrap_or(0) as i32;
             let count = SendMessageW(self.tree, TVM_GETVISIBLECOUNT, 0, 0).max(1) as i32;
@@ -1674,42 +1927,96 @@ impl App {
         }
     }
 
-    unsafe fn finish_drag(&mut self) {
-        let Some(id) = self.dragging.take() else {
-            return;
-        };
+    unsafe fn drag_target_at_pointer(&self) -> Option<DropTarget> {
+        let source = self.dragging?;
         unsafe {
-            ReleaseCapture();
-            SendMessageW(self.tree, TVM_SELECTITEM, TVGN_DROPHILITE as usize, 0);
-        }
-        let (parent, before) = if let Some((target, y, handle)) = unsafe { self.hit_tree() } {
-            if target == id {
-                return;
+            let mut point = POINT::default();
+            let mut bounds = RECT::default();
+            GetCursorPos(&mut point);
+            GetWindowRect(self.tree_host, &mut bounds);
+            if !self.sidebar_visible || PtInRect(&bounds, point) == 0 {
+                return None;
             }
-            let mut rect = RECT::default();
-            unsafe {
-                *(std::ptr::addr_of_mut!(rect) as *mut HTREEITEM) = handle;
-                SendMessageW(self.tree, TVM_GETITEMRECT, 1, &mut rect as *mut _ as LPARAM);
-            }
-            let height = (rect.bottom - rect.top).max(1);
-            if y < rect.top + height / 4 {
-                (self.book.get(target).unwrap().parent, Some(target))
-            } else if y >= rect.bottom - height / 4 {
-                let p = self.book.get(target).unwrap().parent;
-                let siblings = self.book.children(p);
-                let pos = siblings.iter().position(|&n| n == target).unwrap();
-                (p, siblings.get(pos + 1).copied())
+            if let Some((target, y, handle)) = self.hit_tree() {
+                let mut row = RECT::default();
+                *(&mut row as *mut RECT as *mut HTREEITEM) = handle;
+                SendMessageW(self.tree, TVM_GETITEMRECT, 1, &mut row as *mut _ as isize);
+                let height = (row.bottom - row.top).max(1);
+                let zone = if y < row.top + height / 4 {
+                    DropZone::Before
+                } else if y >= row.bottom - height / 4 {
+                    DropZone::After
+                } else {
+                    DropZone::Inside
+                };
+                DropTarget::resolve(&self.book, source, Some(target), zone)
             } else {
-                (target, None)
+                DropTarget::resolve(&self.book, source, None, DropZone::Root)
             }
-        } else {
-            (0, None)
-        };
-        let previous = self.book.clone();
-        if self.book.move_note(id, parent, before) {
-            self.expanded.insert(parent);
-            unsafe {
-                self.persist_tree(previous, Some(id));
+        }
+    }
+
+    unsafe fn update_drag_feedback(&mut self) {
+        unsafe {
+            let target = self.drag_target_at_pointer();
+            if self.drop_target != target {
+                self.drop_target = target;
+                self.publish_view();
+                self.repaint_drag_feedback();
+            }
+            SetCursor(LoadCursorW(
+                null_mut(),
+                if target.is_some() {
+                    IDC_SIZEALL
+                } else {
+                    IDC_NO
+                },
+            ));
+        }
+    }
+
+    unsafe fn repaint_drag_feedback(&self) {
+        unsafe {
+            for control in [self.tree, self.status] {
+                RedrawWindow(
+                    control,
+                    null(),
+                    null_mut(),
+                    RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE,
+                );
+            }
+        }
+    }
+
+    unsafe fn cancel_interaction(&mut self) {
+        self.dragging = None;
+        self.drop_target = None;
+        self.tree_hover = None;
+        self.resizing = false;
+        self.publish_view();
+        unsafe {
+            KillTimer(self.hwnd, DRAG_SCROLL_TIMER);
+            if GetCapture() == self.hwnd {
+                ReleaseCapture();
+            }
+            SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
+            self.repaint_drag_feedback();
+        }
+    }
+
+    unsafe fn finish_drag(&mut self) {
+        let target = unsafe { self.drag_target_at_pointer() };
+        let source = self.dragging;
+        unsafe {
+            self.cancel_interaction();
+        }
+        if let (Some(id), Some(target)) = (source, target) {
+            let previous = self.book.clone();
+            if self.book.move_note(id, target.parent, target.before) {
+                self.expanded.insert(target.parent);
+                unsafe {
+                    self.persist_tree(previous, Some(id));
+                }
             }
         }
     }
@@ -1762,8 +2069,10 @@ impl App {
             self.find_visible = true;
             self.replace_visible = replace;
             self.last_match = None;
+            self.find_message = "Enter로 다음 결과를 찾습니다".into();
             SendMessageW(self.edit, editing::EM_STOPGROUPTYPING, 0, 0);
-            self.layout();
+            self.publish_view();
+            self.layout_search();
             SetFocus(self.find_input);
             SendMessageW(self.find_input, EM_SETSEL, 0, -1);
         }
@@ -1772,7 +2081,8 @@ impl App {
         self.find_visible = false;
         self.replace_visible = false;
         unsafe {
-            self.layout();
+            self.publish_view();
+            self.layout_search();
             SetFocus(self.edit);
         }
     }
@@ -1784,10 +2094,11 @@ impl App {
             let query = window_text(self.find_input);
             if query.is_empty() {
                 self.last_match = None;
+                self.search_message("검색어를 입력하세요");
                 self.set_status("검색어를 입력하세요");
                 return;
             }
-            let case = SendMessageW(self.find_case, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+            let case = self.find_case_sensitive;
             let selection = editing::selection(self.edit);
             let start = if backwards || live {
                 selection.start
@@ -1816,8 +2127,10 @@ impl App {
                 editing::select(self.edit, range);
                 SendMessageW(self.edit, EM_SCROLLCARET, 0, 0);
                 self.set_status("검색 결과 선택됨");
+                self.search_message("일치하는 텍스트를 찾았습니다");
             } else {
                 self.set_status("찾을 수 없음");
+                self.search_message("일치하는 텍스트가 없습니다");
             }
         }
     }
@@ -1828,7 +2141,7 @@ impl App {
         unsafe {
             let range = editing::selection(self.edit);
             let query = window_text(self.find_input);
-            let case = SendMessageW(self.find_case, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+            let case = self.find_case_sensitive;
             if !query.is_empty()
                 && range.end > range.start
                 && editing::find(self.edit, &query, range.start, range.end, false, case)
@@ -1856,7 +2169,7 @@ impl App {
             if query.is_empty() {
                 return;
             }
-            let case = SendMessageW(self.find_case, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+            let case = self.find_case_sensitive;
             let mut ranges = Vec::new();
             let mut start = 0;
             while let Some(range) = editing::find(self.edit, &query, start, -1, false, case) {
@@ -1868,6 +2181,7 @@ impl App {
             }
             if ranges.is_empty() {
                 self.set_status("찾을 수 없음");
+                self.search_message("일치하는 텍스트가 없습니다");
                 return;
             }
             let text = editing::replace_ranges(
@@ -1884,6 +2198,7 @@ impl App {
             InvalidateRect(self.edit, null(), 0);
             self.capture_edit();
             self.set_status(&format!("{}개 바꿈", ranges.len()));
+            self.search_message(&format!("{}개 바꿨습니다", ranges.len()));
         }
     }
     unsafe fn editor_menu(&self) {
@@ -1946,6 +2261,8 @@ impl App {
                 self.find_next(false, false);
             },
             ID_FIND_CASE => unsafe {
+                self.find_case_sensitive = !self.find_case_sensitive;
+                InvalidateRect(self.find_case, null(), 0);
                 self.find_next(false, true);
             },
             ID_FIND_CLOSE => unsafe {
@@ -2115,7 +2432,16 @@ impl App {
                     if event.itemNew.lParam > 0 {
                         self.dragging = Some(event.itemNew.lParam as u64);
                         unsafe {
+                            self.tooltip.hide();
+                        }
+                        self.tree_hover = None;
+                        self.drop_target = None;
+                        self.publish_view();
+                        unsafe {
                             SetCapture(self.hwnd);
+                            SetTimer(self.hwnd, DRAG_SCROLL_TIMER, 160, None);
+                            self.update_drag_feedback();
+                            self.repaint_drag_feedback();
                         }
                     }
                 }
@@ -2159,6 +2485,34 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             0
         }
         WM_ERASEBKGND => 1,
+        WM_SETCURSOR => {
+            let mut handled = false;
+            ui::with_view(|view| unsafe {
+                let mut point = POINT::default();
+                GetCursorPos(&mut point);
+                ScreenToClient(hwnd, &mut point);
+                let cursor = if view.dragging.is_some() {
+                    Some(if view.drop_target.is_some() {
+                        IDC_SIZEALL
+                    } else {
+                        IDC_NO
+                    })
+                } else if view.resizing || view.splitter_hit(point) {
+                    Some(IDC_SIZEWE)
+                } else {
+                    None
+                };
+                if let Some(cursor) = cursor {
+                    SetCursor(LoadCursorW(null_mut(), cursor));
+                    handled = true;
+                }
+            });
+            if handled {
+                1
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+            }
+        }
         WM_PAINT => {
             unsafe {
                 ui::paint_window(hwnd, |dc| ui::with_view(|v| v.paint_background(dc)));
@@ -2272,6 +2626,31 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             });
             0
         }
+        WM_TIMER if wp == DRAG_SCROLL_TIMER => {
+            with_app(|app| unsafe {
+                if app.dragging.is_some() {
+                    let mut scrolled = false;
+                    let mut point = POINT::default();
+                    let mut bounds = RECT::default();
+                    GetCursorPos(&mut point);
+                    GetWindowRect(app.tree_host, &mut bounds);
+                    if PtInRect(&bounds, point) != 0 {
+                        if point.y < bounds.top + app.theme.px(24) {
+                            app.scroll_tree(-2);
+                            scrolled = true;
+                        } else if point.y >= bounds.bottom - app.theme.px(24) {
+                            app.scroll_tree(2);
+                            scrolled = true;
+                        }
+                    }
+                    app.update_drag_feedback();
+                    if scrolled {
+                        app.repaint_drag_feedback();
+                    }
+                }
+            });
+            0
+        }
         WM_LBUTTONDOWN => {
             with_app(|app| {
                 let mut area = RECT::default();
@@ -2279,12 +2658,13 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     GetClientRect(app.hwnd, &mut area);
                 }
                 if app.sidebar_visible
-                    && (point_x(lp) - app.sidebar_edge(area.right)).abs() <= app.theme.px(5)
+                    && (point_x(lp) - app.sidebar_edge(area.right)).abs() <= app.theme.px(4)
                     && point_y(lp) > app.theme.px(36)
                 {
                     app.resizing = true;
                     unsafe {
                         SetCapture(hwnd);
+                        SetCursor(LoadCursorW(null_mut(), IDC_SIZEWE));
                     }
                 }
             });
@@ -2292,7 +2672,24 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_MOUSEMOVE => {
             with_app(|app| {
+                if !app.resizing && app.dragging.is_none() {
+                    let mut area = RECT::default();
+                    unsafe {
+                        GetClientRect(hwnd, &mut area);
+                    }
+                    if app.sidebar_visible
+                        && point_y(lp) > app.theme.px(36)
+                        && (point_x(lp) - app.sidebar_edge(area.right)).abs() <= app.theme.px(4)
+                    {
+                        unsafe {
+                            SetCursor(LoadCursorW(null_mut(), IDC_SIZEWE));
+                        }
+                    }
+                }
                 if app.resizing {
+                    unsafe {
+                        SetCursor(LoadCursorW(null_mut(), IDC_SIZEWE));
+                    }
                     let width = (point_x(lp) * 96 / app.theme.dpi as i32).clamp(150, 600);
                     if width != app.sidebar_width {
                         app.sidebar_width = width;
@@ -2302,14 +2699,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     }
                 }
                 if app.dragging.is_some() {
-                    let handle = unsafe { app.hit_tree() }.map(|(_, _, h)| h).unwrap_or(0);
                     unsafe {
-                        SendMessageW(
-                            app.tree,
-                            TVM_SELECTITEM,
-                            TVGN_DROPHILITE as usize,
-                            handle as LPARAM,
-                        );
+                        app.update_drag_feedback();
                     }
                 }
             });
@@ -2327,6 +2718,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     unsafe {
                         app.finish_drag();
                     }
+                }
+            });
+            0
+        }
+        WM_CAPTURECHANGED | WM_CANCELMODE => {
+            with_app(|app| unsafe {
+                if app.resizing || app.dragging.is_some() {
+                    app.cancel_interaction();
                 }
             });
             0
@@ -2369,7 +2768,43 @@ fn shortcut(msg: &MSG) -> bool {
     let key = msg.wParam as u32;
     let mut handled = false;
     with_app(|app| unsafe {
-        if ctrl && key == b'A' as u32 {
+        if !ctrl
+            && key == VK_TAB as u32
+            && app.find_visible
+            && IsChild(app.search_host, msg.hwnd) != 0
+        {
+            let mut controls = vec![app.find_input];
+            if app.replace_visible {
+                controls.push(app.replace_input);
+            }
+            controls.extend([app.find_case, app.find_prev, app.find_next]);
+            if app.replace_visible {
+                controls.extend([app.replace_one, app.replace_all]);
+            }
+            controls.push(app.find_close);
+            let current = controls
+                .iter()
+                .position(|&control| control == msg.hwnd)
+                .unwrap_or(0);
+            let next = if shift {
+                (current + controls.len() - 1) % controls.len()
+            } else {
+                (current + 1) % controls.len()
+            };
+            SetFocus(controls[next]);
+            handled = true;
+        } else if key == VK_RETURN as u32
+            && app.find_visible
+            && IsChild(app.search_host, msg.hwnd) != 0
+            && msg.hwnd != app.find_input
+            && msg.hwnd != app.replace_input
+        {
+            app.command(GetDlgCtrlID(msg.hwnd) as usize, BN_CLICKED as usize);
+            handled = true;
+        } else if key == VK_ESCAPE as u32 && (app.dragging.is_some() || app.resizing) {
+            app.cancel_interaction();
+            handled = true;
+        } else if ctrl && key == b'A' as u32 {
             if app.active.is_some()
                 && (msg.hwnd == app.edit || msg.hwnd == app.tree || msg.hwnd == app.tabs)
             {
@@ -2401,7 +2836,7 @@ fn shortcut(msg: &MSG) -> bool {
             && (msg.hwnd == app.edit
                 || msg.hwnd == app.find_input
                 || msg.hwnd == app.replace_input
-                || GetParent(msg.hwnd) == app.hwnd && msg.hwnd != app.tree)
+                || IsChild(app.search_host, msg.hwnd) != 0)
         {
             app.hide_find();
             handled = true;
@@ -2535,7 +2970,7 @@ pub fn run() {
         }
         let controls = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_TREEVIEW_CLASSES | ICC_TAB_CLASSES,
+            dwICC: ICC_TREEVIEW_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES,
         };
         InitCommonControlsEx(&controls);
         let dll_timing = startup::span("richedit.dll");
