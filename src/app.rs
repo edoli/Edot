@@ -1,7 +1,7 @@
 use crate::model::{Notebook, replace_file};
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme};
-use crate::{editing, ui};
+use crate::{editing, startup, ui};
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -69,6 +69,7 @@ struct OpenTab {
     id: u64,
     text: String,
     dirty: bool,
+    // Restored tabs load their text and native editor on first activation.
     editor: HWND,
 }
 
@@ -198,6 +199,7 @@ unsafe fn window_text(hwnd: HWND) -> String {
     }
 }
 unsafe fn memo_editor(hwnd: HWND) -> HWND {
+    let _timing = startup::span("editor.create");
     unsafe {
         let editor = child(
             hwnd,
@@ -489,6 +491,7 @@ unsafe extern "system" fn control_subclass(
 
 impl App {
     unsafe fn new(hwnd: HWND, data_dir: PathBuf, book: Notebook) -> Self {
+        let controls_timing = startup::span("ui.controls");
         let common = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS;
         let toggle = unsafe {
             child(
@@ -646,6 +649,7 @@ impl App {
                 SetWindowSubclass(button, Some(control_subclass), 1, 1);
             }
         }
+        drop(controls_timing);
         let expanded = book.notes.iter().map(|n| n.id).collect();
         let mut app = Self {
             hwnd,
@@ -711,6 +715,7 @@ impl App {
     }
 
     unsafe fn restore_session(&mut self) {
+        let _timing = startup::span("session.restore");
         let Ok(text) = fs::read_to_string(self.data_dir.join("session.tsv")) else {
             return;
         };
@@ -732,13 +737,22 @@ impl App {
         for line in lines {
             if let Ok(id) = line.parse::<u64>()
                 && self.book.get(id).is_some()
+                && !self.open.iter().any(|tab| tab.id == id)
             {
-                unsafe {
-                    self.open_note(id);
-                }
+                self.open.push(OpenTab {
+                    id,
+                    text: String::new(),
+                    dirty: false,
+                    editor: null_mut(),
+                });
             }
         }
-        if let Some(index) = self.open.iter().position(|t| Some(t.id) == active_id) {
+        let active = self
+            .open
+            .iter()
+            .position(|t| Some(t.id) == active_id)
+            .or_else(|| self.open.len().checked_sub(1));
+        if let Some(index) = active {
             unsafe {
                 self.activate(index);
             }
@@ -763,7 +777,9 @@ impl App {
                 SendMessageW(item, WM_SETFONT, self.theme.ui as WPARAM, 0);
             }
             for tab in &self.open {
-                SendMessageW(tab.editor, WM_SETFONT, self.theme.editor as usize, 0);
+                if !tab.editor.is_null() {
+                    SendMessageW(tab.editor, WM_SETFONT, self.theme.editor as usize, 0);
+                }
             }
             SendMessageW(self.edit, WM_SETFONT, self.theme.editor as WPARAM, 0);
             SendMessageW(
@@ -865,6 +881,7 @@ impl App {
         }
     }
     unsafe fn layout(&self) {
+        let _timing = startup::span("ui.layout");
         unsafe {
             let p = |v| self.theme.px(v);
             let mut area = RECT::default();
@@ -1171,6 +1188,7 @@ impl App {
     }
 
     unsafe fn rebuild_tree(&mut self, select: Option<u64>) {
+        let _timing = startup::span("tree.build");
         unsafe {
             SendMessageW(self.tree, WM_SETREDRAW, 0, 0);
             SendMessageW(self.tree, TVM_DELETEITEM, 0, TVI_ROOT as LPARAM);
@@ -1262,14 +1280,18 @@ impl App {
         true
     }
 
-    unsafe fn activate(&mut self, index: usize) {
+    unsafe fn activate(&mut self, index: usize) -> bool {
+        let _timing = startup::span("tab.activate");
         if index >= self.open.len() {
-            return;
+            return false;
         }
         unsafe {
             if self.active == Some(index) {
                 SetFocus(self.edit);
-                return;
+                return true;
+            }
+            if !self.load_editor(index) {
+                return false;
             }
             self.capture_edit();
             ShowWindow(self.edit, SW_HIDE);
@@ -1300,6 +1322,7 @@ impl App {
             });
             InvalidateRect(self.tabs, null(), 0);
         }
+        true
     }
 
     unsafe fn open_note(&mut self, id: u64) {
@@ -1309,14 +1332,35 @@ impl App {
             }
             return;
         }
-        let file = self.book.file(&self.data_dir, id);
+        let index = self.open.len();
+        self.open.push(OpenTab {
+            id,
+            text: String::new(),
+            dirty: false,
+            editor: null_mut(),
+        });
+        unsafe {
+            if !self.activate(index) {
+                self.open.pop();
+                self.layout();
+            }
+        }
+    }
+
+    unsafe fn load_editor(&mut self, index: usize) -> bool {
+        if !self.open[index].editor.is_null() {
+            return true;
+        }
+        let file = self.book.file(&self.data_dir, self.open[index].id);
+        let read_timing = startup::span("note.read");
         let text = match fs::read_to_string(&file) {
             Ok(text) => text,
             Err(error) => {
                 report(self.hwnd, "메모를 열지 못했습니다.", error);
-                return;
+                return false;
             }
         };
+        drop(read_timing);
         let editor = unsafe { memo_editor(self.hwnd) };
         if editor.is_null() {
             report(
@@ -1324,9 +1368,10 @@ impl App {
                 "편집 창을 만들지 못했습니다.",
                 std::io::Error::last_os_error(),
             );
-            return;
+            return false;
         }
         self.loading = true;
+        let text_timing = startup::span("editor.load_text");
         unsafe {
             SendMessageW(editor, WM_SETFONT, self.theme.editor as usize, 0);
             SendMessageW(editor, editing::EM_SETBKGNDCOLOR, 0, theme::WHITE as isize);
@@ -1334,16 +1379,10 @@ impl App {
             SendMessageW(editor, EM_EMPTYUNDOBUFFER, 0, 0);
         }
         self.loading = false;
-        let index = self.open.len();
-        self.open.push(OpenTab {
-            id,
-            text: unsafe { window_text(editor) },
-            dirty: false,
-            editor,
-        });
-        unsafe {
-            self.activate(index);
-        }
+        self.open[index].text = unsafe { window_text(editor) };
+        self.open[index].editor = editor;
+        drop(text_timing);
+        true
     }
 
     unsafe fn close_active(&mut self) {
@@ -1368,7 +1407,9 @@ impl App {
             self.edit = self.empty_edit;
         }
         unsafe {
-            DestroyWindow(closed.editor);
+            if !closed.editor.is_null() {
+                DestroyWindow(closed.editor);
+            }
         }
 
         self.active = None;
@@ -1394,7 +1435,10 @@ impl App {
                 None => 0,
             };
             unsafe {
-                self.activate(next);
+                if !self.activate(next) {
+                    ShowWindow(self.edit, SW_HIDE);
+                    self.layout();
+                }
             }
         }
     }
@@ -1523,7 +1567,9 @@ impl App {
         self.open.retain(|tab| {
             if ids.contains(&tab.id) {
                 unsafe {
-                    DestroyWindow(tab.editor);
+                    if !tab.editor.is_null() {
+                        DestroyWindow(tab.editor);
+                    }
                 }
                 false
             } else {
@@ -2438,6 +2484,7 @@ fn shortcut(msg: &MSG) -> bool {
 }
 
 pub fn run() {
+    startup::start();
     let data_dir = std::env::var_os("EDOT_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -2446,6 +2493,7 @@ pub fn run() {
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
                 .join("Edot")
         });
+    let load_timing = startup::span("notebook.load");
     let book = match Notebook::load(&data_dir) {
         Ok(book) => book,
         Err(error) => {
@@ -2457,6 +2505,7 @@ pub fn run() {
             return;
         }
     };
+    drop(load_timing);
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let canonical = fs::canonicalize(&data_dir).unwrap_or_else(|_| data_dir.clone());
@@ -2489,6 +2538,7 @@ pub fn run() {
             dwICC: ICC_TREEVIEW_CLASSES | ICC_TAB_CLASSES,
         };
         InitCommonControlsEx(&controls);
+        let dll_timing = startup::span("richedit.dll");
         if LoadLibraryW(wide("Msftedit.dll").as_ptr()).is_null() {
             report(
                 null_mut(),
@@ -2497,6 +2547,7 @@ pub fn run() {
             );
             return;
         }
+        drop(dll_timing);
         let instance = GetModuleHandleW(null());
         let class = wide("EdotMainWindow");
         let wc = WNDCLASSEXW {
@@ -2539,10 +2590,6 @@ pub fn run() {
             );
             return;
         }
-        APP.with(|cell| {
-            *cell.borrow_mut() = Some(App::new(hwnd, data_dir, book));
-        });
-        ShowWindow(hwnd, SW_SHOW);
         let dpi = GetDpiForWindow(hwnd).max(96) as i32;
         SetWindowPos(
             hwnd,
@@ -2553,7 +2600,15 @@ pub fn run() {
             760 * dpi / 96,
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
+        APP.with(|cell| {
+            *cell.borrow_mut() = Some(App::new(hwnd, data_dir, book));
+        });
+        ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
+        if startup::finish() {
+            DestroyWindow(hwnd);
+            return;
+        }
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
             if shortcut(&msg) {
