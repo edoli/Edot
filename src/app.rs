@@ -1,0 +1,2566 @@
+use crate::model::{Notebook, replace_file};
+use crate::tabs::TabLayout;
+use crate::theme::{self, Theme};
+use crate::{editing, ui};
+use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::PathBuf;
+use std::ptr::{null, null_mut};
+use std::rc::Rc;
+use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Graphics::Gdi::*;
+use windows_sys::Win32::System::LibraryLoader::*;
+use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_OWNERDRAW};
+use windows_sys::Win32::System::Threading::*;
+use windows_sys::Win32::UI::Controls::*;
+use windows_sys::Win32::UI::HiDpi::*;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+const ID_TOGGLE: usize = 101;
+const ID_ADD: usize = 102;
+const ID_EDIT: usize = 104;
+const ID_TREE: usize = 105;
+const ID_TABS: usize = 106;
+const ID_TAB_ADD: usize = 107;
+const ID_FIND: usize = 110;
+const ID_FIND_PREV: usize = 111;
+const ID_FIND_NEXT: usize = 112;
+const ID_FIND_CLOSE: usize = 113;
+const ID_FIND_CASE: usize = 114;
+const ID_REPLACE_INPUT: usize = 115;
+const ID_REPLACE_ONE: usize = 116;
+const ID_REPLACE_ALL: usize = 117;
+const MENU_UNDO: usize = 301;
+const MENU_REDO: usize = 302;
+const MENU_CUT: usize = 303;
+const MENU_COPY: usize = 304;
+const MENU_PASTE: usize = 305;
+const MENU_SELECT_ALL: usize = 306;
+const MENU_FIND: usize = 307;
+const MENU_REPLACE: usize = 308;
+const MENU_NEW_CHILD: usize = 201;
+const MENU_NEW_ROOT: usize = 202;
+const MENU_RENAME: usize = 203;
+const MENU_DELETE: usize = 204;
+const MENU_UP: usize = 205;
+const MENU_DOWN: usize = 206;
+const MENU_OUTDENT: usize = 207;
+const AUTOSAVE_TIMER: usize = 1;
+const POSITION_RENAME: u32 = WM_APP + 1;
+const REFRESH_UI: u32 = WM_APP + 2;
+
+thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
+
+struct MutexGuard(HANDLE);
+impl Drop for MutexGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct OpenTab {
+    id: u64,
+    text: String,
+    dirty: bool,
+    editor: HWND,
+}
+
+struct App {
+    hwnd: HWND,
+    tree: HWND,
+    tree_host: HWND,
+    tabs: HWND,
+    edit: HWND,
+    empty_edit: HWND,
+    toggle: HWND,
+    add: HWND,
+    tab_add: HWND,
+    status: HWND,
+    theme: Rc<Theme>,
+    view_book: Rc<Notebook>,
+    view_handles: Rc<HashMap<isize, u64>>,
+
+    visible: Rc<Vec<isize>>,
+    view_tabs: RefCell<Rc<Vec<ui::RenderTab>>>,
+    view_parents: Rc<HashSet<u64>>,
+    tree_scroll: HWND,
+    tab_layout: Cell<TabLayout>,
+    tab_hover: Cell<Option<(usize, bool)>>,
+    tab_drag: bool,
+    tree_scroll_drag: bool,
+    find_input: HWND,
+    find_prev: HWND,
+    find_next: HWND,
+    find_close: HWND,
+    find_case: HWND,
+    replace_input: HWND,
+    replace_one: HWND,
+    replace_all: HWND,
+    find_visible: bool,
+    replace_visible: bool,
+    last_query: String,
+    last_match: Option<editing::CharRange>,
+    status_text: RefCell<String>,
+    data_dir: PathBuf,
+    book: Notebook,
+    handles: HashMap<isize, u64>,
+    expanded: HashSet<u64>,
+    open: Vec<OpenTab>,
+    active: Option<usize>,
+    loading: bool,
+    sidebar_width: i32,
+    sidebar_visible: bool,
+    resizing: bool,
+    dragging: Option<u64>,
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+fn lo(v: usize) -> usize {
+    v & 0xffff
+}
+fn hi(v: usize) -> usize {
+    (v >> 16) & 0xffff
+}
+fn point_x(lp: LPARAM) -> i32 {
+    (lp as u32 as u16 as i16) as i32
+}
+fn point_y(lp: LPARAM) -> i32 {
+    ((lp as u32 >> 16) as u16 as i16) as i32
+}
+
+unsafe fn message(hwnd: HWND, title: &str, body: &str, flags: MESSAGEBOX_STYLE) -> i32 {
+    unsafe { MessageBoxW(hwnd, wide(body).as_ptr(), wide(title).as_ptr(), flags) }
+}
+
+fn report(hwnd: HWND, action: &str, error: impl std::fmt::Display) {
+    unsafe {
+        message(
+            hwnd,
+            "Edot",
+            &format!("{action}\n\n{error}"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+fn with_app(f: impl FnOnce(&mut App)) {
+    APP.with(|cell| {
+        if let Ok(mut borrow) = cell.try_borrow_mut()
+            && let Some(app) = borrow.as_mut()
+        {
+            f(app);
+            app.publish_view();
+        }
+    });
+}
+
+unsafe fn child(
+    parent: HWND,
+    class: *const u16,
+    label: &str,
+    style: u32,
+    ex: u32,
+    id: usize,
+) -> HWND {
+    unsafe {
+        CreateWindowExW(
+            ex,
+            class,
+            wide(label).as_ptr(),
+            style,
+            0,
+            0,
+            0,
+            0,
+            parent,
+            id as HMENU,
+            GetModuleHandleW(null()),
+            null(),
+        )
+    }
+}
+
+unsafe fn window_text(hwnd: HWND) -> String {
+    unsafe {
+        let len = GetWindowTextLengthW(hwnd).max(0) as usize;
+        let mut buffer = vec![0u16; len + 1];
+        let used = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32).max(0) as usize;
+        String::from_utf16_lossy(&buffer[..used])
+    }
+}
+unsafe fn memo_editor(hwnd: HWND) -> HWND {
+    unsafe {
+        let editor = child(
+            hwnd,
+            wide("RICHEDIT50W").as_ptr(),
+            "",
+            WS_CHILD
+                | WS_CLIPSIBLINGS
+                | WS_TABSTOP
+                | WS_VSCROLL
+                | ES_MULTILINE as u32
+                | ES_AUTOVSCROLL as u32
+                | ES_WANTRETURN as u32,
+            0,
+            ID_EDIT,
+        );
+        SendMessageW(editor, editing::EM_SETTEXTMODE, 1, 0);
+        SendMessageW(
+            editor,
+            editing::EM_SETEVENTMASK,
+            0,
+            editing::ENM_CHANGE | editing::ENM_SELCHANGE,
+        );
+        SendMessageW(editor, WM_USER + 53, 0, 0x7fff_ffff); // EM_EXLIMITTEXT
+        SendMessageW(editor, WM_USER + 63, 0, 0); // EM_HIDESELECTION: keep search matches visible
+        SetWindowSubclass(editor, Some(control_subclass), 1, 2);
+        editor
+    }
+}
+
+unsafe extern "system" fn tab_subclass(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    _reference: usize,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_ERASEBKGND => return 1,
+            WM_PAINT => {
+                ui::paint_window(hwnd, |dc| ui::with_view(|v| v.paint_tabs(dc)));
+                return 0;
+            }
+            WM_LBUTTONDOWN => {
+                with_app(|app| app.tab_click(point_x(lp), point_y(lp)));
+                return 0;
+            }
+            WM_MOUSEMOVE => {
+                with_app(|app| {
+                    if app.tab_drag {
+                        app.drag_tab_scroll(point_x(lp));
+                    }
+                    let layout = app.tab_layout.get();
+                    let hover = layout
+                        .hit(point_x(lp))
+                        .map(|i| (i, point_x(lp) >= layout.bounds(i).1 - app.theme.px(24)));
+                    if hover != app.tab_hover.replace(hover) {
+                        InvalidateRect(hwnd, null(), 0);
+                    }
+                });
+                let mut track = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                TrackMouseEvent(&mut track);
+                return 0;
+            }
+            WM_MOUSELEAVE => {
+                with_app(|app| {
+                    if app.tab_hover.replace(None).is_some() {
+                        InvalidateRect(hwnd, null(), 0);
+                    }
+                });
+                return 0;
+            }
+            WM_LBUTTONUP => {
+                with_app(|app| app.tab_drag = false);
+                ReleaseCapture();
+                return 0;
+            }
+            WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+                let delta = hi(wp) as u16 as i16 as i32;
+                with_app(|app| app.scroll_tabs(if msg == WM_MOUSEWHEEL { -delta } else { delta }));
+                return 0;
+            }
+            WM_GETDLGCODE => return DLGC_WANTARROWS as isize,
+            WM_NCDESTROY => {
+                RemoveWindowSubclass(hwnd, Some(tab_subclass), id);
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+unsafe extern "system" fn tree_host_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    _reference: usize,
+) -> LRESULT {
+    unsafe {
+        if msg == WM_NOTIFY {
+            return SendMessageW(GetParent(hwnd), msg, wp, lp);
+        }
+        if msg == WM_ERASEBKGND {
+            return 1;
+        }
+        if msg == WM_PAINT {
+            ui::paint_window(hwnd, |dc| {
+                let mut area = RECT::default();
+                GetClientRect(hwnd, &mut area);
+                theme::fill(dc, area, theme::SIDEBAR);
+            });
+            return 0;
+        }
+        if msg == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, Some(tree_host_proc), id);
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+unsafe fn route_wheel(msg: u32, wp: usize) -> bool {
+    let mut route = 0;
+    unsafe {
+        ui::with_view(|view| {
+            let mut point = POINT::default();
+            GetCursorPos(&mut point);
+            let mut bounds = RECT::default();
+            GetWindowRect(view.tabs, &mut bounds);
+            if PtInRect(&bounds, point) != 0 {
+                route = 1;
+            }
+            GetWindowRect(GetParent(view.tree), &mut bounds);
+            if view.sidebar_visible && PtInRect(&bounds, point) != 0 {
+                route = 2;
+            }
+        });
+        let delta = hi(wp) as u16 as i16 as i32;
+        if route == 1 {
+            with_app(|app| app.scroll_tabs(if msg == WM_MOUSEWHEEL { -delta } else { delta }));
+        }
+        if route == 2 {
+            with_app(|app| app.scroll_tree(-delta / 40));
+        }
+    }
+    route != 0
+}
+
+unsafe extern "system" fn tree_subclass(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    _reference: usize,
+) -> LRESULT {
+    unsafe {
+        if msg == WM_ERASEBKGND {
+            return 1;
+        }
+        if msg == WM_PAINT {
+            ui::paint_window(hwnd, |dc| {
+                let mut area = RECT::default();
+                GetClientRect(hwnd, &mut area);
+                theme::fill(dc, area, theme::SIDEBAR);
+                DefSubclassProc(hwnd, WM_PRINTCLIENT, dc as usize, PRF_CLIENT as isize);
+            });
+            ui::with_view(|v| {
+                InvalidateRect(v.tree_scroll, null(), 0);
+            });
+            return 0;
+        }
+        if msg == WM_MOUSEWHEEL {
+            let delta = hi(wp) as u16 as i16 as i32;
+            with_app(|app| app.scroll_tree(-delta / 40));
+            return 0;
+        }
+        if msg == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, Some(tree_subclass), id);
+        }
+        let result = DefSubclassProc(hwnd, msg, wp, lp);
+        if msg == WM_KEYDOWN {
+            ui::with_view(|v| {
+                InvalidateRect(v.tree_scroll, null(), 0);
+            });
+        }
+        result
+    }
+}
+
+unsafe extern "system" fn scroll_subclass(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    _reference: usize,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_ERASEBKGND => return 1,
+            WM_PAINT => {
+                ui::paint_window(hwnd, |dc| ui::with_view(|v| v.paint_tree_scroll(dc)));
+                return 0;
+            }
+            WM_LBUTTONDOWN => {
+                SetCapture(hwnd);
+                with_app(|a| {
+                    a.tree_scroll_drag = true;
+                    a.drag_tree_scroll(point_y(lp));
+                });
+                return 0;
+            }
+            WM_MOUSEMOVE => {
+                with_app(|a| {
+                    if a.tree_scroll_drag {
+                        a.drag_tree_scroll(point_y(lp));
+                    }
+                });
+                return 0;
+            }
+            WM_LBUTTONUP => {
+                ReleaseCapture();
+                with_app(|a| a.tree_scroll_drag = false);
+                return 0;
+            }
+            WM_MOUSEWHEEL => {
+                with_app(|a| a.scroll_tree(-(hi(wp) as u16 as i16 as i32) / 40));
+                return 0;
+            }
+            WM_NCDESTROY => {
+                RemoveWindowSubclass(hwnd, Some(scroll_subclass), id);
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+unsafe extern "system" fn control_subclass(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    subclass_id: usize,
+    reference: usize,
+) -> LRESULT {
+    unsafe {
+        if reference == 2 && matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) && route_wheel(msg, wp) {
+            return 0;
+        }
+
+        if reference == 2 && msg == WM_CONTEXTMENU {
+            with_app(|app| app.editor_menu());
+            return 0;
+        }
+
+        if reference == 1 && msg == WM_MOUSEMOVE {
+            let mut tracking = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            TrackMouseEvent(&mut tracking);
+            InvalidateRect(hwnd, null(), 0);
+        }
+        if msg == WM_MOUSELEAVE || (reference == 1 && (msg == WM_SETFOCUS || msg == WM_KILLFOCUS)) {
+            InvalidateRect(hwnd, null(), 0);
+        }
+        let result = DefSubclassProc(hwnd, msg, wp, lp);
+        if reference == 2 && matches!(msg, WM_KEYUP | WM_LBUTTONUP) {
+            with_app(|app| {
+                InvalidateRect(app.status, null(), 0);
+            });
+        }
+        if msg == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, Some(control_subclass), subclass_id);
+        }
+        result
+    }
+}
+
+impl App {
+    unsafe fn new(hwnd: HWND, data_dir: PathBuf, book: Notebook) -> Self {
+        let common = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS;
+        let toggle = unsafe {
+            child(
+                hwnd,
+                wide("BUTTON").as_ptr(),
+                "사이드바 접기 / 펼치기",
+                common | WS_TABSTOP | BS_OWNERDRAW as u32,
+                0,
+                ID_TOGGLE,
+            )
+        };
+        let add = unsafe {
+            child(
+                hwnd,
+                wide("BUTTON").as_ptr(),
+                "새 메모",
+                common | WS_TABSTOP | BS_OWNERDRAW as u32,
+                0,
+                ID_ADD,
+            )
+        };
+        let tree_host = unsafe {
+            child(
+                hwnd,
+                wide("STATIC").as_ptr(),
+                "",
+                common | WS_CLIPCHILDREN,
+                0,
+                109,
+            )
+        };
+        unsafe {
+            SetWindowSubclass(tree_host, Some(tree_host_proc), 1, 0);
+        }
+        let tree = unsafe {
+            child(
+                tree_host,
+                WC_TREEVIEWW,
+                "",
+                common
+                    | WS_TABSTOP
+                    | TVS_HASBUTTONS
+                    | TVS_LINESATROOT
+                    | TVS_EDITLABELS
+                    | TVS_FULLROWSELECT
+                    | TVS_NOHSCROLL
+                    | TVS_SHOWSELALWAYS,
+                0,
+                ID_TREE,
+            )
+        };
+        let tabs = unsafe {
+            child(
+                hwnd,
+                wide("STATIC").as_ptr(),
+                "",
+                common | WS_TABSTOP | SS_NOTIFY,
+                0,
+                ID_TABS,
+            )
+        };
+        let tab_add = unsafe {
+            child(
+                hwnd,
+                wide("BUTTON").as_ptr(),
+                "새 메모 탭",
+                common | WS_TABSTOP | BS_OWNERDRAW as u32,
+                0,
+                ID_TAB_ADD,
+            )
+        };
+        unsafe {
+            SetWindowSubclass(tabs, Some(tab_subclass), 1, 0);
+        }
+        let edit = unsafe { memo_editor(hwnd) };
+        let status = unsafe {
+            child(
+                hwnd,
+                wide("STATIC").as_ptr(),
+                "",
+                common | SS_OWNERDRAW,
+                0,
+                0,
+            )
+        };
+        unsafe {
+            SetWindowSubclass(tree, Some(tree_subclass), 1, 0);
+            EnableWindow(edit, 0);
+            for button in [toggle, add, tab_add] {
+                SetWindowSubclass(button, Some(control_subclass), 1, 1);
+            }
+            SetWindowSubclass(edit, Some(control_subclass), 1, 2);
+        }
+        let tree_scroll = unsafe {
+            child(
+                hwnd,
+                wide("STATIC").as_ptr(),
+                "",
+                common | SS_NOTIFY,
+                0,
+                108,
+            )
+        };
+        unsafe {
+            SetWindowSubclass(tree_scroll, Some(scroll_subclass), 1, 0);
+        }
+        let search_style = WS_CHILD | WS_CLIPSIBLINGS;
+        let find_input = unsafe {
+            child(
+                hwnd,
+                wide("EDIT").as_ptr(),
+                "",
+                search_style | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+                WS_EX_CLIENTEDGE,
+                ID_FIND,
+            )
+        };
+        let replace_input = unsafe {
+            child(
+                hwnd,
+                wide("EDIT").as_ptr(),
+                "",
+                search_style | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+                WS_EX_CLIENTEDGE,
+                ID_REPLACE_INPUT,
+            )
+        };
+        let button = |label: &str, id| unsafe {
+            child(
+                hwnd,
+                wide("BUTTON").as_ptr(),
+                label,
+                search_style | WS_TABSTOP | BS_OWNERDRAW as u32,
+                0,
+                id,
+            )
+        };
+        let find_prev = button("이전", ID_FIND_PREV);
+        let find_next = button("다음", ID_FIND_NEXT);
+        let find_close = button("닫기", ID_FIND_CLOSE);
+        let find_case = unsafe {
+            child(
+                hwnd,
+                wide("BUTTON").as_ptr(),
+                "대소문자",
+                search_style | WS_TABSTOP | BS_AUTOCHECKBOX as u32,
+                0,
+                ID_FIND_CASE,
+            )
+        };
+        let replace_one = button("바꾸기", ID_REPLACE_ONE);
+        let replace_all = button("모두 바꾸기", ID_REPLACE_ALL);
+        unsafe {
+            for button in [find_prev, find_next, find_close, replace_one, replace_all] {
+                SetWindowSubclass(button, Some(control_subclass), 1, 1);
+            }
+        }
+        let expanded = book.notes.iter().map(|n| n.id).collect();
+        let mut app = Self {
+            hwnd,
+            tree,
+            tree_host,
+            tabs,
+            edit,
+            empty_edit: edit,
+            toggle,
+            add,
+            tab_add,
+            status,
+            theme: Rc::new(unsafe { Theme::new(GetDpiForWindow(hwnd)) }),
+            view_book: Rc::new(book.clone()),
+            view_handles: Rc::new(HashMap::new()),
+
+            visible: Rc::new(Vec::new()),
+            view_tabs: RefCell::new(Rc::new(Vec::new())),
+            view_parents: Rc::new(HashSet::new()),
+            tree_scroll,
+            tab_layout: Cell::new(TabLayout::default()),
+            tab_hover: Cell::new(None),
+            tab_drag: false,
+            tree_scroll_drag: false,
+            find_input,
+            find_prev,
+            find_next,
+            find_close,
+            find_case,
+            replace_input,
+            replace_one,
+            replace_all,
+            find_visible: false,
+            replace_visible: false,
+            last_query: String::new(),
+            last_match: None,
+            status_text: RefCell::new("준비됨".into()),
+            data_dir,
+            book,
+            handles: HashMap::new(),
+            expanded,
+            open: Vec::new(),
+            active: None,
+            loading: false,
+            sidebar_width: 260,
+            sidebar_visible: true,
+            resizing: false,
+            dragging: None,
+        };
+        unsafe {
+            app.publish_view();
+            app.apply_theme();
+            app.rebuild_tree(None);
+            app.restore_session();
+            app.layout();
+        }
+        if app.open.is_empty() {
+            unsafe {
+                app.set_status("준비됨");
+            }
+        }
+        app
+    }
+
+    unsafe fn restore_session(&mut self) {
+        let Ok(text) = fs::read_to_string(self.data_dir.join("session.tsv")) else {
+            return;
+        };
+        let mut lines = text.lines();
+        if lines.next() != Some("EDOTSESSION1") {
+            return;
+        }
+        let Some(settings) = lines.next() else {
+            return;
+        };
+        let mut fields = settings.split('\t');
+        self.sidebar_visible = fields.next() == Some("1");
+        self.sidebar_width = fields
+            .next()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(260)
+            .clamp(150, 600);
+        let active_id = fields.next().and_then(|v| v.parse::<u64>().ok());
+        for line in lines {
+            if let Ok(id) = line.parse::<u64>()
+                && self.book.get(id).is_some()
+            {
+                unsafe {
+                    self.open_note(id);
+                }
+            }
+        }
+        if let Some(index) = self.open.iter().position(|t| Some(t.id) == active_id) {
+            unsafe {
+                self.activate(index);
+            }
+        }
+    }
+
+    fn save_session(&self) -> std::io::Result<()> {
+        let active_id = self.active.map(|i| self.open[i].id).unwrap_or(0);
+        let mut text = format!(
+            "EDOTSESSION1\n{}\t{}\t{}\n",
+            self.sidebar_visible as u8, self.sidebar_width, active_id
+        );
+        for tab in &self.open {
+            text.push_str(&format!("{}\n", tab.id));
+        }
+        replace_file(&self.data_dir.join("session.tsv"), text.as_bytes())
+    }
+
+    unsafe fn apply_theme(&self) {
+        unsafe {
+            for item in [self.toggle, self.add, self.tab_add, self.tree, self.tabs] {
+                SendMessageW(item, WM_SETFONT, self.theme.ui as WPARAM, 0);
+            }
+            for tab in &self.open {
+                SendMessageW(tab.editor, WM_SETFONT, self.theme.editor as usize, 0);
+            }
+            SendMessageW(self.edit, WM_SETFONT, self.theme.editor as WPARAM, 0);
+            SendMessageW(
+                self.edit,
+                editing::EM_SETBKGNDCOLOR,
+                0,
+                theme::WHITE as isize,
+            );
+            for item in [
+                self.find_input,
+                self.replace_input,
+                self.find_case,
+                self.find_prev,
+                self.find_next,
+                self.find_close,
+                self.replace_one,
+                self.replace_all,
+            ] {
+                SendMessageW(item, WM_SETFONT, self.theme.small as usize, 0);
+            }
+            SendMessageW(self.tree, TVM_SETBKCOLOR, 0, theme::SIDEBAR as LPARAM);
+            SendMessageW(self.tree, TVM_SETTEXTCOLOR, 0, theme::INK as LPARAM);
+            SendMessageW(self.tree, TVM_SETITEMHEIGHT, self.theme.px(29) as usize, 0);
+            SendMessageW(self.tree, TVM_SETINDENT, self.theme.px(22) as usize, 0);
+        }
+    }
+
+    fn sidebar_edge(&self, width: i32) -> i32 {
+        if self.sidebar_visible {
+            self.theme.px(self.sidebar_width).min(
+                (width - self.theme.px(if self.find_visible { 340 } else { 220 }))
+                    .max(self.theme.px(150)),
+            )
+        } else {
+            0
+        }
+    }
+
+    fn publish_view(&self) {
+        if self.view_tabs.borrow().len() != self.open.len() {
+            *self.view_tabs.borrow_mut() = Rc::new(
+                self.open
+                    .iter()
+                    .map(|t| ui::RenderTab { id: t.id })
+                    .collect(),
+            );
+        }
+        ui::publish(ui::View {
+            hwnd: self.hwnd,
+            tree: self.tree,
+            tabs: self.tabs,
+            edit: self.edit,
+            toggle: self.toggle,
+            add: self.add,
+            tab_add: self.tab_add,
+            status: self.status,
+            theme: Rc::clone(&self.theme),
+            book: Rc::clone(&self.view_book),
+            handles: Rc::clone(&self.view_handles),
+            open: Rc::clone(&self.view_tabs.borrow()),
+            parents: Rc::clone(&self.view_parents),
+            active: self.active,
+            sidebar_width: self.sidebar_width,
+            sidebar_visible: self.sidebar_visible,
+            status_text: self.status_text.borrow().clone(),
+            tab_layout: self.tab_layout.get(),
+            tree_scroll: self.tree_scroll,
+            visible: Rc::clone(&self.visible),
+            find_visible: self.find_visible,
+            replace_visible: self.replace_visible,
+        });
+    }
+    fn sync_tree_view(&mut self) {
+        self.view_book = Rc::new(self.book.clone());
+        self.view_parents = Rc::new(self.book.notes.iter().map(|n| n.parent).collect());
+        self.view_handles = Rc::new(self.handles.clone());
+        self.refresh_tree_visibility();
+        self.publish_view();
+    }
+    fn refresh_tree_visibility(&mut self) -> bool {
+        let mut visible = Vec::new();
+        unsafe {
+            let mut handle = SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_ROOT as usize, 0);
+            while handle != 0 {
+                visible.push(handle);
+                handle = SendMessageW(
+                    self.tree,
+                    TVM_GETNEXTITEM,
+                    TVGN_NEXTVISIBLE as usize,
+                    handle,
+                );
+            }
+        }
+        if self.visible.as_ref() == &visible {
+            false
+        } else {
+            self.visible = Rc::new(visible);
+            true
+        }
+    }
+    unsafe fn layout(&self) {
+        unsafe {
+            let p = |v| self.theme.px(v);
+            let mut area = RECT::default();
+            GetClientRect(self.hwnd, &mut area);
+            let (w, h) = (area.right, area.bottom);
+            let left = self.sidebar_edge(w);
+            let content_x = if self.sidebar_visible { left + 1 } else { 0 };
+            let tabs_x = content_x + if self.sidebar_visible { 0 } else { p(42) };
+            let available = (w - tabs_x - p(38)).max(1);
+            let mut tabs = TabLayout::new(
+                available,
+                self.open.len(),
+                p(88),
+                p(180),
+                self.tab_layout.get().offset,
+            );
+            tabs.viewport = (tabs.width * self.open.len() as i32).min(available).max(1);
+            if let Some(active) = self.active {
+                tabs.reveal(active);
+            }
+            self.tab_layout.set(tabs);
+            self.publish_view();
+            let extra = if self.find_visible {
+                if self.replace_visible { p(80) } else { p(40) }
+            } else {
+                0
+            };
+            let editor_y = p(58) + extra;
+            let search_width = (w - content_x - p(280)).max(p(60));
+            let mut positions = vec![
+                (
+                    self.toggle,
+                    if self.sidebar_visible {
+                        left - p(42)
+                    } else {
+                        p(6)
+                    },
+                    p(4),
+                    p(30),
+                    p(28),
+                ),
+                (
+                    self.add,
+                    p(12),
+                    p(10),
+                    p(134).min(left - p(60)).max(0),
+                    p(34),
+                ),
+                (
+                    self.tree_host,
+                    p(8),
+                    p(62),
+                    (left - p(22)).max(0),
+                    (h - p(70)).max(0),
+                ),
+                (
+                    self.tree_scroll,
+                    left - p(10),
+                    p(62),
+                    p(6),
+                    (h - p(70)).max(0),
+                ),
+                (self.tabs, tabs_x, 0, tabs.viewport, p(36)),
+                (
+                    self.tab_add,
+                    tabs_x + tabs.viewport + p(3),
+                    p(3),
+                    p(30),
+                    p(29),
+                ),
+                (
+                    self.edit,
+                    content_x + p(24),
+                    editor_y,
+                    (w - content_x - p(40)).max(0),
+                    (h - editor_y - p(52)).max(0),
+                ),
+                (
+                    self.status,
+                    content_x,
+                    (h - p(32)).max(0),
+                    (w - content_x).max(0),
+                    p(32),
+                ),
+                (
+                    self.find_input,
+                    content_x + p(64),
+                    p(43),
+                    search_width,
+                    p(25),
+                ),
+                (
+                    self.find_prev,
+                    content_x + p(72) + search_width,
+                    p(42),
+                    p(36),
+                    p(27),
+                ),
+                (
+                    self.find_next,
+                    content_x + p(112) + search_width,
+                    p(42),
+                    p(36),
+                    p(27),
+                ),
+                (
+                    self.find_case,
+                    content_x + p(156) + search_width,
+                    p(42),
+                    p(72),
+                    p(27),
+                ),
+                (self.find_close, w - p(43), p(42), p(35), p(27)),
+                (
+                    self.replace_input,
+                    content_x + p(64),
+                    p(83),
+                    search_width,
+                    p(25),
+                ),
+                (
+                    self.replace_one,
+                    content_x + p(72) + search_width,
+                    p(82),
+                    p(64),
+                    p(27),
+                ),
+                (
+                    self.replace_all,
+                    content_x + p(140) + search_width,
+                    p(82),
+                    p(92),
+                    p(27),
+                ),
+            ];
+            let mut batch = BeginDeferWindowPos(positions.len() as i32);
+            for (hwnd, x, y, cx, cy) in positions.drain(..) {
+                let mut current = RECT::default();
+                GetWindowRect(hwnd, &mut current);
+                let mut pt = POINT {
+                    x: current.left,
+                    y: current.top,
+                };
+                ScreenToClient(GetParent(hwnd), &mut pt);
+                if pt.x == x
+                    && pt.y == y
+                    && current.right - current.left == cx
+                    && current.bottom - current.top == cy
+                {
+                    continue;
+                }
+                if !batch.is_null() {
+                    batch = DeferWindowPos(
+                        batch,
+                        hwnd,
+                        null_mut(),
+                        x,
+                        y,
+                        cx,
+                        cy,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                    );
+                }
+            }
+            if !batch.is_null() {
+                EndDeferWindowPos(batch);
+            }
+            // A deferred batch may only contain siblings. The tree lives in a
+            // clipping host so its native scrollbar can stay functional.
+            let tree_width =
+                (left - p(22)).max(0) + GetSystemMetricsForDpi(SM_CXVSCROLL, self.theme.dpi);
+            let tree_height = (h - p(70)).max(0);
+            let mut tree_area = RECT::default();
+            GetWindowRect(self.tree, &mut tree_area);
+            if tree_area.right - tree_area.left != tree_width
+                || tree_area.bottom - tree_area.top != tree_height
+            {
+                SetWindowPos(
+                    self.tree,
+                    null_mut(),
+                    0,
+                    0,
+                    tree_width,
+                    tree_height,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                );
+            }
+            let visible_rows = ((h - p(70)) / p(29).max(1)).max(1) as usize;
+            for (hwnd, show) in [
+                (self.add, self.sidebar_visible),
+                (self.tree_host, self.sidebar_visible),
+                (
+                    self.tree_scroll,
+                    self.sidebar_visible && self.visible.len() > visible_rows,
+                ),
+                (self.edit, self.active.is_some()),
+                (self.find_input, self.find_visible),
+                (self.find_prev, self.find_visible),
+                (self.find_next, self.find_visible),
+                (self.find_case, self.find_visible),
+                (self.find_close, self.find_visible),
+                (
+                    self.replace_input,
+                    self.find_visible && self.replace_visible,
+                ),
+                (self.replace_one, self.find_visible && self.replace_visible),
+                (self.replace_all, self.find_visible && self.replace_visible),
+            ] {
+                if (IsWindowVisible(hwnd) != 0) != show {
+                    ShowWindow(hwnd, if show { SW_SHOWNA } else { SW_HIDE });
+                }
+            }
+            RedrawWindow(
+                self.hwnd,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE,
+            );
+        }
+    }
+    unsafe fn tab_click(&mut self, x: i32, y: i32) {
+        unsafe {
+            let layout = self.tab_layout.get();
+            if layout.overflow && y >= self.theme.px(32) {
+                self.tab_drag = true;
+                SetCapture(self.tabs);
+                self.drag_tab_scroll(x);
+                return;
+            }
+            if let Some(index) = layout.hit(x) {
+                if x >= layout.bounds(index).1 - self.theme.px(24) {
+                    self.close_tab(index);
+                } else {
+                    self.activate(index);
+                }
+            }
+        }
+    }
+    unsafe fn scroll_tabs(&self, delta: i32) {
+        let mut tabs = self.tab_layout.get();
+        tabs.scroll(delta * self.theme.px(100) / 120);
+        self.tab_layout.set(tabs);
+        self.publish_view();
+        unsafe {
+            InvalidateRect(self.tabs, null(), 0);
+        }
+    }
+    unsafe fn drag_tab_scroll(&self, x: i32) {
+        let mut tabs = self.tab_layout.get();
+        let total = tabs.width * tabs.count as i32;
+        let thumb = (tabs.viewport * tabs.viewport / total.max(1)).max(self.theme.px(24));
+        tabs.offset = ((x - thumb / 2).max(0) * (total - tabs.viewport).max(0)
+            / (tabs.viewport - thumb).max(1))
+        .clamp(0, (total - tabs.viewport).max(0));
+        self.tab_layout.set(tabs);
+        self.publish_view();
+        unsafe {
+            InvalidateRect(self.tabs, null(), 0);
+        }
+    }
+    unsafe fn scroll_tree(&self, rows: i32) {
+        unsafe {
+            let first = SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE as usize, 0);
+            let current = self.visible.iter().position(|&h| h == first).unwrap_or(0) as i32;
+            let count = SendMessageW(self.tree, TVM_GETVISIBLECOUNT, 0, 0).max(1) as i32;
+            let next =
+                (current + rows).clamp(0, (self.visible.len() as i32 - count).max(0)) as usize;
+            if let Some(&item) = self.visible.get(next) {
+                SendMessageW(self.tree, TVM_SELECTITEM, TVGN_FIRSTVISIBLE as usize, item);
+            }
+            InvalidateRect(self.tree_scroll, null(), 0);
+        }
+    }
+    unsafe fn drag_tree_scroll(&self, y: i32) {
+        unsafe {
+            let mut area = RECT::default();
+            GetClientRect(self.tree_scroll, &mut area);
+            let count = SendMessageW(self.tree, TVM_GETVISIBLECOUNT, 0, 0).max(1) as i32;
+            let total = self.visible.len() as i32;
+            let thumb = (area.bottom * count / total.max(1))
+                .max(self.theme.px(24))
+                .min(area.bottom);
+            let index = ((y - thumb / 2).max(0) * (total - count).max(0)
+                / (area.bottom - thumb).max(1))
+            .clamp(0, (total - count).max(0)) as usize;
+            if let Some(&item) = self.visible.get(index) {
+                SendMessageW(self.tree, TVM_SELECTITEM, TVGN_FIRSTVISIBLE as usize, item);
+            }
+            InvalidateRect(self.tree_scroll, null(), 0);
+        }
+    }
+
+    unsafe fn set_status(&self, text: &str) {
+        unsafe {
+            *self.status_text.borrow_mut() = text.into();
+            self.publish_view();
+            InvalidateRect(self.status, null(), 0);
+        }
+    }
+
+    unsafe fn selected_id(&self) -> Option<u64> {
+        let handle = unsafe { SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0) };
+        self.handles.get(&handle).copied()
+    }
+
+    unsafe fn rebuild_tree(&mut self, select: Option<u64>) {
+        unsafe {
+            SendMessageW(self.tree, WM_SETREDRAW, 0, 0);
+            SendMessageW(self.tree, TVM_DELETEITEM, 0, TVI_ROOT as LPARAM);
+        }
+        self.handles.clear();
+        unsafe {
+            self.insert_children(0, TVI_ROOT);
+        }
+        if let Some(id) = select
+            && let Some((&handle, _)) = self.handles.iter().find(|&(_, &value)| value == id)
+        {
+            unsafe {
+                SendMessageW(self.tree, TVM_SELECTITEM, TVGN_CARET as usize, handle);
+            }
+        }
+        self.sync_tree_view();
+        unsafe {
+            SendMessageW(self.tree, WM_SETREDRAW, 1, 0);
+            InvalidateRect(self.tree, null(), 0);
+            PostMessageW(self.hwnd, REFRESH_UI, 0, 0);
+        }
+    }
+
+    unsafe fn insert_children(&mut self, parent_id: u64, parent_handle: HTREEITEM) {
+        for id in self.book.children(parent_id) {
+            let title = self.book.get(id).unwrap().title.clone();
+            let mut label = wide(&title);
+            let mut insert = TVINSERTSTRUCTW {
+                hParent: parent_handle,
+                hInsertAfter: TVI_LAST,
+                ..Default::default()
+            };
+            insert.Anonymous.item = TVITEMW {
+                mask: TVIF_TEXT | TVIF_PARAM,
+                pszText: label.as_mut_ptr(),
+                lParam: id as LPARAM,
+                ..Default::default()
+            };
+            let handle = unsafe {
+                SendMessageW(self.tree, TVM_INSERTITEMW, 0, &insert as *const _ as LPARAM)
+            } as HTREEITEM;
+            self.handles.insert(handle as isize, id);
+            unsafe {
+                self.insert_children(id, handle);
+            }
+            if self.expanded.contains(&id) {
+                unsafe {
+                    SendMessageW(self.tree, TVM_EXPAND, TVE_EXPAND as usize, handle as LPARAM);
+                }
+            }
+        }
+    }
+
+    unsafe fn current_text(&self) -> String {
+        unsafe { window_text(self.edit) }
+    }
+
+    unsafe fn capture_edit(&mut self) {
+        if let Some(index) = self.active {
+            let text = unsafe { self.current_text() };
+            if text != self.open[index].text {
+                self.open[index].text = text;
+                self.open[index].dirty = true;
+                unsafe {
+                    SetTimer(self.hwnd, AUTOSAVE_TIMER, 650, None);
+                }
+            }
+        }
+    }
+
+    unsafe fn save_all(&mut self) -> bool {
+        unsafe {
+            self.capture_edit();
+        }
+        for tab in &mut self.open {
+            if tab.dirty {
+                let file = self.book.file(&self.data_dir, tab.id);
+                if let Err(error) = replace_file(&file, tab.text.as_bytes()) {
+                    report(self.hwnd, "메모를 저장하지 못했습니다.", error);
+                    return false;
+                }
+                tab.dirty = false;
+            }
+        }
+        unsafe {
+            KillTimer(self.hwnd, AUTOSAVE_TIMER);
+            self.set_status("저장됨");
+        }
+        true
+    }
+
+    unsafe fn activate(&mut self, index: usize) {
+        if index >= self.open.len() {
+            return;
+        }
+        unsafe {
+            if self.active == Some(index) {
+                SetFocus(self.edit);
+                return;
+            }
+            self.capture_edit();
+            ShowWindow(self.edit, SW_HIDE);
+            self.active = Some(index);
+            self.edit = self.open[index].editor;
+            self.last_match = None;
+            self.publish_view();
+            self.layout();
+            ShowWindow(self.edit, SW_SHOWNA);
+            if let Some((&handle, _)) = self
+                .handles
+                .iter()
+                .find(|&(_, &id)| id == self.open[index].id)
+            {
+                SendMessageW(self.tree, TVM_SELECTITEM, TVGN_CARET as usize, handle);
+            }
+            // Selecting a tab can expand its ancestors synchronously, while
+            // application state is borrowed and expansion notifications defer.
+            if self.refresh_tree_visibility() {
+                self.layout();
+            }
+            InvalidateRect(self.tree_scroll, null(), 0);
+            SetFocus(self.edit);
+            self.set_status(if self.open[index].dirty {
+                "저장 중…"
+            } else {
+                "저장됨"
+            });
+            InvalidateRect(self.tabs, null(), 0);
+        }
+    }
+
+    unsafe fn open_note(&mut self, id: u64) {
+        if let Some(index) = self.open.iter().position(|t| t.id == id) {
+            unsafe {
+                self.activate(index);
+            }
+            return;
+        }
+        let file = self.book.file(&self.data_dir, id);
+        let text = match fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(error) => {
+                report(self.hwnd, "메모를 열지 못했습니다.", error);
+                return;
+            }
+        };
+        let editor = unsafe { memo_editor(self.hwnd) };
+        if editor.is_null() {
+            report(
+                self.hwnd,
+                "편집 창을 만들지 못했습니다.",
+                std::io::Error::last_os_error(),
+            );
+            return;
+        }
+        self.loading = true;
+        unsafe {
+            SendMessageW(editor, WM_SETFONT, self.theme.editor as usize, 0);
+            SendMessageW(editor, editing::EM_SETBKGNDCOLOR, 0, theme::WHITE as isize);
+            SetWindowTextW(editor, wide(&text).as_ptr());
+            SendMessageW(editor, EM_EMPTYUNDOBUFFER, 0, 0);
+        }
+        self.loading = false;
+        let index = self.open.len();
+        self.open.push(OpenTab {
+            id,
+            text: unsafe { window_text(editor) },
+            dirty: false,
+            editor,
+        });
+        unsafe {
+            self.activate(index);
+        }
+    }
+
+    unsafe fn close_active(&mut self) {
+        let Some(index) = self.active else {
+            return;
+        };
+        unsafe {
+            self.close_tab(index);
+        }
+    }
+
+    unsafe fn close_tab(&mut self, index: usize) {
+        if index >= self.open.len() {
+            return;
+        }
+        if !unsafe { self.save_all() } {
+            return;
+        }
+        let previous_active = self.active;
+        let closed = self.open.remove(index);
+        if self.edit == closed.editor {
+            self.edit = self.empty_edit;
+        }
+        unsafe {
+            DestroyWindow(closed.editor);
+        }
+
+        self.active = None;
+        if self.open.is_empty() {
+            self.loading = true;
+            unsafe {
+                SetWindowTextW(self.edit, wide("").as_ptr());
+                EnableWindow(self.edit, 0);
+                ShowWindow(self.edit, SW_HIDE);
+                self.set_status("준비됨");
+                InvalidateRect(self.hwnd, null(), 0);
+                InvalidateRect(self.tabs, null(), 0);
+            }
+            self.loading = false;
+            unsafe {
+                self.layout();
+            }
+        } else {
+            let next = match previous_active {
+                Some(active) if active == index => index.min(self.open.len() - 1),
+                Some(active) if active > index => active - 1,
+                Some(active) => active,
+                None => 0,
+            };
+            unsafe {
+                self.activate(next);
+            }
+        }
+    }
+
+    unsafe fn create_note(&mut self, parent: u64) {
+        let previous = self.book.clone();
+        let id = self.book.add(parent, "새 메모".to_owned());
+        let file = self.book.file(&self.data_dir, id);
+        if let Err(error) = fs::write(&file, b"") {
+            self.book.remove(id);
+            report(self.hwnd, "메모를 만들지 못했습니다.", error);
+            return;
+        }
+        if let Err(error) = self.book.save(&self.data_dir) {
+            self.book = previous;
+            let _ = fs::remove_file(file);
+            report(self.hwnd, "메모 목록을 저장하지 못했습니다.", error);
+            return;
+        }
+        self.expanded.insert(parent);
+        unsafe {
+            self.rebuild_tree(Some(id));
+            self.open_note(id);
+            self.rename_selected();
+        }
+    }
+
+    unsafe fn rename_selected(&self) {
+        let handle = unsafe { SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0) };
+        if handle != 0 {
+            unsafe {
+                SetFocus(self.tree);
+                SendMessageW(self.tree, TVM_EDITLABELW, 0, handle);
+                PostMessageW(self.hwnd, POSITION_RENAME, 0, 0);
+            }
+        }
+    }
+
+    unsafe fn layout_rename(&self) {
+        unsafe {
+            let editor = SendMessageW(self.tree, TVM_GETEDITCONTROL, 0, 0) as HWND;
+            let handle = SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0);
+            if editor.is_null() || handle == 0 {
+                return;
+            }
+            let mut label = RECT::default();
+            *(&mut label as *mut RECT as *mut HTREEITEM) = handle;
+            SendMessageW(
+                self.tree,
+                TVM_GETITEMRECT,
+                1,
+                &mut label as *mut _ as LPARAM,
+            );
+            let mut area = RECT::default();
+            GetClientRect(self.tree, &mut area);
+            let x = label.left + self.theme.px(25);
+            SendMessageW(editor, WM_SETFONT, self.theme.ui as usize, 1);
+            MoveWindow(
+                editor,
+                x,
+                label.top + 1,
+                (area.right - x - self.theme.px(18)).max(self.theme.px(30)),
+                (label.bottom - label.top - 2).max(1),
+                1,
+            );
+            InvalidateRect(self.tree, null(), 0);
+        }
+    }
+
+    unsafe fn delete_selected(&mut self) {
+        let Some(id) = (unsafe { self.selected_id() }) else {
+            return;
+        };
+        let ids = self.book.subtree(id);
+        let prompt = if ids.len() == 1 {
+            "이 메모를 삭제할까요?\n삭제한 파일은 휴지통 폴더에 보관됩니다.".to_owned()
+        } else {
+            format!(
+                "이 메모와 하위 메모 {}개를 삭제할까요?\n삭제한 파일은 휴지통 폴더에 보관됩니다.",
+                ids.len() - 1
+            )
+        };
+        if unsafe { message(self.hwnd, "메모 삭제", &prompt, MB_YESNO | MB_ICONQUESTION) } != IDYES
+        {
+            return;
+        }
+        if !unsafe { self.save_all() } {
+            return;
+        }
+        let trash = self.data_dir.join("trash");
+        if let Err(error) = fs::create_dir_all(&trash) {
+            report(self.hwnd, "휴지통을 만들지 못했습니다.", error);
+            return;
+        }
+        let mut moved = Vec::new();
+        for &note_id in &ids {
+            let source = self.book.file(&self.data_dir, note_id);
+            let target = trash.join(format!(
+                "{}-{}.txt",
+                note_id,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ));
+            if let Err(error) = fs::rename(&source, &target) {
+                for (from, to) in moved.iter().rev() {
+                    let _ = fs::rename(to, from);
+                }
+                report(self.hwnd, "메모를 휴지통으로 옮기지 못했습니다.", error);
+                return;
+            }
+            moved.push((source, target));
+        }
+        let previous = self.book.clone();
+        self.book.remove(id);
+        if let Err(error) = self.book.save(&self.data_dir) {
+            self.book = previous;
+            for (from, to) in moved.iter().rev() {
+                let _ = fs::rename(to, from);
+            }
+            report(self.hwnd, "메모 목록을 저장하지 못했습니다.", error);
+            return;
+        }
+        self.edit = self.empty_edit;
+        self.open.retain(|tab| {
+            if ids.contains(&tab.id) {
+                unsafe {
+                    DestroyWindow(tab.editor);
+                }
+                false
+            } else {
+                true
+            }
+        });
+        self.active = None;
+        self.loading = true;
+        unsafe {
+            SetWindowTextW(self.edit, wide("").as_ptr());
+            EnableWindow(self.edit, 0);
+            self.rebuild_tree(None);
+        }
+        self.loading = false;
+        if !self.open.is_empty() {
+            unsafe {
+                self.activate(0);
+            }
+        }
+        unsafe {
+            self.layout();
+        }
+    }
+
+    unsafe fn shift_selected(&mut self, direction: i32) {
+        let Some(id) = (unsafe { self.selected_id() }) else {
+            return;
+        };
+        let parent = self.book.get(id).unwrap().parent;
+        let siblings = self.book.children(parent);
+        let Some(pos) = siblings.iter().position(|&n| n == id) else {
+            return;
+        };
+        let before = if direction < 0 {
+            if pos == 0 {
+                return;
+            }
+            Some(siblings[pos - 1])
+        } else {
+            if pos + 1 >= siblings.len() {
+                return;
+            }
+            siblings.get(pos + 2).copied()
+        };
+        let previous = self.book.clone();
+        if self.book.move_note(id, parent, before) {
+            unsafe {
+                self.persist_tree(previous, Some(id));
+            }
+        }
+    }
+
+    unsafe fn outdent_selected(&mut self) {
+        let Some(id) = (unsafe { self.selected_id() }) else {
+            return;
+        };
+        let parent = self.book.get(id).unwrap().parent;
+        if parent == 0 {
+            return;
+        }
+        let grandparent = self.book.get(parent).unwrap().parent;
+        let siblings = self.book.children(grandparent);
+        let pos = siblings.iter().position(|&n| n == parent).unwrap();
+        let before = siblings.get(pos + 1).copied();
+        let previous = self.book.clone();
+        if self.book.move_note(id, grandparent, before) {
+            unsafe {
+                self.persist_tree(previous, Some(id));
+            }
+        }
+    }
+
+    unsafe fn persist_tree(&mut self, previous: Notebook, select: Option<u64>) -> bool {
+        if let Err(error) = self.book.save(&self.data_dir) {
+            self.book = previous;
+            report(self.hwnd, "메모 목록을 저장하지 못했습니다.", error);
+            unsafe {
+                self.rebuild_tree(select);
+            }
+            return false;
+        }
+        unsafe {
+            self.rebuild_tree(select);
+        }
+        true
+    }
+
+    unsafe fn hit_tree(&self) -> Option<(u64, i32, HTREEITEM)> {
+        unsafe {
+            let mut pt = POINT::default();
+            GetCursorPos(&mut pt);
+            ScreenToClient(self.tree, &mut pt);
+            let mut hit = TVHITTESTINFO {
+                pt,
+                flags: 0,
+                hItem: 0,
+            };
+            SendMessageW(self.tree, TVM_HITTEST, 0, &mut hit as *mut _ as LPARAM);
+            self.handles
+                .get(&hit.hItem)
+                .map(|&id| (id, pt.y, hit.hItem))
+        }
+    }
+
+    unsafe fn finish_drag(&mut self) {
+        let Some(id) = self.dragging.take() else {
+            return;
+        };
+        unsafe {
+            ReleaseCapture();
+            SendMessageW(self.tree, TVM_SELECTITEM, TVGN_DROPHILITE as usize, 0);
+        }
+        let (parent, before) = if let Some((target, y, handle)) = unsafe { self.hit_tree() } {
+            if target == id {
+                return;
+            }
+            let mut rect = RECT::default();
+            unsafe {
+                *(std::ptr::addr_of_mut!(rect) as *mut HTREEITEM) = handle;
+                SendMessageW(self.tree, TVM_GETITEMRECT, 1, &mut rect as *mut _ as LPARAM);
+            }
+            let height = (rect.bottom - rect.top).max(1);
+            if y < rect.top + height / 4 {
+                (self.book.get(target).unwrap().parent, Some(target))
+            } else if y >= rect.bottom - height / 4 {
+                let p = self.book.get(target).unwrap().parent;
+                let siblings = self.book.children(p);
+                let pos = siblings.iter().position(|&n| n == target).unwrap();
+                (p, siblings.get(pos + 1).copied())
+            } else {
+                (target, None)
+            }
+        } else {
+            (0, None)
+        };
+        let previous = self.book.clone();
+        if self.book.move_note(id, parent, before) {
+            self.expanded.insert(parent);
+            unsafe {
+                self.persist_tree(previous, Some(id));
+            }
+        }
+    }
+
+    unsafe fn context_menu(&mut self) {
+        unsafe {
+            if let Some((_, _, handle)) = self.hit_tree() {
+                SendMessageW(
+                    self.tree,
+                    TVM_SELECTITEM,
+                    TVGN_CARET as usize,
+                    handle as LPARAM,
+                );
+            }
+            let menu = CreatePopupMenu();
+            let entries = [
+                (MENU_NEW_CHILD, "하위 메모 추가"),
+                (MENU_NEW_ROOT, "최상위 메모 추가"),
+                (MENU_RENAME, "이름 바꾸기    F2"),
+                (MENU_UP, "위로 이동"),
+                (MENU_DOWN, "아래로 이동"),
+                (MENU_OUTDENT, "한 단계 위로"),
+                (MENU_DELETE, "삭제"),
+            ];
+            for (id, label) in entries {
+                AppendMenuW(menu, MF_STRING, id, wide(label).as_ptr());
+            }
+            let mut pt = POINT::default();
+            GetCursorPos(&mut pt);
+            TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, self.hwnd, null());
+            DestroyMenu(menu);
+        }
+    }
+
+    unsafe fn show_find(&mut self, replace: bool) {
+        if self.active.is_none() {
+            return;
+        }
+        unsafe {
+            let selection = editing::selection(self.edit);
+            if selection.end > selection.start && selection.end - selection.start <= 200 {
+                let mut buffer = vec![0u16; (selection.end - selection.start + 1) as usize];
+                let used = SendMessageW(self.edit, WM_USER + 62, 0, buffer.as_mut_ptr() as isize)
+                    .max(0) as usize;
+                let selected = String::from_utf16_lossy(&buffer[..used]);
+                if !selected.contains(['\r', '\n']) {
+                    SetWindowTextW(self.find_input, wide(&selected).as_ptr());
+                }
+            }
+            self.find_visible = true;
+            self.replace_visible = replace;
+            self.last_match = None;
+            SendMessageW(self.edit, editing::EM_STOPGROUPTYPING, 0, 0);
+            self.layout();
+            SetFocus(self.find_input);
+            SendMessageW(self.find_input, EM_SETSEL, 0, -1);
+        }
+    }
+    unsafe fn hide_find(&mut self) {
+        self.find_visible = false;
+        self.replace_visible = false;
+        unsafe {
+            self.layout();
+            SetFocus(self.edit);
+        }
+    }
+    unsafe fn find_next(&mut self, backwards: bool, live: bool) {
+        if self.active.is_none() {
+            return;
+        }
+        unsafe {
+            let query = window_text(self.find_input);
+            if query.is_empty() {
+                self.last_match = None;
+                self.set_status("검색어를 입력하세요");
+                return;
+            }
+            let case = SendMessageW(self.find_case, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+            let selection = editing::selection(self.edit);
+            let start = if backwards || live {
+                selection.start
+            } else {
+                selection.end
+            };
+            let end = if backwards { 0 } else { -1 };
+            let result =
+                editing::find(self.edit, &query, start, end, backwards, case).or_else(|| {
+                    editing::find(
+                        self.edit,
+                        &query,
+                        if backwards {
+                            GetWindowTextLengthW(self.edit)
+                        } else {
+                            0
+                        },
+                        end,
+                        backwards,
+                        case,
+                    )
+                });
+            self.last_query = query;
+            self.last_match = result;
+            if let Some(range) = result {
+                editing::select(self.edit, range);
+                SendMessageW(self.edit, EM_SCROLLCARET, 0, 0);
+                self.set_status("검색 결과 선택됨");
+            } else {
+                self.set_status("찾을 수 없음");
+            }
+        }
+    }
+    unsafe fn replace_one(&mut self) {
+        if self.active.is_none() {
+            return;
+        }
+        unsafe {
+            let range = editing::selection(self.edit);
+            let query = window_text(self.find_input);
+            let case = SendMessageW(self.find_case, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+            if !query.is_empty()
+                && range.end > range.start
+                && editing::find(self.edit, &query, range.start, range.end, false, case)
+                    == Some(range)
+            {
+                let replacement = window_text(self.replace_input);
+                SendMessageW(self.edit, editing::EM_STOPGROUPTYPING, 0, 0);
+                SendMessageW(
+                    self.edit,
+                    EM_REPLACESEL,
+                    1,
+                    wide(&replacement).as_ptr() as isize,
+                );
+                self.capture_edit();
+            }
+            self.find_next(false, false);
+        }
+    }
+    unsafe fn replace_all(&mut self) {
+        if self.active.is_none() {
+            return;
+        }
+        unsafe {
+            let query = window_text(self.find_input);
+            if query.is_empty() {
+                return;
+            }
+            let case = SendMessageW(self.find_case, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+            let mut ranges = Vec::new();
+            let mut start = 0;
+            while let Some(range) = editing::find(self.edit, &query, start, -1, false, case) {
+                if range.end <= start {
+                    break;
+                }
+                start = range.end;
+                ranges.push(range);
+            }
+            if ranges.is_empty() {
+                self.set_status("찾을 수 없음");
+                return;
+            }
+            let text = editing::replace_ranges(
+                &self.current_text(),
+                &ranges,
+                &window_text(self.replace_input),
+            );
+            SendMessageW(self.edit, editing::EM_STOPGROUPTYPING, 0, 0);
+            SendMessageW(self.edit, WM_SETREDRAW, 0, 0);
+            editing::select(self.edit, editing::CharRange { start: 0, end: -1 });
+            SendMessageW(self.edit, EM_REPLACESEL, 1, wide(&text).as_ptr() as isize);
+            editing::select(self.edit, editing::CharRange::default());
+            SendMessageW(self.edit, WM_SETREDRAW, 1, 0);
+            InvalidateRect(self.edit, null(), 0);
+            self.capture_edit();
+            self.set_status(&format!("{}개 바꿈", ranges.len()));
+        }
+    }
+    unsafe fn editor_menu(&self) {
+        unsafe {
+            let menu = CreatePopupMenu();
+            let selected = editing::selection(self.edit);
+            let has_selection = selected.start != selected.end;
+            for (id, label, enabled) in [
+                (
+                    MENU_UNDO,
+                    "실행 취소    Ctrl+Z",
+                    SendMessageW(self.edit, EM_CANUNDO, 0, 0) != 0,
+                ),
+                (
+                    MENU_REDO,
+                    "다시 실행    Ctrl+Y",
+                    SendMessageW(self.edit, WM_USER + 85, 0, 0) != 0,
+                ),
+                (MENU_CUT, "잘라내기    Ctrl+X", has_selection),
+                (MENU_COPY, "복사    Ctrl+C", has_selection),
+                (MENU_PASTE, "붙여넣기    Ctrl+V", true),
+                (MENU_SELECT_ALL, "전체 선택    Ctrl+A", true),
+                (MENU_FIND, "검색    Ctrl+F", true),
+                (MENU_REPLACE, "바꾸기    Ctrl+H", true),
+            ] {
+                AppendMenuW(
+                    menu,
+                    MF_STRING | if enabled { 0 } else { MF_GRAYED },
+                    id,
+                    wide(label).as_ptr(),
+                );
+            }
+            let mut point = POINT::default();
+            GetCursorPos(&mut point);
+            let chosen = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                point.x,
+                point.y,
+                0,
+                self.hwnd,
+                null(),
+            );
+            DestroyMenu(menu);
+            if chosen != 0 {
+                PostMessageW(self.hwnd, WM_COMMAND, chosen as usize, 0);
+            }
+        }
+    }
+
+    unsafe fn command(&mut self, id: usize, code: usize) {
+        match id {
+            ID_FIND if code == EN_CHANGE as usize => unsafe {
+                self.find_next(false, true);
+            },
+            ID_FIND_PREV => unsafe {
+                self.find_next(true, false);
+            },
+            ID_FIND_NEXT => unsafe {
+                self.find_next(false, false);
+            },
+            ID_FIND_CASE => unsafe {
+                self.find_next(false, true);
+            },
+            ID_FIND_CLOSE => unsafe {
+                self.hide_find();
+            },
+            ID_REPLACE_ONE => unsafe {
+                self.replace_one();
+            },
+            ID_REPLACE_ALL => unsafe {
+                self.replace_all();
+            },
+            MENU_UNDO | MENU_REDO | MENU_CUT | MENU_COPY | MENU_PASTE | MENU_SELECT_ALL => unsafe {
+                SetFocus(self.edit);
+                match id {
+                    MENU_UNDO => {
+                        SendMessageW(self.edit, WM_UNDO, 0, 0);
+                    }
+                    MENU_REDO => {
+                        SendMessageW(self.edit, editing::EM_REDO, 0, 0);
+                    }
+                    MENU_CUT => {
+                        SendMessageW(self.edit, WM_CUT, 0, 0);
+                    }
+                    MENU_COPY => {
+                        SendMessageW(self.edit, WM_COPY, 0, 0);
+                    }
+                    MENU_PASTE => {
+                        SendMessageW(self.edit, WM_PASTE, 0, 0);
+                    }
+                    _ => {
+                        editing::select(self.edit, editing::CharRange { start: 0, end: -1 });
+                    }
+                }
+                self.capture_edit();
+                self.publish_view();
+                InvalidateRect(self.status, null(), 0);
+            },
+            MENU_FIND => unsafe {
+                self.show_find(false);
+            },
+            MENU_REPLACE => unsafe {
+                self.show_find(true);
+            },
+            ID_TOGGLE => {
+                self.sidebar_visible = !self.sidebar_visible;
+                unsafe {
+                    self.layout();
+                }
+            }
+            ID_ADD | MENU_NEW_CHILD => {
+                let parent = unsafe { self.selected_id() }.unwrap_or(0);
+                unsafe {
+                    self.create_note(parent);
+                }
+            }
+            ID_TAB_ADD => unsafe {
+                self.create_note(0);
+            },
+            MENU_NEW_ROOT => unsafe {
+                self.create_note(0);
+            },
+            MENU_RENAME => unsafe {
+                self.rename_selected();
+            },
+            MENU_DELETE => unsafe {
+                self.delete_selected();
+            },
+            MENU_UP => unsafe {
+                self.shift_selected(-1);
+            },
+            MENU_DOWN => unsafe {
+                self.shift_selected(1);
+            },
+            MENU_OUTDENT => unsafe {
+                self.outdent_selected();
+            },
+            ID_EDIT if code == EN_CHANGE as usize && !self.loading => unsafe {
+                if let Some(index) = self.active {
+                    self.open[index].dirty = true;
+                }
+                self.last_match = None;
+                SetTimer(self.hwnd, AUTOSAVE_TIMER, 650, None);
+                self.set_status("저장 중…");
+            },
+            _ => {}
+        }
+    }
+
+    unsafe fn notify(&mut self, hdr: &NMHDR) -> LRESULT {
+        if hdr.hwndFrom == self.edit && hdr.code == editing::EN_SELCHANGE {
+            unsafe {
+                InvalidateRect(self.status, null(), 0);
+            }
+        } else if hdr.hwndFrom == self.tree {
+            match hdr.code {
+                TVN_BEGINLABELEDITW => unsafe {
+                    PostMessageW(self.hwnd, POSITION_RENAME, 0, 0);
+                },
+                NM_CLICK => {
+                    let mut pt = POINT::default();
+                    unsafe {
+                        GetCursorPos(&mut pt);
+                        ScreenToClient(self.tree, &mut pt);
+                    }
+                    let mut hit = TVHITTESTINFO {
+                        pt,
+                        flags: 0,
+                        hItem: 0,
+                    };
+                    unsafe {
+                        SendMessageW(self.tree, TVM_HITTEST, 0, &mut hit as *mut _ as LPARAM);
+                    }
+                    if hit.flags & (TVHT_ONITEMLABEL | TVHT_ONITEMICON | TVHT_ONITEMRIGHT) != 0
+                        && let Some(&id) = self.handles.get(&hit.hItem)
+                    {
+                        unsafe {
+                            self.open_note(id);
+                        }
+                    }
+                }
+                TVN_SELCHANGEDW => {
+                    let event = unsafe { &*(hdr as *const _ as *const NMTREEVIEWW) };
+                    if event.itemNew.lParam > 0 {
+                        unsafe {
+                            self.open_note(event.itemNew.lParam as u64);
+                        }
+                    }
+                }
+                TVN_ENDLABELEDITW => {
+                    let event = unsafe { &*(hdr as *const _ as *const NMTVDISPINFOW) };
+                    if !event.item.pszText.is_null() {
+                        let mut len = 0;
+                        unsafe {
+                            while *event.item.pszText.add(len) != 0 {
+                                len += 1;
+                            }
+                        }
+                        let title = unsafe {
+                            String::from_utf16_lossy(std::slice::from_raw_parts(
+                                event.item.pszText,
+                                len,
+                            ))
+                        };
+                        let title = title.trim();
+                        if !title.is_empty() {
+                            let id = event.item.lParam as u64;
+                            let previous = self.book.clone();
+                            if let Some(note) = self.book.get_mut(id) {
+                                note.title = title.to_owned();
+                            }
+                            if let Err(error) = self.book.save(&self.data_dir) {
+                                self.book = previous;
+                                report(self.hwnd, "메모 이름을 저장하지 못했습니다.", error);
+                                return 0;
+                            }
+                            self.sync_tree_view();
+                            unsafe {
+                                self.layout();
+                                PostMessageW(self.hwnd, REFRESH_UI, 0, 0);
+                            }
+                            return 1;
+                        }
+                    }
+                }
+                TVN_BEGINDRAGW => {
+                    let event = unsafe { &*(hdr as *const _ as *const NMTREEVIEWW) };
+                    if event.itemNew.lParam > 0 {
+                        self.dragging = Some(event.itemNew.lParam as u64);
+                        unsafe {
+                            SetCapture(self.hwnd);
+                        }
+                    }
+                }
+                TVN_ITEMEXPANDEDW => {
+                    let event = unsafe { &*(hdr as *const _ as *const NMTREEVIEWW) };
+                    let id = event.itemNew.lParam as u64;
+                    if event.action == TVE_EXPAND {
+                        self.expanded.insert(id);
+                    } else {
+                        self.expanded.remove(&id);
+                    }
+                    self.sync_tree_view();
+                    unsafe {
+                        self.layout();
+                    }
+                }
+                NM_RCLICK => unsafe {
+                    self.context_menu();
+                },
+                _ => {}
+            }
+        }
+        0
+    }
+}
+
+unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        REFRESH_UI => {
+            with_app(|app| unsafe {
+                for control in [app.tree, app.tabs, app.status] {
+                    InvalidateRect(control, null(), 0);
+                }
+            });
+            0
+        }
+        POSITION_RENAME => {
+            with_app(|app| unsafe {
+                app.layout_rename();
+            });
+            0
+        }
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            unsafe {
+                ui::paint_window(hwnd, |dc| ui::with_view(|v| v.paint_background(dc)));
+            }
+            0
+        }
+        WM_DRAWITEM if lp != 0 => {
+            ui::with_view(|view| unsafe {
+                let draw = &*(lp as *const DRAWITEMSTRUCT);
+                ui::buffered(draw.hwndItem, draw.hDC, draw.rcItem, |dc| {
+                    let copy = DRAWITEMSTRUCT { hDC: dc, ..*draw };
+                    view.paint_control(&copy);
+                });
+            });
+            1
+        }
+        WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
+            let mut brush = 0;
+            ui::with_view(|view| unsafe {
+                let dc = wp as HDC;
+                SetTextColor(dc, theme::INK);
+                SetBkColor(dc, theme::WHITE);
+                brush = view.theme.white_brush as LRESULT;
+            });
+            if brush != 0 {
+                brush
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+            }
+        }
+        WM_DPICHANGED => {
+            with_app(|app| unsafe {
+                let old = std::mem::replace(&mut app.theme, Rc::new(Theme::new(hi(wp) as u32)));
+                app.apply_theme();
+                drop(old);
+                let suggested = &*(lp as *const RECT);
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    suggested.left,
+                    suggested.top,
+                    suggested.right - suggested.left,
+                    suggested.bottom - suggested.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                app.layout();
+            });
+            0
+        }
+        WM_GETMINMAXINFO => {
+            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as i32;
+            unsafe {
+                (*(lp as *mut MINMAXINFO)).ptMinTrackSize = POINT {
+                    x: 560 * dpi / 96,
+                    y: 360 * dpi / 96,
+                };
+            }
+            0
+        }
+        WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+            if unsafe { route_wheel(msg, wp) } {
+                0
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+            }
+        }
+        WM_SIZE => {
+            with_app(|app| unsafe {
+                app.layout();
+            });
+            0
+        }
+        WM_COMMAND => {
+            with_app(|app| unsafe {
+                app.command(lo(wp), hi(wp));
+            });
+            0
+        }
+        WM_NOTIFY => {
+            if lp == 0 {
+                return 0;
+            }
+            let hdr = unsafe { &*(lp as *const NMHDR) };
+            if hdr.code == NM_CUSTOMDRAW {
+                let mut result = 0;
+                ui::with_view(|v| {
+                    if hdr.hwndFrom == v.tree {
+                        let draw = unsafe { &*(lp as *const NMTVCUSTOMDRAW) };
+                        if draw.nmcd.dwDrawStage == CDDS_PREPAINT {
+                            result = CDRF_NOTIFYITEMDRAW as isize;
+                        }
+                        if draw.nmcd.dwDrawStage == CDDS_ITEMPREPAINT {
+                            unsafe {
+                                v.paint_tree_item(draw);
+                            }
+                            result = CDRF_SKIPDEFAULT as isize;
+                        }
+                    }
+                });
+                return result;
+            }
+            let mut result = 0;
+            with_app(|app| {
+                result = unsafe { app.notify(hdr) };
+            });
+            result
+        }
+        WM_TIMER if wp == AUTOSAVE_TIMER => {
+            with_app(|app| unsafe {
+                app.save_all();
+            });
+            0
+        }
+        WM_LBUTTONDOWN => {
+            with_app(|app| {
+                let mut area = RECT::default();
+                unsafe {
+                    GetClientRect(app.hwnd, &mut area);
+                }
+                if app.sidebar_visible
+                    && (point_x(lp) - app.sidebar_edge(area.right)).abs() <= app.theme.px(5)
+                    && point_y(lp) > app.theme.px(36)
+                {
+                    app.resizing = true;
+                    unsafe {
+                        SetCapture(hwnd);
+                    }
+                }
+            });
+            0
+        }
+        WM_MOUSEMOVE => {
+            with_app(|app| {
+                if app.resizing {
+                    let width = (point_x(lp) * 96 / app.theme.dpi as i32).clamp(150, 600);
+                    if width != app.sidebar_width {
+                        app.sidebar_width = width;
+                        unsafe {
+                            app.layout();
+                        }
+                    }
+                }
+                if app.dragging.is_some() {
+                    let handle = unsafe { app.hit_tree() }.map(|(_, _, h)| h).unwrap_or(0);
+                    unsafe {
+                        SendMessageW(
+                            app.tree,
+                            TVM_SELECTITEM,
+                            TVGN_DROPHILITE as usize,
+                            handle as LPARAM,
+                        );
+                    }
+                }
+            });
+            0
+        }
+        WM_LBUTTONUP => {
+            with_app(|app| {
+                if app.resizing {
+                    app.resizing = false;
+                    unsafe {
+                        ReleaseCapture();
+                    }
+                }
+                if app.dragging.is_some() {
+                    unsafe {
+                        app.finish_drag();
+                    }
+                }
+            });
+            0
+        }
+        WM_CLOSE => {
+            let mut ok = true;
+            with_app(|app| {
+                ok = unsafe { app.save_all() };
+                if ok && let Err(error) = app.save_session() {
+                    report(app.hwnd, "탭 상태를 저장하지 못했습니다.", error);
+                }
+            });
+            if ok {
+                unsafe {
+                    DestroyWindow(hwnd);
+                }
+            }
+            0
+        }
+        WM_DESTROY => {
+            ui::clear();
+            APP.with(|cell| {
+                cell.borrow_mut().take();
+            });
+            unsafe {
+                PostQuitMessage(0);
+            }
+            0
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
+    }
+}
+
+fn shortcut(msg: &MSG) -> bool {
+    if msg.message != WM_KEYDOWN {
+        return false;
+    }
+    let ctrl = unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
+    let shift = unsafe { GetKeyState(VK_SHIFT as i32) } < 0;
+    let key = msg.wParam as u32;
+    let mut handled = false;
+    with_app(|app| unsafe {
+        if ctrl && key == b'A' as u32 {
+            if app.active.is_some()
+                && (msg.hwnd == app.edit || msg.hwnd == app.tree || msg.hwnd == app.tabs)
+            {
+                SetFocus(app.edit);
+                editing::select(app.edit, editing::CharRange { start: 0, end: -1 });
+                handled = true;
+            } else if msg.hwnd == app.find_input
+                || msg.hwnd == app.replace_input
+                || msg.hwnd == SendMessageW(app.tree, TVM_GETEDITCONTROL, 0, 0) as HWND
+            {
+                SendMessageW(msg.hwnd, EM_SETSEL, 0, -1);
+                handled = true;
+            }
+        } else if ctrl && key == b'F' as u32 {
+            app.show_find(false);
+            handled = true;
+        } else if ctrl && key == b'H' as u32 {
+            app.show_find(true);
+            handled = true;
+        } else if key == VK_F3 as u32 {
+            if window_text(app.find_input).is_empty() {
+                app.show_find(false);
+            } else {
+                app.find_next(shift, false);
+            }
+            handled = true;
+        } else if key == VK_ESCAPE as u32
+            && app.find_visible
+            && (msg.hwnd == app.edit
+                || msg.hwnd == app.find_input
+                || msg.hwnd == app.replace_input
+                || GetParent(msg.hwnd) == app.hwnd && msg.hwnd != app.tree)
+        {
+            app.hide_find();
+            handled = true;
+        } else if key == VK_RETURN as u32
+            && (msg.hwnd == app.find_input || msg.hwnd == app.replace_input)
+        {
+            if msg.hwnd == app.replace_input {
+                app.replace_one();
+            } else {
+                app.find_next(shift, false);
+            }
+            handled = true;
+        } else if ctrl && msg.hwnd == app.edit && (key == b'Z' as u32 || key == b'Y' as u32) {
+            SendMessageW(
+                app.edit,
+                if key == b'Y' as u32 || shift {
+                    editing::EM_REDO
+                } else {
+                    WM_UNDO
+                },
+                0,
+                0,
+            );
+            handled = true;
+        } else if ctrl && key == b'N' as u32 {
+            let parent = app.selected_id().unwrap_or(0);
+            app.create_note(parent);
+            handled = true;
+        } else if ctrl && key == b'S' as u32 {
+            app.save_all();
+            handled = true;
+        } else if ctrl && key == b'W' as u32 {
+            app.close_active();
+            handled = true;
+        } else if ctrl && key == b'B' as u32 {
+            app.sidebar_visible = !app.sidebar_visible;
+            app.layout();
+            handled = true;
+        } else if !app.open.is_empty()
+            && ((ctrl && (key == VK_TAB as u32 || key == VK_PRIOR as u32 || key == VK_NEXT as u32))
+                || (msg.hwnd == app.tabs && (key == VK_LEFT as u32 || key == VK_RIGHT as u32)))
+        {
+            let prev =
+                key == VK_PRIOR as u32 || key == VK_LEFT as u32 || key == VK_TAB as u32 && shift;
+            let index = app.active.unwrap_or(0);
+            let count = app.open.len();
+            app.activate(if prev {
+                (index + count - 1) % count
+            } else {
+                (index + 1) % count
+            });
+            handled = true;
+        } else if ctrl && (b'1' as u32..=b'9' as u32).contains(&key) && !app.open.is_empty() {
+            let index = if key == b'9' as u32 {
+                app.open.len() - 1
+            } else {
+                (key - b'1' as u32) as usize
+            };
+            app.activate(index);
+            handled = true;
+        } else if key == VK_F6 as u32 {
+            SetFocus(if GetFocus() == app.edit && app.sidebar_visible {
+                app.tree
+            } else {
+                app.edit
+            });
+            handled = true;
+        } else if key == VK_F2 as u32 && msg.hwnd == app.tree {
+            app.rename_selected();
+            handled = true;
+        } else if key == VK_DELETE as u32 && msg.hwnd == app.tree {
+            app.delete_selected();
+            handled = true;
+        }
+        if handled {
+            InvalidateRect(app.status, null(), 0);
+        }
+    });
+    handled
+}
+
+pub fn run() {
+    let data_dir = std::env::var_os("EDOT_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+                .join("Edot")
+        });
+    let book = match Notebook::load(&data_dir) {
+        Ok(book) => book,
+        Err(error) => {
+            report(
+                null_mut(),
+                "메모 목록을 읽지 못했습니다. 파일을 덮어쓰지 않습니다.",
+                error,
+            );
+            return;
+        }
+    };
+    unsafe {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let canonical = fs::canonicalize(&data_dir).unwrap_or_else(|_| data_dir.clone());
+        let mut hash = 0xcbf29ce484222325u64;
+        for byte in canonical.to_string_lossy().to_lowercase().bytes() {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+        }
+        let name = wide(&format!("Local\\Edot-{hash:016x}"));
+        let mutex = CreateMutexW(null(), 0, name.as_ptr());
+        if mutex.is_null() {
+            report(
+                null_mut(),
+                "메모 저장소를 잠그지 못했습니다.",
+                std::io::Error::last_os_error(),
+            );
+            return;
+        }
+        let _lock = MutexGuard(mutex);
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            message(
+                null_mut(),
+                "Edot",
+                "같은 메모 저장소가 이미 다른 창에서 열려 있습니다.",
+                MB_OK | MB_ICONINFORMATION,
+            );
+            return;
+        }
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_TREEVIEW_CLASSES | ICC_TAB_CLASSES,
+        };
+        InitCommonControlsEx(&controls);
+        if LoadLibraryW(wide("Msftedit.dll").as_ptr()).is_null() {
+            report(
+                null_mut(),
+                "텍스트 편집 컨트롤을 불러오지 못했습니다.",
+                std::io::Error::last_os_error(),
+            );
+            return;
+        }
+        let instance = GetModuleHandleW(null());
+        let class = wide("EdotMainWindow");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: 0,
+            lpfnWndProc: Some(window_proc),
+            hInstance: instance,
+            hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+            hbrBackground: (COLOR_WINDOW + 1) as HBRUSH,
+            lpszClassName: class.as_ptr(),
+            ..Default::default()
+        };
+        if RegisterClassExW(&wc) == 0 {
+            report(
+                null_mut(),
+                "창 클래스를 등록하지 못했습니다.",
+                std::io::Error::last_os_error(),
+            );
+            return;
+        }
+        let hwnd = CreateWindowExW(
+            0,
+            class.as_ptr(),
+            wide("Edot 메모").as_ptr(),
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            980,
+            680,
+            null_mut(),
+            null_mut(),
+            instance,
+            null(),
+        );
+        if hwnd.is_null() {
+            report(
+                null_mut(),
+                "창을 만들지 못했습니다.",
+                std::io::Error::last_os_error(),
+            );
+            return;
+        }
+        APP.with(|cell| {
+            *cell.borrow_mut() = Some(App::new(hwnd, data_dir, book));
+        });
+        ShowWindow(hwnd, SW_SHOW);
+        let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            0,
+            0,
+            1100 * dpi / 96,
+            760 * dpi / 96,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        UpdateWindow(hwnd);
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            if shortcut(&msg) {
+                continue;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
