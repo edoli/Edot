@@ -4,6 +4,7 @@ mod app;
 mod drag;
 mod editing;
 mod model;
+mod scrollbar;
 mod settings;
 mod startup;
 mod tabs;

@@ -8,7 +8,6 @@ pub const EM_EXSETSEL: u32 = WM_USER + 55;
 pub const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
 pub const EM_SETCHARFORMAT: u32 = WM_USER + 68;
 pub const EM_SETTARGETDEVICE: u32 = WM_USER + 72;
-pub const EM_GETSCROLLPOS: u32 = WM_USER + 221;
 pub const EM_SETSCROLLPOS: u32 = WM_USER + 222;
 pub const EM_SETEVENTMASK: u32 = WM_USER + 69;
 pub const EM_REDO: u32 = WM_USER + 84;

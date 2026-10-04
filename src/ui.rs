@@ -1,5 +1,6 @@
 use crate::drag::{DropTarget, DropZone};
 use crate::model::Notebook;
+use crate::scrollbar::ScrollRange;
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme, rect};
 use std::cell::RefCell;
@@ -9,7 +10,7 @@ use std::rc::Rc;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::UI::Controls::*;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, GetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Clone)]
@@ -25,6 +26,7 @@ pub struct View {
     pub tree: HWND,
     pub tabs: HWND,
     pub edit: HWND,
+    pub editor_scroll: [HWND; 2],
     pub toggle: HWND,
     pub add: HWND,
     pub tab_add: HWND,
@@ -269,6 +271,61 @@ impl View {
             );
         }
     }
+    pub unsafe fn refresh_editor_scroll(&self) {
+        unsafe {
+            for (index, &control) in self.editor_scroll.iter().enumerate() {
+                let show = self.active.is_some()
+                    && (index == 0 || !self.word_wrap)
+                    && ScrollRange::read(self.edit, index == 1).extent() > 0;
+                if (IsWindowVisible(control) != 0) != show {
+                    ShowWindow(control, if show { SW_SHOWNA } else { SW_HIDE });
+                }
+                if show {
+                    InvalidateRect(control, std::ptr::null(), 0);
+                }
+            }
+        }
+    }
+
+    pub unsafe fn paint_editor_scroll(&self, dc: HDC, horizontal: bool) {
+        unsafe {
+            let mut area = RECT::default();
+            GetClientRect(self.editor_scroll[horizontal as usize], &mut area);
+            theme::fill(dc, area, self.theme.colors.white);
+            let control = self.editor_scroll[horizontal as usize];
+            let mut pointer = POINT::default();
+            GetCursorPos(&mut pointer);
+            ScreenToClient(control, &mut pointer);
+            let hovered = PtInRect(&area, pointer) != 0;
+            let pressed = GetCapture() == control;
+            if hovered || pressed {
+                theme::fill(dc, area, self.theme.colors.hover);
+            }
+            let range = ScrollRange::read(self.edit, horizontal);
+            if range.extent() == 0 {
+                return;
+            }
+            let length = if horizontal { area.right } else { area.bottom };
+            let (start, size) = range.thumb(length, self.theme.px(24));
+            let thickness = self.theme.px(if hovered || pressed { 8 } else { 6 });
+            let cross = if horizontal { area.bottom } else { area.right };
+            let inset = ((cross - thickness) / 2).max(0);
+            let thumb = if horizontal {
+                rect(start, inset, start + size, cross - inset)
+            } else {
+                rect(inset, start, cross - inset, start + size)
+            };
+            let color = if pressed {
+                self.theme.colors.blue
+            } else if hovered {
+                self.theme.colors.ink
+            } else {
+                self.theme.colors.muted
+            };
+            theme::rounded(dc, thumb, color, color, thickness);
+        }
+    }
+
     fn sidebar_edge(&self, width: i32) -> i32 {
         if self.sidebar_visible {
             self.theme

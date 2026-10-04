@@ -1,5 +1,6 @@
 use crate::drag::{DropTarget, DropZone};
 use crate::model::{Notebook, replace_file};
+use crate::scrollbar::{ScrollRange, ThumbDrag};
 use crate::settings::{self, Panel, Settings, ThemeMode};
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme};
@@ -60,6 +61,7 @@ const MENU_DOWN: usize = 206;
 const MENU_OUTDENT: usize = 207;
 const AUTOSAVE_TIMER: usize = 1;
 const DRAG_SCROLL_TIMER: usize = 2;
+const SCROLL_REPEAT_TIMER: usize = 1; // Per-scrollbar HWND; only while holding the track.
 const POSITION_RENAME: u32 = WM_APP + 1;
 const REFRESH_UI: u32 = WM_APP + 2;
 
@@ -90,6 +92,10 @@ struct App {
     tabs: HWND,
     edit: HWND,
     empty_edit: HWND,
+    editor_host: HWND,
+    editor_scroll: [HWND; 2],
+    editor_scroll_drag: Option<ThumbDrag>,
+    editor_scroll_page: Option<(bool, i32)>,
     toggle: HWND,
     add: HWND,
     tab_add: HWND,
@@ -229,6 +235,8 @@ unsafe fn memo_editor(hwnd: HWND) -> HWND {
                 | WS_CLIPSIBLINGS
                 | WS_TABSTOP
                 | WS_VSCROLL
+                | WS_HSCROLL
+                | 0x2000 // ES_DISABLENOSCROLL: reserve a fixed, clipped native scrollbar.
                 | ES_MULTILINE as u32
                 | ES_AUTOVSCROLL as u32
                 | ES_WANTRETURN as u32,
@@ -501,6 +509,7 @@ unsafe extern "system" fn tree_subclass(
             with_app(|app| app.tooltip.hide());
         }
         let result = DefSubclassProc(hwnd, msg, wp, lp);
+
         if msg == WM_KEYDOWN {
             ui::with_view(|v| {
                 InvalidateRect(v.tree_scroll, null(), 0);
@@ -559,6 +568,162 @@ unsafe extern "system" fn scroll_subclass(
     }
 }
 
+unsafe extern "system" fn editor_host_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    _: usize,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_COMMAND | WM_NOTIFY | WM_CTLCOLOREDIT => {
+                return SendMessageW(GetParent(hwnd), msg, wp, lp);
+            }
+            WM_ERASEBKGND => return 1,
+            WM_PAINT => {
+                // The editor covers this host. Paint only its clipped remainder;
+                // a second body-sized bitmap would waste memory.
+                let mut paint = PAINTSTRUCT::default();
+                let dc = BeginPaint(hwnd, &mut paint);
+                ui::with_view(|v| {
+                    theme::fill(dc, paint.rcPaint, v.theme.colors.white);
+                });
+                EndPaint(hwnd, &paint);
+                return 0;
+            }
+            WM_NCDESTROY => {
+                RemoveWindowSubclass(hwnd, Some(editor_host_proc), id);
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+unsafe extern "system" fn editor_scroll_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    reference: usize,
+) -> LRESULT {
+    unsafe {
+        let horizontal = reference != 0;
+        let coordinate = if horizontal { point_x(lp) } else { point_y(lp) };
+        match msg {
+            WM_ERASEBKGND => return 1,
+            WM_PAINT => {
+                ui::paint_window(hwnd, |dc| {
+                    ui::with_view(|v| v.paint_editor_scroll(dc, horizontal))
+                });
+                return 0;
+            }
+            WM_LBUTTONDOWN => {
+                with_app(|app| {
+                    let range = ScrollRange::read(app.edit, horizontal);
+                    let mut area = RECT::default();
+                    GetClientRect(hwnd, &mut area);
+                    let length = if horizontal { area.right } else { area.bottom };
+                    let (start, size) = range.thumb(length, app.theme.px(24));
+                    if range.extent() > 0 {
+                        SetCapture(hwnd);
+                        if (start..start + size).contains(&coordinate) {
+                            app.editor_scroll_drag = Some(ThumbDrag {
+                                horizontal,
+                                range,
+                                pointer: coordinate,
+                                length,
+                                minimum: app.theme.px(24),
+                            });
+                        } else {
+                            app.editor_scroll_page =
+                                Some((horizontal, if coordinate < start { -1 } else { 1 }));
+                            app.page_editor_scroll(hwnd);
+                            SetTimer(hwnd, SCROLL_REPEAT_TIMER, 400, None);
+                        }
+                        InvalidateRect(hwnd, null(), 0);
+                    }
+                });
+                return 0;
+            }
+            WM_MOUSEMOVE => {
+                let mut tracking = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                TrackMouseEvent(&mut tracking);
+                InvalidateRect(hwnd, null(), 0);
+                if GetCapture() == hwnd {
+                    with_app(|app| app.drag_editor_scroll(hwnd, coordinate));
+                }
+                return 0;
+            }
+            WM_MOUSELEAVE => {
+                InvalidateRect(hwnd, null(), 0);
+                return 0;
+            }
+            WM_TIMER if wp == SCROLL_REPEAT_TIMER => {
+                if GetCapture() == hwnd {
+                    SetTimer(hwnd, SCROLL_REPEAT_TIMER, 60, None);
+                    with_app(|app| app.page_editor_scroll(hwnd));
+                } else {
+                    KillTimer(hwnd, SCROLL_REPEAT_TIMER);
+                }
+                return 0;
+            }
+            WM_LBUTTONUP => {
+                KillTimer(hwnd, SCROLL_REPEAT_TIMER);
+                with_app(|app| {
+                    app.editor_scroll_drag = None;
+                    app.editor_scroll_page = None;
+                });
+                if GetCapture() == hwnd {
+                    ReleaseCapture();
+                }
+                SendMessageW(
+                    ui_editor(),
+                    if horizontal { WM_HSCROLL } else { WM_VSCROLL },
+                    SB_ENDSCROLL as usize,
+                    0,
+                );
+                InvalidateRect(hwnd, null(), 0);
+                return 0;
+            }
+            WM_CAPTURECHANGED | WM_CANCELMODE => {
+                KillTimer(hwnd, SCROLL_REPEAT_TIMER);
+                with_app(|app| {
+                    app.editor_scroll_drag = None;
+                    app.editor_scroll_page = None;
+                });
+                if GetCapture() == hwnd {
+                    ReleaseCapture();
+                }
+                InvalidateRect(hwnd, null(), 0);
+            }
+            WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+                return SendMessageW(ui_editor(), msg, wp, lp);
+            }
+            WM_NCDESTROY => {
+                ui::release_buffer(hwnd);
+                RemoveWindowSubclass(hwnd, Some(editor_scroll_proc), id);
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+fn ui_editor() -> HWND {
+    let mut editor = null_mut();
+    ui::with_view(|view| editor = view.edit);
+    editor
+}
+
 unsafe extern "system" fn control_subclass(
     hwnd: HWND,
     msg: u32,
@@ -594,6 +759,35 @@ unsafe extern "system" fn control_subclass(
             InvalidateRect(hwnd, null(), 0);
         }
         let result = DefSubclassProc(hwnd, msg, wp, lp);
+
+        if reference == 2
+            && matches!(
+                msg,
+                WM_PAINT
+                    | WM_SIZE
+                    | WM_TIMER
+                    | WM_MOUSEWHEEL
+                    | WM_MOUSEHWHEEL
+                    | WM_VSCROLL
+                    | WM_HSCROLL
+                    | WM_KEYDOWN
+                    | WM_CHAR
+                    | WM_SETTEXT
+                    | WM_SETFONT
+                    | EM_SCROLLCARET
+                    | EM_REPLACESEL
+                    | WM_UNDO
+                    | editing::EM_SETSCROLLPOS
+                    | editing::EM_SETTARGETDEVICE
+                    | editing::EM_REDO
+            )
+        {
+            ui::with_view(|view| {
+                if view.edit == hwnd {
+                    view.refresh_editor_scroll();
+                }
+            });
+        }
         if reference == 3 && msg == WM_PAINT && GetWindowTextLengthW(hwnd) == 0 {
             let dc = GetDC(hwnd);
             ui::with_view(|view| {
@@ -714,7 +908,36 @@ impl App {
         unsafe {
             SetWindowSubclass(tabs, Some(tab_subclass), 1, 0);
         }
-        let edit = unsafe { memo_editor(hwnd) };
+        let editor_host = unsafe {
+            child(
+                hwnd,
+                wide("STATIC").as_ptr(),
+                "",
+                common | WS_CLIPCHILDREN,
+                0,
+                126,
+            )
+        };
+        let editor_scroll = [false, true].map(|horizontal| unsafe {
+            let control = child(
+                hwnd,
+                wide("STATIC").as_ptr(),
+                if horizontal {
+                    "본문 가로 스크롤"
+                } else {
+                    "본문 세로 스크롤"
+                },
+                common | SS_NOTIFY,
+                0,
+                if horizontal { 128 } else { 127 },
+            );
+            SetWindowSubclass(control, Some(editor_scroll_proc), 1, horizontal as usize);
+            control
+        });
+        unsafe {
+            SetWindowSubclass(editor_host, Some(editor_host_proc), 1, 0);
+        }
+        let edit = unsafe { memo_editor(editor_host) };
         let status = unsafe {
             child(
                 hwnd,
@@ -820,6 +1043,10 @@ impl App {
             tabs,
             edit,
             empty_edit: edit,
+            editor_host,
+            editor_scroll,
+            editor_scroll_drag: None,
+            editor_scroll_page: None,
             toggle,
             add,
             tab_add,
@@ -1002,13 +1229,10 @@ impl App {
         unsafe {
             let visible = IsWindowVisible(editor) != 0;
             let modified = SendMessageW(editor, EM_GETMODIFY, 0, 0);
-            let mut scroll = POINT::default();
-            SendMessageW(
-                editor,
-                editing::EM_GETSCROLLPOS,
-                0,
-                &mut scroll as *mut _ as LPARAM,
-            );
+            let mut scroll = POINT {
+                x: ScrollRange::read(editor, true).position,
+                y: ScrollRange::read(editor, false).position,
+            };
             if visible {
                 SendMessageW(editor, WM_SETREDRAW, 0, 0);
             }
@@ -1373,6 +1597,9 @@ impl App {
             }
             self.publish_view();
             self.style_settings_panel();
+            if wrap {
+                self.layout();
+            }
         }
     }
 
@@ -1400,6 +1627,7 @@ impl App {
             tree: self.tree,
             tabs: self.tabs,
             edit: self.edit,
+            editor_scroll: self.editor_scroll,
             toggle: self.toggle,
             add: self.add,
             tab_add: self.tab_add,
@@ -1493,7 +1721,11 @@ impl App {
             }
             self.tab_layout.set(tabs);
             self.publish_view();
-            let editor_y = p(58);
+            let editor_y = p(36);
+            let scroll_width = p(12);
+            let scroll_height = if self.settings.wrap { 0 } else { p(12) };
+            let editor_width = (w - content_x - scroll_width).max(0);
+            let editor_height = (h - editor_y - p(32) - scroll_height).max(0);
             let mut positions = vec![
                 (
                     self.toggle,
@@ -1537,11 +1769,25 @@ impl App {
                     p(29),
                 ),
                 (
-                    self.edit,
+                    self.editor_host,
                     content_x + p(24),
+                    editor_y + p(22),
+                    (editor_width - p(48)).max(0),
+                    (editor_height - p(44)).max(0),
+                ),
+                (
+                    self.editor_scroll[0],
+                    w - scroll_width,
                     editor_y,
-                    (w - content_x - p(40)).max(0),
-                    (h - editor_y - p(52)).max(0),
+                    scroll_width,
+                    editor_height,
+                ),
+                (
+                    self.editor_scroll[1],
+                    content_x,
+                    h - p(32) - scroll_height,
+                    editor_width,
+                    scroll_height,
                 ),
                 (
                     self.status,
@@ -1583,6 +1829,31 @@ impl App {
             if !batch.is_null() {
                 EndDeferWindowPos(batch);
             }
+            let mut host_area = RECT::default();
+            GetClientRect(self.editor_host, &mut host_area);
+            let editor_width =
+                host_area.right + GetSystemMetricsForDpi(SM_CXVSCROLL, self.theme.dpi);
+            let editor_height = host_area.bottom
+                + if self.settings.wrap {
+                    0
+                } else {
+                    GetSystemMetricsForDpi(SM_CYHSCROLL, self.theme.dpi)
+                };
+            let mut editor_area = RECT::default();
+            GetWindowRect(self.edit, &mut editor_area);
+            if editor_area.right - editor_area.left != editor_width
+                || editor_area.bottom - editor_area.top != editor_height
+            {
+                SetWindowPos(
+                    self.edit,
+                    null_mut(),
+                    0,
+                    0,
+                    editor_width,
+                    editor_height,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS,
+                );
+            }
             // A deferred batch may only contain siblings. The tree lives in a
             // clipping host so its native scrollbar can stay functional.
             let tree_width =
@@ -1612,12 +1883,14 @@ impl App {
                     self.sidebar_visible && self.visible.len() > visible_rows,
                 ),
                 (self.edit, self.active.is_some()),
+                (self.editor_host, self.active.is_some()),
             ] {
                 if (IsWindowVisible(hwnd) != 0) != show {
                     ShowWindow(hwnd, if show { SW_SHOWNA } else { SW_HIDE });
                 }
             }
             self.layout_search();
+            ui::with_view(|view| view.refresh_editor_scroll());
             self.layout_settings();
             RedrawWindow(
                 self.hwnd,
@@ -1880,6 +2153,117 @@ impl App {
         }
     }
 
+    unsafe fn drag_editor_scroll(&self, _control: HWND, coordinate: i32) {
+        let Some(drag) = self.editor_scroll_drag else {
+            return;
+        };
+        unsafe {
+            let horizontal = drag.horizontal;
+            let target = drag.position(coordinate);
+            if target == ScrollRange::read(self.edit, horizontal).position {
+                return;
+            }
+            if target == drag.range.min || i64::from(target - drag.range.min) == drag.range.extent()
+            {
+                SendMessageW(
+                    self.edit,
+                    if horizontal { WM_HSCROLL } else { WM_VSCROLL },
+                    if target == drag.range.min {
+                        SB_TOP
+                    } else {
+                        SB_BOTTOM
+                    } as usize,
+                    0,
+                );
+                ui::with_view(|view| view.refresh_editor_scroll());
+                return;
+            }
+            // Let RichEdit move a single axis whenever the native thumb message
+            // can represent it. EM_SETSCROLLPOS re-clamps BOTH axes.
+            if (0..=u16::MAX as i32).contains(&target) {
+                SendMessageW(
+                    self.edit,
+                    if horizontal { WM_HSCROLL } else { WM_VSCROLL },
+                    SB_THUMBPOSITION as usize | ((target as usize) << 16),
+                    0,
+                );
+                ui::with_view(|view| view.refresh_editor_scroll());
+                return;
+            }
+            let other = ScrollRange::read(self.edit, !horizontal);
+            let first_line = SendMessageW(self.edit, EM_GETFIRSTVISIBLELINE, 0, 0);
+            let mut position = POINT {
+                x: ScrollRange::read(self.edit, true).position,
+                y: ScrollRange::read(self.edit, false).position,
+            };
+            if horizontal {
+                position.x = target;
+            } else {
+                position.y = target;
+            }
+            SendMessageW(
+                self.edit,
+                editing::EM_SETSCROLLPOS,
+                0,
+                &position as *const _ as LPARAM,
+            );
+            if ScrollRange::read(self.edit, !horizontal).position != other.position {
+                let message = if horizontal { WM_VSCROLL } else { WM_HSCROLL };
+                if i64::from(other.position - other.min) >= other.extent() - 1 {
+                    SendMessageW(self.edit, message, SB_BOTTOM as usize, 0);
+                } else if (0..=u16::MAX as i32).contains(&other.position) {
+                    SendMessageW(
+                        self.edit,
+                        message,
+                        SB_THUMBPOSITION as usize | ((other.position as usize) << 16),
+                        0,
+                    );
+                } else if horizontal {
+                    let delta = first_line - SendMessageW(self.edit, EM_GETFIRSTVISIBLELINE, 0, 0);
+                    SendMessageW(self.edit, EM_LINESCROLL, 0, delta);
+                }
+            }
+            ui::with_view(|view| view.refresh_editor_scroll());
+        }
+    }
+
+    unsafe fn page_editor_scroll(&self, control: HWND) {
+        let Some((horizontal, direction)) = self.editor_scroll_page else {
+            return;
+        };
+        unsafe {
+            let mut pointer = POINT::default();
+            GetCursorPos(&mut pointer);
+            ScreenToClient(control, &mut pointer);
+            let mut area = RECT::default();
+            GetClientRect(control, &mut area);
+            if PtInRect(&area, pointer) == 0 {
+                return;
+            }
+            let range = ScrollRange::read(self.edit, horizontal);
+            let (start, size) = range.thumb(
+                if horizontal { area.right } else { area.bottom },
+                self.theme.px(24),
+            );
+            let coordinate = if horizontal { pointer.x } else { pointer.y };
+            if (direction < 0 && coordinate < start)
+                || (direction > 0 && coordinate >= start + size)
+            {
+                SendMessageW(
+                    self.edit,
+                    if horizontal { WM_HSCROLL } else { WM_VSCROLL },
+                    if direction < 0 {
+                        SB_PAGEUP
+                    } else {
+                        SB_PAGEDOWN
+                    } as usize,
+                    0,
+                );
+                ui::with_view(|view| view.refresh_editor_scroll());
+            }
+        }
+    }
+
     unsafe fn set_status(&self, text: &str) {
         unsafe {
             *self.status_text.borrow_mut() = text.into();
@@ -2067,7 +2451,7 @@ impl App {
             }
         };
         drop(read_timing);
-        let editor = unsafe { memo_editor(self.hwnd) };
+        let editor = unsafe { memo_editor(self.editor_host) };
         if editor.is_null() {
             report(
                 self.hwnd,
@@ -2480,6 +2864,8 @@ impl App {
     }
 
     unsafe fn cancel_interaction(&mut self) {
+        self.editor_scroll_drag = None;
+        self.editor_scroll_page = None;
         self.dragging = None;
         self.drop_target = None;
         self.tree_hover = None;
@@ -2487,7 +2873,10 @@ impl App {
         self.publish_view();
         unsafe {
             KillTimer(self.hwnd, DRAG_SCROLL_TIMER);
-            if GetCapture() == self.hwnd {
+            for control in self.editor_scroll {
+                KillTimer(control, SCROLL_REPEAT_TIMER);
+            }
+            if GetCapture() == self.hwnd || self.editor_scroll.contains(&GetCapture()) {
                 ReleaseCapture();
             }
             SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
@@ -3371,7 +3760,12 @@ fn shortcut(msg: &MSG) -> bool {
         {
             app.command(GetDlgCtrlID(msg.hwnd) as usize, BN_CLICKED as usize);
             handled = true;
-        } else if key == VK_ESCAPE as u32 && (app.dragging.is_some() || app.resizing) {
+        } else if key == VK_ESCAPE as u32
+            && (app.dragging.is_some()
+                || app.resizing
+                || app.editor_scroll_drag.is_some()
+                || app.editor_scroll_page.is_some())
+        {
             app.cancel_interaction();
             handled = true;
         } else if ctrl && key == b'A' as u32 {
@@ -3740,6 +4134,84 @@ mod settings_tests {
                 app.apply_settings(nowrap);
                 assert!(SendMessageW(editor, EM_LINEINDEX, 1, 0) > original_second_line);
                 assert_ne!(GetWindowLongPtrW(editor, GWL_STYLE) as u32 & WS_HSCROLL, 0);
+                let mut client = RECT::default();
+                let mut host = RECT::default();
+                GetClientRect(editor, &mut client);
+                GetClientRect(app.editor_host, &mut host);
+                assert_eq!((client.right, client.bottom), (host.right, host.bottom));
+                SendMessageW(
+                    editor,
+                    editing::EM_EXLINEFROMCHAR,
+                    0,
+                    edited.replace("\r\n", "\r").encode_utf16().count() as isize - 1,
+                );
+                let horizontal = ScrollRange::read(editor, true);
+                let vertical = ScrollRange::read(editor, false);
+                assert!(horizontal.extent() > 0);
+                app.editor_scroll_drag = Some(ThumbDrag {
+                    horizontal: true,
+                    range: horizontal,
+                    pointer: 0,
+                    length: host.right,
+                    minimum: app.theme.px(24),
+                });
+                app.drag_editor_scroll(app.editor_scroll[1], 0);
+                assert_eq!(
+                    ScrollRange::read(editor, true).position,
+                    horizontal.position
+                );
+                app.drag_editor_scroll(app.editor_scroll[1], i32::MAX);
+                let horizontal_end = ScrollRange::read(editor, true).position;
+                assert!((i64::from(horizontal_end) - horizontal.extent()).abs() <= 1);
+                assert_eq!(ScrollRange::read(editor, false).position, vertical.position);
+                app.editor_scroll_drag = Some(ThumbDrag {
+                    horizontal: false,
+                    range: vertical,
+                    pointer: 0,
+                    length: host.bottom,
+                    minimum: app.theme.px(24),
+                });
+                app.drag_editor_scroll(app.editor_scroll[0], host.bottom / 2);
+                let middle = ScrollRange::read(editor, false).position;
+                assert!(middle > 0);
+                if repeat == 6000 {
+                    assert!(middle > 65_535);
+                }
+                assert_eq!(ScrollRange::read(editor, true).position, horizontal_end);
+                app.drag_editor_scroll(app.editor_scroll[0], 0);
+                assert_eq!(ScrollRange::read(editor, false).position, vertical.position);
+                app.drag_editor_scroll(app.editor_scroll[0], host.bottom / 2);
+                app.drag_editor_scroll(app.editor_scroll[0], i32::MAX);
+                let mut last = POINT::default();
+                let mut formatting = RECT::default();
+                SendMessageW(editor, EM_GETRECT, 0, &mut formatting as *mut _ as LPARAM);
+                SendMessageW(
+                    editor,
+                    WM_USER + 38,
+                    &mut last as *mut _ as WPARAM,
+                    edited.replace("\r\n", "\r").encode_utf16().count() as isize - 2,
+                ); // EM_POSFROMCHAR
+                assert!(
+                    last.y >= formatting.top && last.y < formatting.bottom,
+                    "last y={}, formatting={}..{}",
+                    last.y,
+                    formatting.top,
+                    formatting.bottom
+                );
+                assert_eq!(ScrollRange::read(editor, true).position, horizontal_end);
+                let bottom = ScrollRange::read(editor, false).position;
+                let current_horizontal = ScrollRange::read(editor, true);
+                app.editor_scroll_drag = Some(ThumbDrag {
+                    horizontal: true,
+                    range: current_horizontal,
+                    pointer: host.right,
+                    length: host.right,
+                    minimum: app.theme.px(24),
+                });
+                app.drag_editor_scroll(app.editor_scroll[1], host.right / 2);
+                assert_eq!(ScrollRange::read(editor, false).position, bottom);
+                assert!(SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) > 50);
+                app.editor_scroll_drag = None;
                 assert_eq!(editing::selection(editor), selection);
                 assert_eq!(SendMessageW(editor, EM_GETMODIFY, 0, 0), modified);
                 assert_eq!(window_text(editor), edited);
