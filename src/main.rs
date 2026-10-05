@@ -6,6 +6,7 @@ mod editing;
 mod model;
 mod scrollbar;
 mod settings;
+mod settings_controls;
 mod startup;
 mod tabs;
 mod theme;

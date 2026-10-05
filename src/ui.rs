@@ -1,6 +1,7 @@
 use crate::drag::{DropTarget, DropZone};
 use crate::model::Notebook;
-use crate::scrollbar::ScrollRange;
+use crate::scrollbar::{self, Kind, ScrollRange};
+use crate::settings_controls;
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme, rect};
 use std::cell::RefCell;
@@ -10,7 +11,7 @@ use std::rc::Rc;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::UI::Controls::*;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, GetFocus};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Clone)]
@@ -25,6 +26,7 @@ pub struct View {
     pub hwnd: HWND,
     pub tree: HWND,
     pub tabs: HWND,
+    pub tab_scroll: HWND,
     pub edit: HWND,
     pub editor_scroll: [HWND; 2],
     pub toggle: HWND,
@@ -246,29 +248,31 @@ impl View {
             );
         }
     }
-    pub unsafe fn paint_tree_scroll(&self, dc: HDC) {
+    pub unsafe fn scroll_range(&self, kind: Kind) -> ScrollRange {
         unsafe {
-            let mut area = RECT::default();
-            GetClientRect(self.tree_scroll, &mut area);
-            theme::fill(dc, area, self.theme.colors.sidebar);
-            let count = SendMessageW(self.tree, TVM_GETVISIBLECOUNT, 0, 0).max(1) as i32;
-            let total = self.visible.len() as i32;
-            if total <= count {
-                return;
+            match kind {
+                Kind::EditorVertical | Kind::EditorHorizontal => {
+                    scrollbar::body_range(self.edit, kind.horizontal())
+                }
+                Kind::Tree => {
+                    let count = SendMessageW(self.tree, TVM_GETVISIBLECOUNT, 0, 0).max(1) as u32;
+                    let first =
+                        SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE as usize, 0);
+                    ScrollRange {
+                        min: 0,
+                        max: self.visible.len() as i32 - 1,
+                        page: count,
+                        position: self.visible.iter().position(|&h| h == first).unwrap_or(0) as i32,
+                    }
+                }
+                Kind::Dropdown { list, .. } => scrollbar::list_range(list),
+                Kind::Tabs => ScrollRange {
+                    min: 0,
+                    max: self.tab_layout.count as i32 * self.tab_layout.width - 1,
+                    page: self.tab_layout.viewport as u32,
+                    position: self.tab_layout.offset,
+                },
             }
-            let first = SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE as usize, 0);
-            let index = self.visible.iter().position(|&h| h == first).unwrap_or(0) as i32;
-            let thumb = (area.bottom * count / total)
-                .max(self.theme.px(24))
-                .min(area.bottom);
-            let top = index * (area.bottom - thumb) / (total - count).max(1);
-            theme::rounded(
-                dc,
-                rect(0, top, area.right, top + thumb),
-                self.theme.colors.muted,
-                self.theme.colors.muted,
-                area.right,
-            );
         }
     }
     pub unsafe fn refresh_editor_scroll(&self) {
@@ -276,7 +280,7 @@ impl View {
             for (index, &control) in self.editor_scroll.iter().enumerate() {
                 let show = self.active.is_some()
                     && (index == 0 || !self.word_wrap)
-                    && ScrollRange::read(self.edit, index == 1).extent() > 0;
+                    && scrollbar::body_range(self.edit, index == 1).extent() > 0;
                 if (IsWindowVisible(control) != 0) != show {
                     ShowWindow(control, if show { SW_SHOWNA } else { SW_HIDE });
                 }
@@ -284,45 +288,6 @@ impl View {
                     InvalidateRect(control, std::ptr::null(), 0);
                 }
             }
-        }
-    }
-
-    pub unsafe fn paint_editor_scroll(&self, dc: HDC, horizontal: bool) {
-        unsafe {
-            let mut area = RECT::default();
-            GetClientRect(self.editor_scroll[horizontal as usize], &mut area);
-            theme::fill(dc, area, self.theme.colors.white);
-            let control = self.editor_scroll[horizontal as usize];
-            let mut pointer = POINT::default();
-            GetCursorPos(&mut pointer);
-            ScreenToClient(control, &mut pointer);
-            let hovered = PtInRect(&area, pointer) != 0;
-            let pressed = GetCapture() == control;
-            if hovered || pressed {
-                theme::fill(dc, area, self.theme.colors.hover);
-            }
-            let range = ScrollRange::read(self.edit, horizontal);
-            if range.extent() == 0 {
-                return;
-            }
-            let length = if horizontal { area.right } else { area.bottom };
-            let (start, size) = range.thumb(length, self.theme.px(24));
-            let thickness = self.theme.px(if hovered || pressed { 8 } else { 6 });
-            let cross = if horizontal { area.bottom } else { area.right };
-            let inset = ((cross - thickness) / 2).max(0);
-            let thumb = if horizontal {
-                rect(start, inset, start + size, cross - inset)
-            } else {
-                rect(inset, start, cross - inset, start + size)
-            };
-            let color = if pressed {
-                self.theme.colors.blue
-            } else if hovered {
-                self.theme.colors.ink
-            } else {
-                self.theme.colors.muted
-            };
-            theme::rounded(dc, thumb, color, color, thickness);
         }
     }
 
@@ -342,10 +307,25 @@ impl View {
             GetClientRect(self.hwnd, &mut area);
             let edge = self.sidebar_edge(area.right);
             theme::fill(dc, area, self.theme.colors.white);
-            theme::fill(dc, rect(0, 0, area.right, p(36)), self.theme.colors.bar);
+            theme::fill(
+                dc,
+                rect(
+                    0,
+                    0,
+                    area.right,
+                    p(if self.tab_layout.overflow { 48 } else { 36 }),
+                ),
+                self.theme.colors.bar,
+            );
             theme::line(
                 dc,
-                &[(edge, p(36) - 1), (area.right, p(36) - 1)],
+                &[
+                    (edge, p(if self.tab_layout.overflow { 48 } else { 36 }) - 1),
+                    (
+                        area.right,
+                        p(if self.tab_layout.overflow { 48 } else { 36 }) - 1,
+                    ),
+                ],
                 self.theme.colors.border,
                 1,
             );
@@ -533,24 +513,6 @@ impl View {
                 theme::close(dc, right - p(17), p(14), p(8), self.theme.colors.muted);
             }
             RestoreDC(dc, saved);
-            if self.tab_layout.overflow {
-                let total = self.tab_layout.count as i32 * self.tab_layout.width;
-                let thumb = (area.right * area.right / total).max(p(24));
-                let max_scroll = (total - area.right).max(1);
-                let x = self.tab_layout.offset * (area.right - thumb) / max_scroll;
-                theme::fill(
-                    dc,
-                    rect(0, area.bottom - p(4), area.right, area.bottom),
-                    self.theme.colors.border,
-                );
-                theme::rounded(
-                    dc,
-                    rect(x, area.bottom - p(4), x + thumb, area.bottom),
-                    self.theme.colors.muted,
-                    self.theme.colors.muted,
-                    p(4),
-                );
-            }
         }
     }
 
@@ -743,7 +705,7 @@ impl View {
             theme::text(
                 dc,
                 "변경 사항은 바로 적용되고 저장됩니다.",
-                rect(p(20), p(233), area.right - p(20), p(259)),
+                rect(p(20), p(274), area.right - p(20), p(300)),
                 self.theme.small,
                 self.theme.colors.muted,
                 DT_LEFT,
@@ -758,82 +720,16 @@ impl View {
             let area = draw.rcItem;
             if let Some(panel) = self.settings_panel {
                 if draw.hwndItem == panel.theme || draw.hwndItem == panel.font {
-                    let selected = draw.itemState & ODS_SELECTED != 0;
-                    theme::fill(
-                        dc,
-                        area,
-                        if selected {
-                            self.theme.colors.selected
-                        } else {
-                            self.theme.colors.white
-                        },
-                    );
-                    if draw.itemID != u32::MAX {
-                        let mut label = [0u16; 32];
-                        let len =
-                            SendMessageW(draw.hwndItem, CB_GETLBTEXTLEN, draw.itemID as usize, 0);
-                        if (0..32).contains(&len) {
-                            SendMessageW(
-                                draw.hwndItem,
-                                CB_GETLBTEXT,
-                                draw.itemID as usize,
-                                label.as_mut_ptr() as isize,
-                            );
-                            theme::text(
-                                dc,
-                                &String::from_utf16_lossy(&label[..len as usize]),
-                                rect(area.left + p(8), area.top, area.right - p(4), area.bottom),
-                                self.theme.ui,
-                                self.theme.colors.ink,
-                                DT_LEFT,
-                            );
-                        }
-                    }
-                    if draw.itemState & ODS_FOCUS != 0 {
-                        DrawFocusRect(dc, &area);
-                    }
+                    settings_controls::paint_item(draw, &self.theme);
                     return;
                 }
                 if draw.hwndItem == panel.wrap {
-                    let focused = draw.itemState & ODS_FOCUS != 0;
-                    theme::fill(dc, area, self.theme.colors.white);
-                    theme::text(
+                    settings_controls::paint_switch(
                         dc,
-                        "자동 줄 바꿈",
-                        rect(p(2), 0, area.right - p(56), area.bottom),
-                        self.theme.ui,
-                        self.theme.colors.ink,
-                        DT_LEFT,
-                    );
-                    let x = area.right - p(44);
-                    let y = (area.bottom - p(22)) / 2;
-                    let color = if self.word_wrap {
-                        self.theme.colors.blue
-                    } else {
-                        self.theme.colors.muted
-                    };
-                    theme::rounded(
-                        dc,
-                        rect(x, y, area.right - p(2), y + p(22)),
-                        color,
-                        if focused {
-                            self.theme.colors.ink
-                        } else {
-                            color
-                        },
-                        p(22),
-                    );
-                    let knob = if self.word_wrap {
-                        area.right - p(22)
-                    } else {
-                        x + p(3)
-                    };
-                    theme::rounded(
-                        dc,
-                        rect(knob, y + p(3), knob + p(16), y + p(19)),
-                        theme::WHITE,
-                        theme::WHITE,
-                        p(16),
+                        area,
+                        &self.theme,
+                        self.word_wrap,
+                        settings_controls::Feedback::read(draw.hwndItem, draw.itemState),
                     );
                     return;
                 }

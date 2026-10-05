@@ -1,11 +1,13 @@
 use crate::drag::{DropTarget, DropZone};
 use crate::model::{Notebook, replace_file};
-use crate::scrollbar::{ScrollRange, ThumbDrag};
+#[cfg(test)]
+use crate::scrollbar::ScrollRange;
+use crate::scrollbar::{self, Kind};
 use crate::settings::{self, Panel, Settings, ThemeMode};
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme};
 use crate::tooltip::Tooltip;
-use crate::{editing, startup, ui};
+use crate::{editing, settings_controls, startup, ui};
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -17,7 +19,7 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::*;
-use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_OWNERDRAW};
+use windows_sys::Win32::System::SystemServices::{MK_SHIFT, SS_NOTIFY, SS_OWNERDRAW};
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::*;
@@ -59,11 +61,49 @@ const MENU_DELETE: usize = 204;
 const MENU_UP: usize = 205;
 const MENU_DOWN: usize = 206;
 const MENU_OUTDENT: usize = 207;
+const MENU_TAB_CLOSE: usize = 401;
+const MENU_TAB_CLOSE_OTHERS: usize = 402;
+const MENU_TAB_CLOSE_RIGHT: usize = 403;
 const AUTOSAVE_TIMER: usize = 1;
 const DRAG_SCROLL_TIMER: usize = 2;
-const SCROLL_REPEAT_TIMER: usize = 1; // Per-scrollbar HWND; only while holding the track.
 const POSITION_RENAME: u32 = WM_APP + 1;
 const REFRESH_UI: u32 = WM_APP + 2;
+
+unsafe fn popup_menu(entries: &[(usize, &str, bool)]) -> HMENU {
+    unsafe {
+        let menu = CreatePopupMenu();
+        for &(id, label, enabled) in entries {
+            AppendMenuW(
+                menu,
+                MF_STRING | if enabled { 0 } else { MF_GRAYED },
+                id,
+                wide(label).as_ptr(),
+            );
+        }
+        menu
+    }
+}
+
+unsafe fn tab_menu(index: usize, count: usize) -> HMENU {
+    unsafe {
+        popup_menu(&[
+            (MENU_TAB_CLOSE, "탭 닫기\tCtrl+W", true),
+            (MENU_TAB_CLOSE_OTHERS, "다른 탭 닫기", count > 1),
+            (MENU_TAB_CLOSE_RIGHT, "오른쪽 탭들 닫기", index + 1 < count),
+        ])
+    }
+}
+
+unsafe fn sidebar_menu(nested: bool) -> HMENU {
+    unsafe {
+        popup_menu(&[
+            (MENU_NEW_CHILD, "하위 메뉴 추가", true),
+            (MENU_RENAME, "이름 바꾸기\tF2", true),
+            (MENU_OUTDENT, "한 단계 위로", nested),
+            (MENU_DELETE, "삭제", true),
+        ])
+    }
+}
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
 
@@ -93,9 +133,9 @@ struct App {
     edit: HWND,
     empty_edit: HWND,
     editor_host: HWND,
+    editor_clip: HWND,
+    tab_scroll: HWND,
     editor_scroll: [HWND; 2],
-    editor_scroll_drag: Option<ThumbDrag>,
-    editor_scroll_page: Option<(bool, i32)>,
     toggle: HWND,
     add: HWND,
     tab_add: HWND,
@@ -114,8 +154,6 @@ struct App {
     tree_scroll: HWND,
     tab_layout: Cell<TabLayout>,
     tab_hover: Cell<Option<(usize, bool)>>,
-    tab_drag: bool,
-    tree_scroll_drag: bool,
     tooltip: Tooltip,
     search_host: HWND,
     find_input: HWND,
@@ -276,11 +314,23 @@ unsafe extern "system" fn tab_subclass(
                 with_app(|app| app.tab_click(point_x(lp), point_y(lp)));
                 return 0;
             }
+            WM_CONTEXTMENU => {
+                with_app(|app| app.tab_context_menu(lp));
+                return 0;
+            }
+            WM_RBUTTONUP => {
+                let mut point = POINT {
+                    x: point_x(lp),
+                    y: point_y(lp),
+                };
+                ClientToScreen(hwnd, &mut point);
+                let coordinates =
+                    ((point.y as u32 & 0xffff) << 16 | (point.x as u32 & 0xffff)) as isize;
+                with_app(|app| app.tab_context_menu(coordinates));
+                return 0;
+            }
             WM_MOUSEMOVE => {
                 with_app(|app| {
-                    if app.tab_drag {
-                        app.drag_tab_scroll(point_x(lp));
-                    }
                     let layout = app.tab_layout.get();
                     let hover = layout
                         .hit(point_x(lp))
@@ -309,13 +359,12 @@ unsafe extern "system" fn tab_subclass(
                 return 0;
             }
             WM_LBUTTONUP => {
-                with_app(|app| app.tab_drag = false);
-                ReleaseCapture();
                 return 0;
             }
             WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
-                let delta = hi(wp) as u16 as i16 as i32;
-                with_app(|app| app.scroll_tabs(if msg == WM_MOUSEWHEEL { -delta } else { delta }));
+                ui::with_view(|v| {
+                    SendMessageW(v.tab_scroll, msg, wp, lp);
+                });
                 return 0;
             }
             WM_GETDLGCODE => return DLGC_WANTARROWS as isize,
@@ -365,13 +414,18 @@ unsafe extern "system" fn settings_host_proc(
 ) -> LRESULT {
     unsafe {
         match msg {
-            WM_COMMAND | WM_DRAWITEM | WM_MEASUREITEM | WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC
-            | WM_CTLCOLORLISTBOX => {
+            WM_COMMAND | WM_DRAWITEM | WM_MEASUREITEM | WM_CTLCOLOREDIT | WM_CTLCOLORBTN
+            | WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX => {
                 return SendMessageW(GetParent(hwnd), msg, wp, lp);
             }
             WM_ERASEBKGND => return 1,
             WM_PAINT => {
                 ui::paint_window(hwnd, |dc| ui::with_view(|view| view.paint_settings(dc)));
+                return 0;
+            }
+            WM_PRINT => return DefWindowProcW(hwnd, msg, wp, lp),
+            WM_PRINTCLIENT => {
+                ui::with_view(|view| view.paint_settings(wp as HDC));
                 return 0;
             }
             WM_NCDESTROY => {
@@ -414,30 +468,33 @@ unsafe extern "system" fn tree_host_proc(
     }
 }
 unsafe fn route_wheel(msg: u32, wp: usize) -> bool {
-    let mut route = 0;
+    let mut control = null_mut();
     unsafe {
         ui::with_view(|view| {
             let mut point = POINT::default();
             GetCursorPos(&mut point);
             let mut bounds = RECT::default();
-            GetWindowRect(view.tabs, &mut bounds);
-            if PtInRect(&bounds, point) != 0 {
-                route = 1;
+            GetWindowRect(GetParent(GetParent(view.edit)), &mut bounds);
+            if view.active.is_some() && PtInRect(&bounds, point) != 0 {
+                control = view.editor_scroll
+                    [(msg == WM_MOUSEHWHEEL || wp & MK_SHIFT as usize != 0) as usize];
             }
-            GetWindowRect(GetParent(view.tree), &mut bounds);
-            if view.sidebar_visible && PtInRect(&bounds, point) != 0 {
-                route = 2;
+            for (pane, scrollbar, visible) in [
+                (view.tabs, view.tab_scroll, true),
+                (view.tab_scroll, view.tab_scroll, view.tab_layout.overflow),
+                (GetParent(view.tree), view.tree_scroll, view.sidebar_visible),
+            ] {
+                GetWindowRect(pane, &mut bounds);
+                if visible && PtInRect(&bounds, point) != 0 {
+                    control = scrollbar;
+                }
             }
         });
-        let delta = hi(wp) as u16 as i16 as i32;
-        if route == 1 {
-            with_app(|app| app.scroll_tabs(if msg == WM_MOUSEWHEEL { -delta } else { delta }));
-        }
-        if route == 2 {
-            with_app(|app| app.scroll_tree(-delta / 40));
+        if !control.is_null() {
+            SendMessageW(control, msg, wp, 0);
         }
     }
-    route != 0
+    !control.is_null()
 }
 
 unsafe extern "system" fn tree_subclass(
@@ -465,9 +522,13 @@ unsafe extern "system" fn tree_subclass(
             });
             return 0;
         }
-        if msg == WM_MOUSEWHEEL {
-            let delta = hi(wp) as u16 as i16 as i32;
-            with_app(|app| app.scroll_tree(-delta / 40));
+        if matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
+            if route_wheel(msg, wp) {
+                return 0;
+            }
+            ui::with_view(|v| {
+                SendMessageW(v.tree_scroll, msg, wp, lp);
+            });
             return 0;
         }
         if msg == WM_MOUSEMOVE {
@@ -505,6 +566,10 @@ unsafe extern "system" fn tree_subclass(
         if msg == WM_NCDESTROY {
             RemoveWindowSubclass(hwnd, Some(tree_subclass), id);
         }
+        if msg == WM_CONTEXTMENU {
+            with_app(|app| app.context_menu(lp));
+            return 0;
+        }
         if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
             with_app(|app| app.tooltip.hide());
         }
@@ -516,55 +581,6 @@ unsafe extern "system" fn tree_subclass(
             });
         }
         result
-    }
-}
-
-unsafe extern "system" fn scroll_subclass(
-    hwnd: HWND,
-    msg: u32,
-    wp: WPARAM,
-    lp: LPARAM,
-    id: usize,
-    _reference: usize,
-) -> LRESULT {
-    unsafe {
-        match msg {
-            WM_ERASEBKGND => return 1,
-            WM_PAINT => {
-                ui::paint_window(hwnd, |dc| ui::with_view(|v| v.paint_tree_scroll(dc)));
-                return 0;
-            }
-            WM_LBUTTONDOWN => {
-                SetCapture(hwnd);
-                with_app(|a| {
-                    a.tree_scroll_drag = true;
-                    a.drag_tree_scroll(point_y(lp));
-                });
-                return 0;
-            }
-            WM_MOUSEMOVE => {
-                with_app(|a| {
-                    if a.tree_scroll_drag {
-                        a.drag_tree_scroll(point_y(lp));
-                    }
-                });
-                return 0;
-            }
-            WM_LBUTTONUP => {
-                ReleaseCapture();
-                with_app(|a| a.tree_scroll_drag = false);
-                return 0;
-            }
-            WM_MOUSEWHEEL => {
-                with_app(|a| a.scroll_tree(-(hi(wp) as u16 as i16 as i32) / 40));
-                return 0;
-            }
-            WM_NCDESTROY => {
-                RemoveWindowSubclass(hwnd, Some(scroll_subclass), id);
-            }
-            _ => {}
-        }
-        DefSubclassProc(hwnd, msg, wp, lp)
     }
 }
 
@@ -602,128 +618,6 @@ unsafe extern "system" fn editor_host_proc(
     }
 }
 
-unsafe extern "system" fn editor_scroll_proc(
-    hwnd: HWND,
-    msg: u32,
-    wp: WPARAM,
-    lp: LPARAM,
-    id: usize,
-    reference: usize,
-) -> LRESULT {
-    unsafe {
-        let horizontal = reference != 0;
-        let coordinate = if horizontal { point_x(lp) } else { point_y(lp) };
-        match msg {
-            WM_ERASEBKGND => return 1,
-            WM_PAINT => {
-                ui::paint_window(hwnd, |dc| {
-                    ui::with_view(|v| v.paint_editor_scroll(dc, horizontal))
-                });
-                return 0;
-            }
-            WM_LBUTTONDOWN => {
-                with_app(|app| {
-                    let range = ScrollRange::read(app.edit, horizontal);
-                    let mut area = RECT::default();
-                    GetClientRect(hwnd, &mut area);
-                    let length = if horizontal { area.right } else { area.bottom };
-                    let (start, size) = range.thumb(length, app.theme.px(24));
-                    if range.extent() > 0 {
-                        SetCapture(hwnd);
-                        if (start..start + size).contains(&coordinate) {
-                            app.editor_scroll_drag = Some(ThumbDrag {
-                                horizontal,
-                                range,
-                                pointer: coordinate,
-                                length,
-                                minimum: app.theme.px(24),
-                            });
-                        } else {
-                            app.editor_scroll_page =
-                                Some((horizontal, if coordinate < start { -1 } else { 1 }));
-                            app.page_editor_scroll(hwnd);
-                            SetTimer(hwnd, SCROLL_REPEAT_TIMER, 400, None);
-                        }
-                        InvalidateRect(hwnd, null(), 0);
-                    }
-                });
-                return 0;
-            }
-            WM_MOUSEMOVE => {
-                let mut tracking = TRACKMOUSEEVENT {
-                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: hwnd,
-                    dwHoverTime: 0,
-                };
-                TrackMouseEvent(&mut tracking);
-                InvalidateRect(hwnd, null(), 0);
-                if GetCapture() == hwnd {
-                    with_app(|app| app.drag_editor_scroll(hwnd, coordinate));
-                }
-                return 0;
-            }
-            WM_MOUSELEAVE => {
-                InvalidateRect(hwnd, null(), 0);
-                return 0;
-            }
-            WM_TIMER if wp == SCROLL_REPEAT_TIMER => {
-                if GetCapture() == hwnd {
-                    SetTimer(hwnd, SCROLL_REPEAT_TIMER, 60, None);
-                    with_app(|app| app.page_editor_scroll(hwnd));
-                } else {
-                    KillTimer(hwnd, SCROLL_REPEAT_TIMER);
-                }
-                return 0;
-            }
-            WM_LBUTTONUP => {
-                KillTimer(hwnd, SCROLL_REPEAT_TIMER);
-                with_app(|app| {
-                    app.editor_scroll_drag = None;
-                    app.editor_scroll_page = None;
-                });
-                if GetCapture() == hwnd {
-                    ReleaseCapture();
-                }
-                SendMessageW(
-                    ui_editor(),
-                    if horizontal { WM_HSCROLL } else { WM_VSCROLL },
-                    SB_ENDSCROLL as usize,
-                    0,
-                );
-                InvalidateRect(hwnd, null(), 0);
-                return 0;
-            }
-            WM_CAPTURECHANGED | WM_CANCELMODE => {
-                KillTimer(hwnd, SCROLL_REPEAT_TIMER);
-                with_app(|app| {
-                    app.editor_scroll_drag = None;
-                    app.editor_scroll_page = None;
-                });
-                if GetCapture() == hwnd {
-                    ReleaseCapture();
-                }
-                InvalidateRect(hwnd, null(), 0);
-            }
-            WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
-                return SendMessageW(ui_editor(), msg, wp, lp);
-            }
-            WM_NCDESTROY => {
-                ui::release_buffer(hwnd);
-                RemoveWindowSubclass(hwnd, Some(editor_scroll_proc), id);
-            }
-            _ => {}
-        }
-        DefSubclassProc(hwnd, msg, wp, lp)
-    }
-}
-
-fn ui_editor() -> HWND {
-    let mut editor = null_mut();
-    ui::with_view(|view| editor = view.edit);
-    editor
-}
-
 unsafe extern "system" fn control_subclass(
     hwnd: HWND,
     msg: u32,
@@ -733,7 +627,52 @@ unsafe extern "system" fn control_subclass(
     reference: usize,
 ) -> LRESULT {
     unsafe {
-        if reference == 2 && matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) && route_wheel(msg, wp) {
+        if reference == 1 {
+            if msg == WM_ERASEBKGND {
+                // Owner drawing fills the complete button in one buffered pass.
+                return 1;
+            }
+            if msg == WM_PRINT {
+                return DefWindowProcW(hwnd, msg, wp, lp);
+            }
+            if msg == WM_PRINTCLIENT {
+                let mut area = RECT::default();
+                GetClientRect(hwnd, &mut area);
+                let state = SendMessageW(hwnd, BM_GETSTATE, 0, 0) as u32;
+                let draw = DRAWITEMSTRUCT {
+                    CtlType: ODT_BUTTON,
+                    CtlID: GetDlgCtrlID(hwnd) as u32,
+                    itemAction: ODA_DRAWENTIRE,
+                    itemState: if state & BST_PUSHED != 0 {
+                        ODS_SELECTED
+                    } else {
+                        0
+                    } | if GetFocus() == hwnd { ODS_FOCUS } else { 0 }
+                        | if IsWindowEnabled(hwnd) == 0 {
+                            ODS_DISABLED
+                        } else {
+                            0
+                        },
+                    hwndItem: hwnd,
+                    hDC: wp as HDC,
+                    rcItem: area,
+                    ..Default::default()
+                };
+                ui::with_view(|view| view.paint_control(&draw));
+                return 0;
+            }
+        }
+        if reference == 2 && matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
+            if !route_wheel(msg, wp) {
+                ui::with_view(|v| {
+                    SendMessageW(
+                        v.editor_scroll[(msg == WM_MOUSEHWHEEL) as usize],
+                        msg,
+                        wp,
+                        lp,
+                    );
+                });
+            }
             return 0;
         }
 
@@ -759,6 +698,21 @@ unsafe extern "system" fn control_subclass(
             InvalidateRect(hwnd, null(), 0);
         }
         let result = DefSubclassProc(hwnd, msg, wp, lp);
+        if reference == 2
+            && msg == WM_KEYDOWN
+            && GetKeyState(VK_CONTROL as i32) < 0
+            && matches!(wp as u16, VK_HOME | VK_END)
+        {
+            let target = if wp as u16 == VK_HOME {
+                0
+            } else {
+                scrollbar::body_range(hwnd, false).extent() as i32
+            };
+            scrollbar::set_body_position(hwnd, false, target);
+            if wp as u16 == VK_HOME {
+                scrollbar::set_body_position(hwnd, true, 0);
+            }
+        }
 
         if reference == 2
             && matches!(
@@ -784,6 +738,7 @@ unsafe extern "system" fn control_subclass(
         {
             ui::with_view(|view| {
                 if view.edit == hwnd {
+                    scrollbar::layout_body(hwnd);
                     view.refresh_editor_scroll();
                 }
             });
@@ -931,13 +886,44 @@ impl App {
                 0,
                 if horizontal { 128 } else { 127 },
             );
-            SetWindowSubclass(control, Some(editor_scroll_proc), 1, horizontal as usize);
+            scrollbar::attach(
+                control,
+                if horizontal {
+                    Kind::EditorHorizontal
+                } else {
+                    Kind::EditorVertical
+                },
+            );
             control
         });
         unsafe {
             SetWindowSubclass(editor_host, Some(editor_host_proc), 1, 0);
         }
-        let edit = unsafe { memo_editor(editor_host) };
+        let editor_clip = unsafe {
+            child(
+                editor_host,
+                wide("STATIC").as_ptr(),
+                "",
+                common | WS_CLIPCHILDREN,
+                0,
+                129,
+            )
+        };
+        let tab_scroll = unsafe {
+            child(
+                hwnd,
+                wide("STATIC").as_ptr(),
+                "Tab scroll",
+                common | SS_NOTIFY,
+                0,
+                130,
+            )
+        };
+        unsafe {
+            SetWindowSubclass(editor_clip, Some(editor_host_proc), 1, 0);
+            scrollbar::attach(tab_scroll, Kind::Tabs);
+        }
+        let edit = unsafe { memo_editor(editor_clip) };
         let status = unsafe {
             child(
                 hwnd,
@@ -967,7 +953,7 @@ impl App {
             )
         };
         unsafe {
-            SetWindowSubclass(tree_scroll, Some(scroll_subclass), 1, 0);
+            scrollbar::attach(tree_scroll, Kind::Tree);
         }
         let search_host = unsafe {
             child(
@@ -1044,9 +1030,9 @@ impl App {
             edit,
             empty_edit: edit,
             editor_host,
+            editor_clip,
+            tab_scroll,
             editor_scroll,
-            editor_scroll_drag: None,
-            editor_scroll_page: None,
             toggle,
             add,
             tab_add,
@@ -1067,8 +1053,6 @@ impl App {
             tree_scroll,
             tab_layout: Cell::new(TabLayout::default()),
             tab_hover: Cell::new(None),
-            tab_drag: false,
-            tree_scroll_drag: false,
             tooltip: unsafe { Tooltip::new(hwnd) },
             search_host,
             find_input,
@@ -1205,7 +1189,7 @@ impl App {
             for field in [self.find_input, self.replace_input] {
                 SendMessageW(field, WM_SETFONT, self.theme.ui as usize, 0);
             }
-            self.tooltip.style(self.theme.small, self.theme.px(420));
+            self.tooltip.style(&self.theme);
             SendMessageW(
                 self.tree,
                 TVM_SETBKCOLOR,
@@ -1230,8 +1214,8 @@ impl App {
             let visible = IsWindowVisible(editor) != 0;
             let modified = SendMessageW(editor, EM_GETMODIFY, 0, 0);
             let mut scroll = POINT {
-                x: ScrollRange::read(editor, true).position,
-                y: ScrollRange::read(editor, false).position,
+                x: scrollbar::body_range(editor, true).position,
+                y: scrollbar::body_range(editor, false).position,
             };
             if visible {
                 SendMessageW(editor, WM_SETREDRAW, 0, 0);
@@ -1279,12 +1263,12 @@ impl App {
                     scroll.x = 0;
                 }
             }
-            SendMessageW(
-                editor,
-                editing::EM_SETSCROLLPOS,
-                0,
-                &scroll as *const _ as LPARAM,
-            );
+            if font || wrap {
+                scrollbar::configure_body(editor, self.settings.wrap);
+            }
+            scrollbar::layout_body(editor);
+            scrollbar::set_body_position(editor, true, scroll.x);
+            scrollbar::set_body_position(editor, false, scroll.y);
             SendMessageW(editor, EM_SETMODIFY, modified as usize, 0);
             if visible {
                 SendMessageW(editor, WM_SETREDRAW, 1, 0);
@@ -1317,6 +1301,9 @@ impl App {
                     panel.font_label,
                 ] {
                     SendMessageW(control, WM_SETFONT, self.theme.ui as usize, 0);
+                }
+                for control in [panel.theme, panel.font] {
+                    settings_controls::style_dropdown(control, &self.theme);
                 }
                 SetWindowTextW(
                     panel.wrap,
@@ -1370,6 +1357,8 @@ impl App {
                 };
                 let theme = combo("앱 테마", ID_SETTINGS_THEME);
                 let font = combo("본문 글꼴", ID_SETTINGS_FONT);
+                settings_controls::attach_dropdown(theme);
+                settings_controls::attach_dropdown(font);
                 let wrap = child(
                     host,
                     wide("BUTTON").as_ptr(),
@@ -1421,6 +1410,8 @@ impl App {
                     },
                     0,
                 );
+                settings_controls::confirm_selection(theme);
+                settings_controls::confirm_selection(font);
                 self.settings_panel = Some(Panel {
                     host,
                     theme,
@@ -1430,6 +1421,8 @@ impl App {
                     theme_label,
                     font_label,
                 });
+                // Styling can synchronously request owner drawing.
+                self.publish_view();
                 self.style_settings_panel();
             }
             self.settings_visible = show;
@@ -1465,22 +1458,23 @@ impl App {
             let mut area = RECT::default();
             GetClientRect(self.hwnd, &mut area);
             let width = p(360).min(area.right - p(24));
+            let first_show = GetWindowLongPtrW(panel.host, GWL_STYLE) as u32 & WS_VISIBLE == 0;
             SetWindowPos(
                 panel.host,
                 HWND_TOP,
                 area.right - width - p(12),
                 p(42),
                 width,
-                p(272),
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                p(312),
+                SWP_NOACTIVATE | SWP_NOREDRAW,
             );
             for (control, x, y, w, h) in [
                 (panel.close, width - p(66), p(12), p(48), p(28)),
                 (panel.theme_label, p(20), p(52), width - p(40), p(22)),
                 (panel.theme, p(20), p(76), width - p(40), p(230)),
-                (panel.font_label, p(20), p(117), width - p(40), p(22)),
-                (panel.font, p(20), p(141), width - p(40), p(280)),
-                (panel.wrap, p(20), p(191), width - p(40), p(30)),
+                (panel.font_label, p(20), p(130), width - p(40), p(22)),
+                (panel.font, p(20), p(154), width - p(40), p(280)),
+                (panel.wrap, p(20), p(218), width - p(40), p(40)),
             ] {
                 SetWindowPos(
                     control,
@@ -1489,14 +1483,21 @@ impl App {
                     y,
                     w,
                     h,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
                 );
+            }
+            // Expose only the fully laid-out panel, then finish its first frame.
+            if first_show {
+                ShowWindow(panel.host, SW_SHOWNA);
             }
             RedrawWindow(
                 panel.host,
                 null(),
                 null_mut(),
-                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE,
+                RDW_INVALIDATE
+                    | RDW_ALLCHILDREN
+                    | RDW_NOERASE
+                    | if first_show { RDW_UPDATENOW } else { 0 },
             );
         }
     }
@@ -1538,6 +1539,15 @@ impl App {
             }
         }
         if next == self.settings {
+            unsafe {
+                if id == ID_SETTINGS_THEME || id == ID_SETTINGS_FONT {
+                    settings_controls::confirm_selection(if id == ID_SETTINGS_THEME {
+                        panel.theme
+                    } else {
+                        panel.font
+                    });
+                }
+            }
             return;
         }
         if let Err(error) = next.save(&self.data_dir) {
@@ -1559,11 +1569,20 @@ impl App {
                     wide(&self.settings.font).as_ptr() as LPARAM,
                 );
                 SendMessageW(panel.font, CB_SETCURSEL, index as usize, 0);
+                settings_controls::confirm_selection(panel.theme);
+                settings_controls::confirm_selection(panel.font);
             }
             report(self.hwnd, "설정을 저장하지 못했습니다.", error);
             return;
         }
         unsafe {
+            if id == ID_SETTINGS_THEME || id == ID_SETTINGS_FONT {
+                settings_controls::confirm_selection(if id == ID_SETTINGS_THEME {
+                    panel.theme
+                } else {
+                    panel.font
+                });
+            }
             self.apply_settings(next);
         }
     }
@@ -1626,6 +1645,7 @@ impl App {
             hwnd: self.hwnd,
             tree: self.tree,
             tabs: self.tabs,
+            tab_scroll: self.tab_scroll,
             edit: self.edit,
             editor_scroll: self.editor_scroll,
             toggle: self.toggle,
@@ -1721,7 +1741,7 @@ impl App {
             }
             self.tab_layout.set(tabs);
             self.publish_view();
-            let editor_y = p(36);
+            let editor_y = p(if tabs.overflow { 48 } else { 36 });
             let scroll_width = p(12);
             let scroll_height = if self.settings.wrap { 0 } else { p(12) };
             let editor_width = (w - content_x - scroll_width).max(0);
@@ -1754,12 +1774,13 @@ impl App {
                 ),
                 (
                     self.tree_scroll,
-                    left - p(10),
+                    left - p(12),
                     p(62),
-                    p(6),
+                    p(12),
                     (h - p(70)).max(0),
                 ),
                 (self.tabs, tabs_x, 0, tabs.viewport, p(36)),
+                (self.tab_scroll, tabs_x, p(36), tabs.viewport, p(12)),
                 (self.settings_button, w - p(36), p(3), p(30), p(29)),
                 (
                     self.tab_add,
@@ -1770,10 +1791,10 @@ impl App {
                 ),
                 (
                     self.editor_host,
-                    content_x + p(24),
-                    editor_y + p(22),
-                    (editor_width - p(48)).max(0),
-                    (editor_height - p(44)).max(0),
+                    content_x,
+                    editor_y,
+                    editor_width,
+                    editor_height,
                 ),
                 (
                     self.editor_scroll[0],
@@ -1829,31 +1850,7 @@ impl App {
             if !batch.is_null() {
                 EndDeferWindowPos(batch);
             }
-            let mut host_area = RECT::default();
-            GetClientRect(self.editor_host, &mut host_area);
-            let editor_width =
-                host_area.right + GetSystemMetricsForDpi(SM_CXVSCROLL, self.theme.dpi);
-            let editor_height = host_area.bottom
-                + if self.settings.wrap {
-                    0
-                } else {
-                    GetSystemMetricsForDpi(SM_CYHSCROLL, self.theme.dpi)
-                };
-            let mut editor_area = RECT::default();
-            GetWindowRect(self.edit, &mut editor_area);
-            if editor_area.right - editor_area.left != editor_width
-                || editor_area.bottom - editor_area.top != editor_height
-            {
-                SetWindowPos(
-                    self.edit,
-                    null_mut(),
-                    0,
-                    0,
-                    editor_width,
-                    editor_height,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS,
-                );
-            }
+            scrollbar::layout_body(self.edit);
             // A deferred batch may only contain siblings. The tree lives in a
             // clipping host so its native scrollbar can stay functional.
             let tree_width =
@@ -1882,6 +1879,8 @@ impl App {
                     self.tree_scroll,
                     self.sidebar_visible && self.visible.len() > visible_rows,
                 ),
+                (self.tab_scroll, tabs.overflow),
+                (self.editor_clip, self.active.is_some()),
                 (self.edit, self.active.is_some()),
                 (self.editor_host, self.active.is_some()),
             ] {
@@ -2016,7 +2015,8 @@ impl App {
 
     unsafe fn hover_tab_tooltip(&mut self, x: i32, y: i32) {
         unsafe {
-            if self.tab_drag || self.dragging.is_some() || y >= self.theme.px(32) {
+            if GetCapture() == self.tab_scroll || self.dragging.is_some() || y >= self.theme.px(32)
+            {
                 self.tooltip.hide();
                 return;
             }
@@ -2076,16 +2076,10 @@ impl App {
         }
     }
 
-    unsafe fn tab_click(&mut self, x: i32, y: i32) {
+    unsafe fn tab_click(&mut self, x: i32, _y: i32) {
         unsafe {
             self.tooltip.hide();
             let layout = self.tab_layout.get();
-            if layout.overflow && y >= self.theme.px(32) {
-                self.tab_drag = true;
-                SetCapture(self.tabs);
-                self.drag_tab_scroll(x);
-                return;
-            }
             if let Some(index) = layout.hit(x) {
                 if x >= layout.bounds(index).1 - self.theme.px(24) {
                     self.close_tab(index);
@@ -2093,31 +2087,6 @@ impl App {
                     self.activate(index);
                 }
             }
-        }
-    }
-    unsafe fn scroll_tabs(&self, delta: i32) {
-        unsafe {
-            self.tooltip.dismiss();
-        }
-        let mut tabs = self.tab_layout.get();
-        tabs.scroll(delta * self.theme.px(100) / 120);
-        self.tab_layout.set(tabs);
-        self.publish_view();
-        unsafe {
-            InvalidateRect(self.tabs, null(), 0);
-        }
-    }
-    unsafe fn drag_tab_scroll(&self, x: i32) {
-        let mut tabs = self.tab_layout.get();
-        let total = tabs.width * tabs.count as i32;
-        let thumb = (tabs.viewport * tabs.viewport / total.max(1)).max(self.theme.px(24));
-        tabs.offset = ((x - thumb / 2).max(0) * (total - tabs.viewport).max(0)
-            / (tabs.viewport - thumb).max(1))
-        .clamp(0, (total - tabs.viewport).max(0));
-        self.tab_layout.set(tabs);
-        self.publish_view();
-        unsafe {
-            InvalidateRect(self.tabs, null(), 0);
         }
     }
     unsafe fn scroll_tree(&self, rows: i32) {
@@ -2134,132 +2103,29 @@ impl App {
             InvalidateRect(self.tree_scroll, null(), 0);
         }
     }
-    unsafe fn drag_tree_scroll(&self, y: i32) {
+    unsafe fn set_scroll(&self, kind: Kind, target: i32) {
         unsafe {
-            let mut area = RECT::default();
-            GetClientRect(self.tree_scroll, &mut area);
-            let count = SendMessageW(self.tree, TVM_GETVISIBLECOUNT, 0, 0).max(1) as i32;
-            let total = self.visible.len() as i32;
-            let thumb = (area.bottom * count / total.max(1))
-                .max(self.theme.px(24))
-                .min(area.bottom);
-            let index = ((y - thumb / 2).max(0) * (total - count).max(0)
-                / (area.bottom - thumb).max(1))
-            .clamp(0, (total - count).max(0)) as usize;
-            if let Some(&item) = self.visible.get(index) {
-                SendMessageW(self.tree, TVM_SELECTITEM, TVGN_FIRSTVISIBLE as usize, item);
-            }
-            InvalidateRect(self.tree_scroll, null(), 0);
-        }
-    }
-
-    unsafe fn drag_editor_scroll(&self, _control: HWND, coordinate: i32) {
-        let Some(drag) = self.editor_scroll_drag else {
-            return;
-        };
-        unsafe {
-            let horizontal = drag.horizontal;
-            let target = drag.position(coordinate);
-            if target == ScrollRange::read(self.edit, horizontal).position {
-                return;
-            }
-            if target == drag.range.min || i64::from(target - drag.range.min) == drag.range.extent()
-            {
-                SendMessageW(
-                    self.edit,
-                    if horizontal { WM_HSCROLL } else { WM_VSCROLL },
-                    if target == drag.range.min {
-                        SB_TOP
-                    } else {
-                        SB_BOTTOM
-                    } as usize,
-                    0,
-                );
-                ui::with_view(|view| view.refresh_editor_scroll());
-                return;
-            }
-            // Let RichEdit move a single axis whenever the native thumb message
-            // can represent it. EM_SETSCROLLPOS re-clamps BOTH axes.
-            if (0..=u16::MAX as i32).contains(&target) {
-                SendMessageW(
-                    self.edit,
-                    if horizontal { WM_HSCROLL } else { WM_VSCROLL },
-                    SB_THUMBPOSITION as usize | ((target as usize) << 16),
-                    0,
-                );
-                ui::with_view(|view| view.refresh_editor_scroll());
-                return;
-            }
-            let other = ScrollRange::read(self.edit, !horizontal);
-            let first_line = SendMessageW(self.edit, EM_GETFIRSTVISIBLELINE, 0, 0);
-            let mut position = POINT {
-                x: ScrollRange::read(self.edit, true).position,
-                y: ScrollRange::read(self.edit, false).position,
-            };
-            if horizontal {
-                position.x = target;
-            } else {
-                position.y = target;
-            }
-            SendMessageW(
-                self.edit,
-                editing::EM_SETSCROLLPOS,
-                0,
-                &position as *const _ as LPARAM,
-            );
-            if ScrollRange::read(self.edit, !horizontal).position != other.position {
-                let message = if horizontal { WM_VSCROLL } else { WM_HSCROLL };
-                if i64::from(other.position - other.min) >= other.extent() - 1 {
-                    SendMessageW(self.edit, message, SB_BOTTOM as usize, 0);
-                } else if (0..=u16::MAX as i32).contains(&other.position) {
-                    SendMessageW(
-                        self.edit,
-                        message,
-                        SB_THUMBPOSITION as usize | ((other.position as usize) << 16),
-                        0,
-                    );
-                } else if horizontal {
-                    let delta = first_line - SendMessageW(self.edit, EM_GETFIRSTVISIBLELINE, 0, 0);
-                    SendMessageW(self.edit, EM_LINESCROLL, 0, delta);
+            self.tooltip.dismiss();
+            match kind {
+                Kind::Dropdown { list, .. } => scrollbar::set_list_position(list, target),
+                Kind::EditorVertical | Kind::EditorHorizontal => {
+                    scrollbar::set_body_position(self.edit, kind.horizontal(), target);
+                    ui::with_view(|v| v.refresh_editor_scroll());
                 }
-            }
-            ui::with_view(|view| view.refresh_editor_scroll());
-        }
-    }
-
-    unsafe fn page_editor_scroll(&self, control: HWND) {
-        let Some((horizontal, direction)) = self.editor_scroll_page else {
-            return;
-        };
-        unsafe {
-            let mut pointer = POINT::default();
-            GetCursorPos(&mut pointer);
-            ScreenToClient(control, &mut pointer);
-            let mut area = RECT::default();
-            GetClientRect(control, &mut area);
-            if PtInRect(&area, pointer) == 0 {
-                return;
-            }
-            let range = ScrollRange::read(self.edit, horizontal);
-            let (start, size) = range.thumb(
-                if horizontal { area.right } else { area.bottom },
-                self.theme.px(24),
-            );
-            let coordinate = if horizontal { pointer.x } else { pointer.y };
-            if (direction < 0 && coordinate < start)
-                || (direction > 0 && coordinate >= start + size)
-            {
-                SendMessageW(
-                    self.edit,
-                    if horizontal { WM_HSCROLL } else { WM_VSCROLL },
-                    if direction < 0 {
-                        SB_PAGEUP
-                    } else {
-                        SB_PAGEDOWN
-                    } as usize,
-                    0,
-                );
-                ui::with_view(|view| view.refresh_editor_scroll());
+                Kind::Tree => {
+                    let first =
+                        SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE as usize, 0);
+                    let current = self.visible.iter().position(|&h| h == first).unwrap_or(0) as i32;
+                    self.scroll_tree(target - current);
+                }
+                Kind::Tabs => {
+                    let mut tabs = self.tab_layout.get();
+                    tabs.scroll(target - tabs.offset);
+                    self.tab_layout.set(tabs);
+                    self.publish_view();
+                    InvalidateRect(self.tabs, null(), 0);
+                    InvalidateRect(self.tab_scroll, null(), 0);
+                }
             }
         }
     }
@@ -2451,7 +2317,7 @@ impl App {
             }
         };
         drop(read_timing);
-        let editor = unsafe { memo_editor(self.editor_host) };
+        let editor = unsafe { memo_editor(self.editor_clip) };
         if editor.is_null() {
             report(
                 self.hwnd,
@@ -2484,20 +2350,39 @@ impl App {
     }
 
     unsafe fn close_tab(&mut self, index: usize) {
+        unsafe { self.close_tabs(index, MENU_TAB_CLOSE) };
+    }
+
+    unsafe fn close_tabs(&mut self, index: usize, command: usize) {
         if index >= self.open.len() {
+            return;
+        }
+        let closes = |candidate: usize| match command {
+            MENU_TAB_CLOSE => candidate == index,
+            MENU_TAB_CLOSE_OTHERS => candidate != index,
+            MENU_TAB_CLOSE_RIGHT => candidate > index,
+            _ => false,
+        };
+        if !(0..self.open.len()).any(closes) {
             return;
         }
         if !unsafe { self.save_all() } {
             return;
         }
         let previous_active = self.active;
-        let closed = self.open.remove(index);
-        if self.edit == closed.editor {
-            self.edit = self.empty_edit;
-        }
-        unsafe {
-            if !closed.editor.is_null() {
-                DestroyWindow(closed.editor);
+        let active_id = previous_active.map(|active| self.open[active].id);
+        // Remove backwards so the menu target and predicate keep their original indices.
+        for candidate in (0..self.open.len()).rev() {
+            if closes(candidate) {
+                let closed = self.open.remove(candidate);
+                if self.edit == closed.editor {
+                    self.edit = self.empty_edit;
+                }
+                unsafe {
+                    if !closed.editor.is_null() {
+                        DestroyWindow(closed.editor);
+                    }
+                }
             }
         }
 
@@ -2517,12 +2402,9 @@ impl App {
                 self.layout();
             }
         } else {
-            let next = match previous_active {
-                Some(active) if active == index => index.min(self.open.len() - 1),
-                Some(active) if active > index => active - 1,
-                Some(active) => active,
-                None => 0,
-            };
+            let next = active_id
+                .and_then(|id| self.open.iter().position(|tab| tab.id == id))
+                .unwrap_or_else(|| index.min(self.open.len() - 1));
             unsafe {
                 if !self.activate(next) {
                     ShowWindow(self.edit, SW_HIDE);
@@ -2864,8 +2746,6 @@ impl App {
     }
 
     unsafe fn cancel_interaction(&mut self) {
-        self.editor_scroll_drag = None;
-        self.editor_scroll_page = None;
         self.dragging = None;
         self.drop_target = None;
         self.tree_hover = None;
@@ -2873,10 +2753,23 @@ impl App {
         self.publish_view();
         unsafe {
             KillTimer(self.hwnd, DRAG_SCROLL_TIMER);
-            for control in self.editor_scroll {
-                KillTimer(control, SCROLL_REPEAT_TIMER);
+            for control in [
+                self.editor_scroll[0],
+                self.editor_scroll[1],
+                self.tree_scroll,
+                self.tab_scroll,
+            ] {
+                SendMessageW(control, WM_CANCELMODE, 0, 0);
             }
-            if GetCapture() == self.hwnd || self.editor_scroll.contains(&GetCapture()) {
+            if GetCapture() == self.hwnd
+                || [
+                    self.editor_scroll[0],
+                    self.editor_scroll[1],
+                    self.tree_scroll,
+                    self.tab_scroll,
+                ]
+                .contains(&GetCapture())
+            {
                 ReleaseCapture();
             }
             SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
@@ -2901,33 +2794,107 @@ impl App {
         }
     }
 
-    unsafe fn context_menu(&mut self) {
+    unsafe fn tab_context_menu(&mut self, coordinates: LPARAM) {
         unsafe {
-            if let Some((_, _, handle)) = self.hit_tree() {
+            let keyboard = coordinates == -1;
+            let mut point = POINT {
+                x: point_x(coordinates),
+                y: point_y(coordinates),
+            };
+            let index = if keyboard {
+                let Some(index) = self.active else { return };
+                let (left, right) = self.tab_layout.get().bounds(index);
+                point = POINT {
+                    x: ((left + right) / 2).clamp(0, (self.tab_layout.get().viewport - 1).max(0)),
+                    y: self.theme.px(34),
+                };
+                ClientToScreen(self.tabs, &mut point);
+                index
+            } else {
+                let mut client = point;
+                ScreenToClient(self.tabs, &mut client);
+                let Some(index) = self.tab_layout.get().hit(client.x) else {
+                    return;
+                };
+                index
+            };
+            self.tooltip.hide();
+            self.tab_hover.set(None);
+            InvalidateRect(self.tabs, null(), 0);
+            let menu = tab_menu(index, self.open.len());
+            let chosen = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                point.x,
+                point.y,
+                0,
+                self.hwnd,
+                null(),
+            );
+            DestroyMenu(menu);
+            if chosen != 0 {
+                self.close_tabs(index, chosen as usize);
+            }
+        }
+    }
+
+    unsafe fn context_menu(&mut self, coordinates: LPARAM) {
+        unsafe {
+            let mut point = POINT {
+                x: point_x(coordinates),
+                y: point_y(coordinates),
+            };
+            if coordinates != -1 {
+                let mut client = point;
+                ScreenToClient(self.tree, &mut client);
+                let mut hit = TVHITTESTINFO {
+                    pt: client,
+                    ..Default::default()
+                };
+                SendMessageW(self.tree, TVM_HITTEST, 0, &mut hit as *mut _ as isize);
+                if !self.handles.contains_key(&hit.hItem) {
+                    return;
+                }
                 SendMessageW(
                     self.tree,
                     TVM_SELECTITEM,
                     TVGN_CARET as usize,
-                    handle as LPARAM,
+                    hit.hItem as LPARAM,
                 );
+            } else {
+                let handle = SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0);
+                if !self.handles.contains_key(&handle) {
+                    return;
+                }
+                let mut area = RECT::default();
+                *(&mut area as *mut RECT as *mut isize) = handle;
+                if SendMessageW(self.tree, TVM_GETITEMRECT, 1, &mut area as *mut _ as isize) == 0 {
+                    return;
+                }
+                point = POINT {
+                    x: area.left + self.theme.px(12),
+                    y: area.bottom,
+                };
+                ClientToScreen(self.tree, &mut point);
             }
-            let menu = CreatePopupMenu();
-            let entries = [
-                (MENU_NEW_CHILD, "하위 메모 추가"),
-                (MENU_NEW_ROOT, "최상위 메모 추가"),
-                (MENU_RENAME, "이름 바꾸기    F2"),
-                (MENU_UP, "위로 이동"),
-                (MENU_DOWN, "아래로 이동"),
-                (MENU_OUTDENT, "한 단계 위로"),
-                (MENU_DELETE, "삭제"),
-            ];
-            for (id, label) in entries {
-                AppendMenuW(menu, MF_STRING, id, wide(label).as_ptr());
-            }
-            let mut pt = POINT::default();
-            GetCursorPos(&mut pt);
-            TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, self.hwnd, null());
+            let Some(note) = self.selected_id().and_then(|id| self.book.get(id)) else {
+                return;
+            };
+            let menu = sidebar_menu(note.parent != 0);
+            self.tooltip.hide();
+            let chosen = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                point.x,
+                point.y,
+                0,
+                self.hwnd,
+                null(),
+            );
             DestroyMenu(menu);
+            if chosen != 0 {
+                self.command(chosen as usize, 0);
+            }
         }
     }
 
@@ -3142,8 +3109,26 @@ impl App {
             ID_SETTINGS_CLOSE => unsafe {
                 self.show_settings(false);
             },
-            ID_SETTINGS_THEME | ID_SETTINGS_FONT if code == CBN_SELCHANGE as usize => unsafe {
-                self.change_setting(id);
+            ID_SETTINGS_THEME | ID_SETTINGS_FONT => unsafe {
+                if let Some(panel) = self.settings_panel {
+                    let control = if id == ID_SETTINGS_THEME {
+                        panel.theme
+                    } else {
+                        panel.font
+                    };
+                    if code == CBN_SELENDOK as usize
+                        || (code == CBN_SELCHANGE as usize
+                            && SendMessageW(control, CB_GETDROPPEDSTATE, 0, 0) == 0)
+                    {
+                        self.change_setting(id);
+                    } else if code == CBN_SELENDCANCEL as usize || code == CBN_DROPDOWN as usize {
+                        settings_controls::restore_selection(control);
+                    } else if code == CBN_CLOSEUP as usize {
+                        // Close-up and selection notification order is not fixed.
+                        // Restore only after synchronous commit/cancel handlers.
+                        settings_controls::defer_restore(control);
+                    }
+                }
             },
             ID_SETTINGS_WRAP => unsafe {
                 self.change_setting(id);
@@ -3361,7 +3346,8 @@ impl App {
                     }
                 }
                 NM_RCLICK => unsafe {
-                    self.context_menu();
+                    self.context_menu(GetMessagePos() as isize);
+                    return 1; // Suppress the duplicate default context menu.
                 },
                 _ => {}
             }
@@ -3438,7 +3424,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             }
             1
         }
-        WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX => {
+        WM_CTLCOLOREDIT | WM_CTLCOLORBTN | WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX => {
             let mut brush = 0;
             ui::with_view(|view| unsafe {
                 let dc = wp as HDC;
@@ -3763,8 +3749,13 @@ fn shortcut(msg: &MSG) -> bool {
         } else if key == VK_ESCAPE as u32
             && (app.dragging.is_some()
                 || app.resizing
-                || app.editor_scroll_drag.is_some()
-                || app.editor_scroll_page.is_some())
+                || [
+                    app.editor_scroll[0],
+                    app.editor_scroll[1],
+                    app.tree_scroll,
+                    app.tab_scroll,
+                ]
+                .contains(&GetCapture()))
         {
             app.cancel_interaction();
             handled = true;
@@ -4031,10 +4022,447 @@ pub fn run() {
     }
 }
 
+pub(crate) unsafe fn scroll_to(kind: Kind, position: i32) {
+    unsafe {
+        with_app(|app| app.set_scroll(kind, position));
+    }
+}
+
 #[cfg(test)]
 mod settings_tests {
     use super::*;
     use std::time::Instant;
+
+    unsafe extern "system" fn initial_frame_observer(
+        hwnd: HWND,
+        msg: u32,
+        wp: WPARAM,
+        lp: LPARAM,
+        id: usize,
+        reference: usize,
+    ) -> LRESULT {
+        unsafe {
+            if msg == WM_SHOWWINDOW && wp != 0 {
+                let mut ready = false;
+                ui::with_view(|view| {
+                    if let Some(panel) = view.settings_panel {
+                        ready = panel.host == hwnd && view.settings_visible;
+                        for control in [
+                            panel.close,
+                            panel.wrap,
+                            panel.theme,
+                            panel.font,
+                            panel.theme_label,
+                            panel.font_label,
+                        ] {
+                            let mut area = RECT::default();
+                            GetClientRect(control, &mut area);
+                            ready &= area.right > 0 && area.bottom > 0;
+                        }
+                    }
+                });
+                (*(reference as *const RefCell<Vec<bool>>))
+                    .borrow_mut()
+                    .push(ready);
+            }
+            if msg == WM_NCDESTROY {
+                RemoveWindowSubclass(hwnd, Some(initial_frame_observer), id);
+            }
+            DefSubclassProc(hwnd, msg, wp, lp)
+        }
+    }
+
+    unsafe extern "system" fn paint_test_owner(
+        hwnd: HWND,
+        msg: u32,
+        wp: WPARAM,
+        lp: LPARAM,
+        id: usize,
+        reference: usize,
+    ) -> LRESULT {
+        unsafe {
+            if msg == WM_PARENTNOTIFY && lo(wp) == WM_CREATE as usize && hi(wp) == 125 {
+                SetWindowSubclass(lp as HWND, Some(initial_frame_observer), 77, reference);
+            }
+            if matches!(
+                msg,
+                WM_DRAWITEM
+                    | WM_CTLCOLOREDIT
+                    | WM_CTLCOLORBTN
+                    | WM_CTLCOLORSTATIC
+                    | WM_CTLCOLORLISTBOX
+            ) {
+                return window_proc(hwnd, msg, wp, lp);
+            }
+            if msg == WM_NCDESTROY {
+                RemoveWindowSubclass(hwnd, Some(paint_test_owner), id);
+            }
+            DefSubclassProc(hwnd, msg, wp, lp)
+        }
+    }
+
+    // Exercises the actual native erase/print messages used before regular
+    // WM_PAINT, while every top-level window remains hidden.
+    #[test]
+    fn settings_initial_frame_and_animation_keep_the_theme() {
+        unsafe {
+            let controls = INITCOMMONCONTROLSEX {
+                dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES,
+            };
+            InitCommonControlsEx(&controls);
+            assert!(!LoadLibraryW(wide("Msftedit.dll").as_ptr()).is_null());
+            let focus = GetFocus();
+            let capture = GetCapture();
+            let root = std::env::temp_dir().join(format!(
+                "edot-first-frame-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let dc = CreateCompatibleDC(null_mut());
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: 700,
+                    biHeight: -700,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut pixels = null_mut();
+            let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut pixels, null_mut(), 0);
+            assert!(!dc.is_null() && !bitmap.is_null());
+            let original = SelectObject(dc, bitmap);
+            let sentinel = theme::rgb(230, 15, 110);
+            let canvas = theme::rect(0, 0, 700, 700);
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                let dir = root.join(format!("{mode:?}"));
+                let book = Notebook::load(&dir).unwrap();
+                let readiness = Box::new(RefCell::new(Vec::<bool>::new()));
+                let hwnd = child(
+                    null_mut(),
+                    windows_sys::w!("STATIC"),
+                    "first-frame-test",
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                );
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    1000,
+                    760,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                SetWindowSubclass(
+                    hwnd,
+                    Some(paint_test_owner),
+                    77,
+                    &*readiness as *const RefCell<Vec<bool>> as usize,
+                );
+                let mut app = App::new(
+                    hwnd,
+                    dir,
+                    book,
+                    Settings {
+                        theme: mode,
+                        ..Default::default()
+                    },
+                );
+                app.show_settings(true);
+                assert_eq!(
+                    &*readiness.borrow(),
+                    &[true],
+                    "first show must follow publishing and child layout"
+                );
+                let panel = app.settings_panel.unwrap();
+                let background = app.theme.colors.white;
+                for control in [panel.close, panel.wrap] {
+                    theme::fill(dc, canvas, sentinel);
+                    assert_eq!(SendMessageW(control, WM_ERASEBKGND, dc as usize, 0), 1);
+                    assert_eq!(
+                        GetPixel(dc, 0, 0),
+                        sentinel,
+                        "native erasure must not expose the system button color"
+                    );
+                    let brush =
+                        SendMessageW(panel.host, WM_CTLCOLORBTN, dc as usize, control as isize)
+                            as HBRUSH;
+                    assert!(!brush.is_null());
+                    FillRect(dc, &canvas, brush);
+                    assert_eq!(GetPixel(dc, 0, 0), background);
+                    for message in [WM_PRINTCLIENT, WM_PRINT] {
+                        theme::fill(dc, canvas, sentinel);
+                        SendMessageW(
+                            control,
+                            message,
+                            dc as usize,
+                            (PRF_CLIENT | PRF_ERASEBKGND) as isize,
+                        );
+                        assert_eq!(GetPixel(dc, 0, 0), background);
+                    }
+                }
+                theme::fill(dc, canvas, sentinel);
+                SendMessageW(
+                    panel.host,
+                    WM_PRINT,
+                    dc as usize,
+                    (PRF_CLIENT | PRF_CHILDREN | PRF_ERASEBKGND) as isize,
+                );
+                assert_eq!(GetPixel(dc, app.theme.px(3), app.theme.px(60)), background);
+
+                let mut combo = COMBOBOXINFO {
+                    cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
+                    ..Default::default()
+                };
+                assert_ne!(GetComboBoxInfo(panel.font, &mut combo), 0);
+                let list = combo.hwndList;
+                SetWindowPos(
+                    list,
+                    null_mut(),
+                    0,
+                    0,
+                    320,
+                    250,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                let bar = FindWindowExW(
+                    list,
+                    null_mut(),
+                    windows_sys::w!("STATIC"),
+                    windows_sys::w!("목록 스크롤"),
+                );
+                assert!(!bar.is_null());
+                let selection = SendMessageW(panel.font, CB_GETCURSEL, 0, 0);
+                for message in [WM_PRINTCLIENT, WM_PRINT] {
+                    theme::fill(dc, canvas, sentinel);
+                    SendMessageW(
+                        bar,
+                        message,
+                        dc as usize,
+                        (PRF_CLIENT | PRF_ERASEBKGND) as isize,
+                    );
+                    assert_eq!(GetPixel(dc, 0, 0), background);
+                    // AnimateWindow may print the parent without PRF_CHILDREN.
+                    // Its snapshot must still contain the common scrollbar.
+                    theme::fill(dc, canvas, sentinel);
+                    SendMessageW(
+                        list,
+                        message,
+                        dc as usize,
+                        (PRF_CLIENT | PRF_ERASEBKGND) as isize,
+                    );
+                    let mut bounds = RECT::default();
+                    GetWindowRect(bar, &mut bounds);
+                    MapWindowPoints(null_mut(), list, &mut bounds as *mut _ as *mut POINT, 2);
+                    let length = bounds.bottom - bounds.top;
+                    let range = scrollbar::list_range(list);
+                    assert!(range.extent() > 0);
+                    let (start, size) = range.thumb(length, app.theme.px(24));
+                    assert_eq!(
+                        GetPixel(dc, bounds.left, bounds.top + length / 2),
+                        background
+                    );
+                    assert_eq!(
+                        GetPixel(
+                            dc,
+                            (bounds.left + bounds.right) / 2,
+                            bounds.top + start + size / 2
+                        ),
+                        app.theme.colors.muted
+                    );
+                }
+                assert_eq!(SendMessageW(panel.font, CB_GETCURSEL, 0, 0), selection);
+                assert_eq!(IsWindowVisible(list), 0);
+                app.show_settings(false);
+                app.show_settings(true);
+                assert_eq!(&*readiness.borrow(), &[true, true]);
+                assert_eq!(IsWindowVisible(hwnd), 0);
+                ui::clear();
+                DestroyWindow(hwnd);
+                drop(app);
+            }
+            SelectObject(dc, original);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
+            fs::remove_dir_all(root).unwrap();
+            assert_eq!(GetFocus(), focus);
+            assert_eq!(GetCapture(), capture);
+        }
+    }
+
+    #[test]
+    fn context_menus_close_target_tabs_and_preserve_notes() {
+        unsafe {
+            let controls = INITCOMMONCONTROLSEX {
+                dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES,
+            };
+            InitCommonControlsEx(&controls);
+            assert!(!LoadLibraryW(wide("Msftedit.dll").as_ptr()).is_null());
+            for (index, count, expected) in [(0, 1, true), (0, 5, false), (4, 5, true)] {
+                let menu = tab_menu(index, count);
+                assert_eq!(GetMenuItemCount(menu), 3);
+                assert_eq!(GetMenuItemID(menu, 0), MENU_TAB_CLOSE as u32);
+                assert_eq!(GetMenuItemID(menu, 1), MENU_TAB_CLOSE_OTHERS as u32);
+                assert_eq!(GetMenuItemID(menu, 2), MENU_TAB_CLOSE_RIGHT as u32);
+                assert_eq!(
+                    GetMenuState(menu, MENU_TAB_CLOSE_RIGHT as u32, MF_BYCOMMAND) & MF_GRAYED != 0,
+                    expected
+                );
+                assert_eq!(
+                    GetMenuState(menu, MENU_TAB_CLOSE_OTHERS as u32, MF_BYCOMMAND) & MF_GRAYED != 0,
+                    count == 1
+                );
+                DestroyMenu(menu);
+            }
+            for nested in [false, true] {
+                let menu = sidebar_menu(nested);
+                assert_eq!(GetMenuItemCount(menu), 4);
+                for (position, id) in [MENU_NEW_CHILD, MENU_RENAME, MENU_OUTDENT, MENU_DELETE]
+                    .into_iter()
+                    .enumerate()
+                {
+                    assert_eq!(GetMenuItemID(menu, position as i32), id as u32);
+                }
+                assert_eq!(
+                    GetMenuState(menu, MENU_OUTDENT as u32, MF_BYCOMMAND) & MF_GRAYED == 0,
+                    nested
+                );
+                DestroyMenu(menu);
+            }
+            let focus = GetFocus();
+            let capture = GetCapture();
+            let root = std::env::temp_dir().join(format!(
+                "edot-context-native-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            for (case, (target, command, remaining, active)) in [
+                (0, MENU_TAB_CLOSE, vec![1, 2, 3, 4], 2),
+                (1, MENU_TAB_CLOSE_OTHERS, vec![1], 1),
+                (0, MENU_TAB_CLOSE_RIGHT, vec![0], 0),
+                (3, MENU_TAB_CLOSE_RIGHT, vec![0, 1, 2, 3], 2),
+                (4, MENU_TAB_CLOSE_RIGHT, vec![0, 1, 2, 3, 4], 2),
+                (2, MENU_TAB_CLOSE, vec![0, 1, 3, 4], 3),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let dir = root.join(case.to_string());
+                let mut book = Notebook::load(&dir).unwrap();
+                let ids: Vec<_> = (0..5)
+                    .map(|i| book.add(0, format!("메뉴 테스트 {i}")))
+                    .collect();
+                for (i, &id) in ids.iter().enumerate() {
+                    fs::write(book.file(&dir, id), format!("원본 메모 {i}")).unwrap();
+                }
+                book.save(&dir).unwrap();
+                let hwnd = child(
+                    null_mut(),
+                    windows_sys::w!("STATIC"),
+                    "context-test",
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                );
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    900,
+                    600,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                let mut app = App::new(
+                    hwnd,
+                    dir.clone(),
+                    book,
+                    Settings {
+                        theme: ThemeMode::Light,
+                        ..Default::default()
+                    },
+                );
+                app.open = ids
+                    .iter()
+                    .map(|&id| OpenTab {
+                        id,
+                        text: String::new(),
+                        dirty: false,
+                        editor: null_mut(),
+                    })
+                    .collect();
+                app.active = None;
+                app.activate(4);
+                SetWindowTextW(app.edit, wide("수정한 비활성 메모").as_ptr());
+                app.activate(2); // Captures the hidden editor before it is closed.
+                SetWindowTextW(app.edit, wide("수정한 활성 메모").as_ptr());
+                let active_editor = app.edit;
+                app.close_tabs(target, command);
+                assert_eq!(
+                    app.open.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                    remaining.iter().map(|&i| ids[i]).collect::<Vec<_>>()
+                );
+                assert_eq!(app.open[app.active.unwrap()].id, ids[active]);
+                if active == 2 {
+                    assert_eq!(app.edit, active_editor);
+                }
+                // The no-op rightmost command must not force an unnecessary save.
+                if target != 4 || command != MENU_TAB_CLOSE_RIGHT {
+                    assert_eq!(
+                        fs::read_to_string(app.book.file(&dir, ids[2])).unwrap(),
+                        "수정한 활성 메모"
+                    );
+                    assert_eq!(
+                        fs::read_to_string(app.book.file(&dir, ids[4])).unwrap(),
+                        "수정한 비활성 메모"
+                    );
+                }
+                for i in [0, 1, 3] {
+                    assert_eq!(
+                        fs::read_to_string(app.book.file(&dir, ids[i])).unwrap(),
+                        format!("원본 메모 {i}")
+                    );
+                }
+                assert_eq!(Notebook::load(&dir).unwrap().notes.len(), 5);
+                let parent = ids[0];
+                let child_id = ids[1];
+                assert!(app.book.move_note(child_id, parent, None));
+                app.rebuild_tree(Some(child_id));
+                app.command(MENU_OUTDENT, 0);
+                assert_eq!(app.book.get(child_id).unwrap().parent, 0);
+                assert_eq!(
+                    Notebook::load(&dir).unwrap().get(child_id).unwrap().parent,
+                    0
+                );
+                // Closing the final tab hides the editor without deleting its note.
+                while !app.open.is_empty() {
+                    app.close_tab(0);
+                }
+                assert!(app.active.is_none());
+                assert_eq!(app.edit, app.empty_edit);
+                assert_eq!(Notebook::load(&dir).unwrap().notes.len(), 5);
+                ui::clear();
+                DestroyWindow(hwnd);
+                drop(app);
+            }
+            fs::remove_dir_all(root).unwrap();
+            assert_eq!(GetFocus(), focus);
+            assert_eq!(GetCapture(), capture);
+        }
+    }
 
     // Direct native-control integration test. It creates an invisible window
     // and isolated notes, and records synchronous application costs (no paint).
@@ -4049,8 +4477,14 @@ mod settings_tests {
             };
             InitCommonControlsEx(&controls);
             assert!(!LoadLibraryW(wide("Msftedit.dll").as_ptr()).is_null());
-            let root =
-                std::env::temp_dir().join(format!("edot-settings-native-{}", std::process::id()));
+            let root = std::env::temp_dir().join(format!(
+                "edot-settings-native-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
             fs::create_dir_all(&root).unwrap();
             for repeat in [100, 6000] {
                 let dir = root.join(repeat.to_string());
@@ -4058,6 +4492,9 @@ mod settings_tests {
                 let id = book.add(0, "설정 테스트".into());
                 let second = book.add(0, "숨겨진 편집기".into());
                 let lazy = book.add(0, "아직 읽지 않은 탭".into());
+                for index in 4..=50 {
+                    book.add(0, format!("스크롤 테스트 {index}"));
+                }
                 let content =
                     ("가나다 🙂 ABC 0123456789 ".to_owned() + &"long line text ".repeat(16) + "\n")
                         .repeat(repeat);
@@ -4102,9 +4539,35 @@ mod settings_tests {
                     dirty: false,
                     editor: null_mut(),
                 });
+                if repeat == 100 {
+                    app.show_settings(true);
+                    let panel = app.settings_panel.unwrap();
+                    SendMessageW(panel.theme, CB_SETCURSEL, 1, 0);
+                    assert_eq!(app.settings.theme, ThemeMode::Light);
+                    assert_eq!(settings_controls::confirmed_selection(panel.theme), 0);
+                    app.command(ID_SETTINGS_THEME, CBN_SELENDOK as usize);
+                    assert_eq!(app.settings.theme, ThemeMode::Dark);
+                    assert_eq!(settings_controls::confirmed_selection(panel.theme), 1);
+                    SendMessageW(panel.theme, CB_SETCURSEL, 2, 0);
+                    app.command(ID_SETTINGS_THEME, CBN_SELENDCANCEL as usize);
+                    assert_eq!(SendMessageW(panel.theme, CB_GETCURSEL, 0, 0), 1);
+                    assert_eq!(app.settings.theme, ThemeMode::Dark);
+                    assert_eq!(Settings::load(&dir).unwrap().theme, ThemeMode::Dark);
+                    SendMessageW(panel.theme, CB_SETCURSEL, 0, 0);
+                    app.command(ID_SETTINGS_THEME, CBN_SELENDOK as usize);
+                    app.show_settings(false);
+                }
                 let before = window_text(editor);
                 let hidden_before = window_text(hidden_editor);
                 let disk_before = fs::read(app.book.file(&dir, id)).unwrap();
+                let mut wrapped_clip = RECT::default();
+                let mut wrapped_host = RECT::default();
+                GetClientRect(app.editor_clip, &mut wrapped_clip);
+                GetClientRect(app.editor_host, &mut wrapped_host);
+                assert_eq!(wrapped_clip.right, wrapped_host.right);
+                let margins = SendMessageW(editor, EM_GETMARGINS, 0, 0) as u32;
+                assert_eq!(margins & 0xffff, app.theme.px(24) as u32);
+                assert_eq!(margins >> 16, app.theme.px(24) as u32);
                 let original_second_line = SendMessageW(editor, EM_LINEINDEX, 1, 0);
                 editing::select(editor, editing::CharRange { start: 4, end: 7 });
                 SendMessageW(editor, EM_REPLACESEL, 1, wide("편집").as_ptr() as LPARAM);
@@ -4146,75 +4609,98 @@ mod settings_tests {
                     edited.replace("\r\n", "\r").encode_utf16().count() as isize - 1,
                 );
                 let horizontal = ScrollRange::read(editor, true);
-                let vertical = ScrollRange::read(editor, false);
                 assert!(horizontal.extent() > 0);
-                app.editor_scroll_drag = Some(ThumbDrag {
-                    horizontal: true,
-                    range: horizontal,
-                    pointer: 0,
-                    length: host.right,
-                    minimum: app.theme.px(24),
-                });
-                app.drag_editor_scroll(app.editor_scroll[1], 0);
+                let horizontal = scrollbar::body_range(editor, true);
+                app.set_scroll(Kind::EditorHorizontal, horizontal.position);
                 assert_eq!(
-                    ScrollRange::read(editor, true).position,
+                    scrollbar::body_range(editor, true).position,
                     horizontal.position
                 );
-                app.drag_editor_scroll(app.editor_scroll[1], i32::MAX);
-                let horizontal_end = ScrollRange::read(editor, true).position;
-                assert!((i64::from(horizontal_end) - horizontal.extent()).abs() <= 1);
-                assert_eq!(ScrollRange::read(editor, false).position, vertical.position);
-                app.editor_scroll_drag = Some(ThumbDrag {
-                    horizontal: false,
-                    range: vertical,
-                    pointer: 0,
-                    length: host.bottom,
-                    minimum: app.theme.px(24),
-                });
-                app.drag_editor_scroll(app.editor_scroll[0], host.bottom / 2);
+                app.set_scroll(Kind::EditorHorizontal, horizontal.extent() as i32);
+                let vertical = scrollbar::body_range(editor, false);
+                app.set_scroll(Kind::EditorVertical, vertical.extent() as i32 / 2);
                 let middle = ScrollRange::read(editor, false).position;
                 assert!(middle > 0);
                 if repeat == 6000 {
                     assert!(middle > 65_535);
                 }
-                assert_eq!(ScrollRange::read(editor, true).position, horizontal_end);
-                app.drag_editor_scroll(app.editor_scroll[0], 0);
-                assert_eq!(ScrollRange::read(editor, false).position, vertical.position);
-                app.drag_editor_scroll(app.editor_scroll[0], host.bottom / 2);
-                app.drag_editor_scroll(app.editor_scroll[0], i32::MAX);
-                let mut last = POINT::default();
-                let mut formatting = RECT::default();
-                SendMessageW(editor, EM_GETRECT, 0, &mut formatting as *mut _ as LPARAM);
+                let mut clip = RECT::default();
+                GetClientRect(app.editor_clip, &mut clip);
+                assert_eq!(
+                    (clip.right, clip.bottom),
+                    (host.right - app.theme.px(24), host.bottom)
+                );
+                let mut origin = POINT::default();
+                ClientToScreen(app.editor_clip, &mut origin);
+                ScreenToClient(app.editor_host, &mut origin);
+                assert_eq!(origin.y, 0);
+                app.set_scroll(Kind::EditorVertical, 0);
+                assert_eq!(ScrollRange::read(editor, false).position, 0);
+                origin = POINT::default();
+                ClientToScreen(app.editor_clip, &mut origin);
+                ScreenToClient(app.editor_host, &mut origin);
+                assert_eq!(origin.y, app.theme.px(22));
+                app.set_scroll(Kind::EditorVertical, vertical.extent() as i32);
+                let end_y = ScrollRange::read(editor, false).position;
+                assert!(end_y > middle);
+                GetClientRect(app.editor_clip, &mut clip);
+                assert_eq!(clip.bottom, host.bottom - app.theme.px(22));
+                let mut last_position = POINT::default();
                 SendMessageW(
                     editor,
                     WM_USER + 38,
-                    &mut last as *mut _ as WPARAM,
-                    edited.replace("\r\n", "\r").encode_utf16().count() as isize - 2,
-                ); // EM_POSFROMCHAR
-                assert!(
-                    last.y >= formatting.top && last.y < formatting.bottom,
-                    "last y={}, formatting={}..{}",
-                    last.y,
-                    formatting.top,
-                    formatting.bottom
+                    &mut last_position as *mut _ as usize,
+                    edited.replace("\r\n", "\r").encode_utf16().count() as isize - 1,
                 );
-                assert_eq!(ScrollRange::read(editor, true).position, horizontal_end);
-                let bottom = ScrollRange::read(editor, false).position;
-                let current_horizontal = ScrollRange::read(editor, true);
-                app.editor_scroll_drag = Some(ThumbDrag {
-                    horizontal: true,
-                    range: current_horizontal,
-                    pointer: host.right,
-                    length: host.right,
-                    minimum: app.theme.px(24),
-                });
-                app.drag_editor_scroll(app.editor_scroll[1], host.right / 2);
-                assert_eq!(ScrollRange::read(editor, false).position, bottom);
-                assert!(SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) > 50);
-                app.editor_scroll_drag = None;
+                ClientToScreen(editor, &mut last_position);
+                ScreenToClient(app.editor_host, &mut last_position);
+                assert!((0..host.bottom - app.theme.px(22)).contains(&last_position.y));
+                app.set_scroll(Kind::EditorHorizontal, horizontal.extent() as i32 / 2);
+                assert_eq!(ScrollRange::read(editor, false).position, end_y);
+                GetClientRect(app.editor_clip, &mut clip);
+                assert_eq!(clip.right, host.right);
+                app.set_scroll(Kind::EditorVertical, vertical.extent() as i32 / 2);
+                GetClientRect(app.editor_clip, &mut clip);
+                assert_eq!((clip.right, clip.bottom), (host.right, host.bottom));
+                app.tab_layout
+                    .set(TabLayout::new(160, app.open.len(), 88, 180, 0));
+                app.publish_view();
+                app.set_scroll(Kind::Tabs, i32::MAX);
+                assert_eq!(
+                    app.tab_layout.get().offset,
+                    app.tab_layout.get().width * app.open.len() as i32
+                        - app.tab_layout.get().viewport
+                );
+                let active_before = app.active;
+                app.set_scroll(Kind::Tabs, 0);
+                assert_eq!(app.tab_layout.get().offset, 0);
+                assert_eq!(app.active, active_before);
+                let selected_tree = app.selected_id();
+                app.set_scroll(Kind::Tree, i32::MAX);
+                let first = SendMessageW(app.tree, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE as usize, 0);
+                let end_index = app.visible.iter().position(|&item| item == first).unwrap();
+                assert!(end_index > 0);
+                let mut tree_range = ScrollRange::default();
+                ui::with_view(|view| tree_range = view.scroll_range(Kind::Tree));
+                assert_eq!(end_index as i64, tree_range.extent());
+                app.set_scroll(Kind::Tree, 0);
+                assert_eq!(
+                    SendMessageW(app.tree, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE as usize, 0),
+                    app.visible[0]
+                );
+                assert_eq!(app.selected_id(), selected_tree);
+                app.layout();
                 assert_eq!(editing::selection(editor), selection);
                 assert_eq!(SendMessageW(editor, EM_GETMODIFY, 0, 0), modified);
                 assert_eq!(window_text(editor), edited);
+                let tab_scroll_before = scrollbar::body_range(editor, false).position;
+                let active_index = app.active.unwrap();
+                app.activate(0);
+                app.activate(active_index);
+                assert_eq!(
+                    scrollbar::body_range(editor, false).position,
+                    tab_scroll_before
+                );
                 assert_eq!(window_text(hidden_editor), hidden_before);
                 assert!(app.open[2].editor.is_null());
                 assert_eq!(fs::read(app.book.file(&dir, id)).unwrap(), disk_before);
@@ -4235,6 +4721,34 @@ mod settings_tests {
                 app.edit = hidden_editor;
                 app.layout();
                 let last_char = content.encode_utf16().count() as isize - 1;
+                println!(
+                    "scroll_environment\tbytes={}\tdpi={}",
+                    content.len(),
+                    app.theme.dpi
+                );
+                for kind in [Kind::EditorVertical, Kind::EditorHorizontal] {
+                    let range = scrollbar::body_range(app.edit, kind.horizontal());
+                    let mut values = Vec::new();
+                    for iteration in 0..51 {
+                        let start = Instant::now();
+                        app.set_scroll(kind, range.extent() as i32 * (iteration % 10) / 9);
+                        if iteration > 0 {
+                            values.push(start.elapsed().as_secs_f64() * 1000.0);
+                        }
+                    }
+                    values.sort_by(f64::total_cmp);
+                    println!(
+                        "scroll_bench\tbytes={}\taxis={}\tmedian_ms={:.3}\tmax_ms={:.3}",
+                        content.len(),
+                        if kind.horizontal() {
+                            "horizontal"
+                        } else {
+                            "vertical"
+                        },
+                        values[25],
+                        values[49]
+                    );
+                }
                 for feature in ["theme", "font", "wrap"] {
                     let mut values = Vec::new();
                     for iteration in 0..16 {
