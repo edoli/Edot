@@ -1236,13 +1236,8 @@ impl App {
             if wrap {
                 // RichEdit's screen target uses 0 for wrapping to the client
                 // width and 1 for disabling wrapping. Text stays untouched.
-                let style = GetWindowLongPtrW(editor, GWL_STYLE) as u32;
-                let style = if self.settings.wrap {
-                    style & !WS_HSCROLL
-                } else {
-                    style | WS_HSCROLL
-                };
-                SetWindowLongPtrW(editor, GWL_STYLE, style as isize);
+                // Reserve both native bars in every mode. layout_body clips
+                // them outside the viewport independently of text padding.
                 SendMessageW(
                     editor,
                     editing::EM_SETTARGETDEVICE,
@@ -1259,7 +1254,6 @@ impl App {
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
                 );
                 if self.settings.wrap {
-                    ShowScrollBar(editor, SB_HORZ, 0);
                     scroll.x = 0;
                 }
             }
@@ -4033,6 +4027,104 @@ mod settings_tests {
     use super::*;
     use std::time::Instant;
 
+    #[test]
+    fn body_scrollbars_stay_outside_the_clip_with_small_padding() {
+        unsafe {
+            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            InitCommonControlsEx(&INITCOMMONCONTROLSEX {
+                dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES,
+            });
+            assert!(!LoadLibraryW(wide("Msftedit.dll").as_ptr()).is_null());
+            let root = std::env::temp_dir().join(format!(
+                "edot-body-padding-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let mut book = Notebook::load(&root).unwrap();
+            let id = book.add(0, "여백 테스트".into());
+            fs::write(book.file(&root, id), "").unwrap();
+            book.save(&root).unwrap();
+            let hwnd = child(
+                null_mut(),
+                wide("STATIC").as_ptr(),
+                "",
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+            );
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                0,
+                0,
+                600,
+                400,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let mut app = App::new(hwnd, root.clone(), book, Settings::default());
+            app.open_note(id);
+            let editor = app.edit;
+            for wrap in [true, false, true] {
+                let mut settings = app.settings.clone();
+                settings.wrap = wrap;
+                app.apply_settings(settings);
+                for text in [
+                    String::new(),
+                    "짧은 메모".into(),
+                    "긴 메모 ABC ".repeat(100),
+                    "긴 메모 ABC\n".repeat(100),
+                ] {
+                    SetWindowTextW(editor, wide(&text).as_ptr());
+                    // RichEdit can reserve its disabled native bar again during
+                    // layout. It must stay clipped even with a small bottom gap.
+                    ShowScrollBar(editor, SB_HORZ, 1);
+                    let mut last = POINT::default();
+                    SendMessageW(
+                        editor,
+                        WM_USER + 38,
+                        &mut last as *mut _ as usize,
+                        text.encode_utf16().count().saturating_sub(1) as isize,
+                    );
+                    scrollbar::layout_body(editor);
+                    let mut client = RECT::default();
+                    let mut clip_area = RECT::default();
+                    let mut host_area = RECT::default();
+                    GetClientRect(editor, &mut client);
+                    GetClientRect(app.editor_clip, &mut clip_area);
+                    GetClientRect(app.editor_host, &mut host_area);
+                    assert_eq!(
+                        (client.right, client.bottom),
+                        (host_area.right, host_area.bottom)
+                    );
+                    let mut origin = POINT::default();
+                    ClientToScreen(editor, &mut origin);
+                    ScreenToClient(app.editor_clip, &mut origin);
+                    let range = scrollbar::body_range(editor, true);
+                    assert!(
+                        origin.y + client.bottom >= clip_area.bottom,
+                        "native horizontal scrollbar is visible inside the clip"
+                    );
+                    assert!(
+                        origin.x + client.right >= clip_area.right,
+                        "native vertical scrollbar is visible inside the clip"
+                    );
+                    assert_eq!(window_text(editor).replace("\r\n", "\n"), text);
+                    if wrap {
+                        assert_eq!(range.extent(), 0);
+                    }
+                }
+            }
+            ui::clear();
+            DestroyWindow(hwnd);
+            drop(app);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     unsafe extern "system" fn initial_frame_observer(
         hwnd: HWND,
         msg: u32,
@@ -4566,8 +4658,8 @@ mod settings_tests {
                 GetClientRect(app.editor_host, &mut wrapped_host);
                 assert_eq!(wrapped_clip.right, wrapped_host.right);
                 let margins = SendMessageW(editor, EM_GETMARGINS, 0, 0) as u32;
-                assert_eq!(margins & 0xffff, app.theme.px(24) as u32);
-                assert_eq!(margins >> 16, app.theme.px(24) as u32);
+                assert_eq!(margins & 0xffff, app.theme.px(12) as u32);
+                assert_eq!(margins >> 16, app.theme.px(12) as u32);
                 let original_second_line = SendMessageW(editor, EM_LINEINDEX, 1, 0);
                 editing::select(editor, editing::CharRange { start: 4, end: 7 });
                 SendMessageW(editor, EM_REPLACESEL, 1, wide("편집").as_ptr() as LPARAM);
@@ -4628,7 +4720,7 @@ mod settings_tests {
                 GetClientRect(app.editor_clip, &mut clip);
                 assert_eq!(
                     (clip.right, clip.bottom),
-                    (host.right - app.theme.px(24), host.bottom)
+                    (host.right - app.theme.px(12), host.bottom)
                 );
                 let mut origin = POINT::default();
                 ClientToScreen(app.editor_clip, &mut origin);
@@ -4639,12 +4731,12 @@ mod settings_tests {
                 origin = POINT::default();
                 ClientToScreen(app.editor_clip, &mut origin);
                 ScreenToClient(app.editor_host, &mut origin);
-                assert_eq!(origin.y, app.theme.px(22));
+                assert_eq!(origin.y, app.theme.px(8));
                 app.set_scroll(Kind::EditorVertical, vertical.extent() as i32);
                 let end_y = ScrollRange::read(editor, false).position;
                 assert!(end_y > middle);
                 GetClientRect(app.editor_clip, &mut clip);
-                assert_eq!(clip.bottom, host.bottom - app.theme.px(22));
+                assert_eq!(clip.bottom, host.bottom - app.theme.px(8));
                 let mut last_position = POINT::default();
                 SendMessageW(
                     editor,
@@ -4654,7 +4746,7 @@ mod settings_tests {
                 );
                 ClientToScreen(editor, &mut last_position);
                 ScreenToClient(app.editor_host, &mut last_position);
-                assert!((0..host.bottom - app.theme.px(22)).contains(&last_position.y));
+                assert!((0..host.bottom - app.theme.px(8)).contains(&last_position.y));
                 app.set_scroll(Kind::EditorHorizontal, horizontal.extent() as i32 / 2);
                 assert_eq!(ScrollRange::read(editor, false).position, end_y);
                 GetClientRect(app.editor_clip, &mut clip);

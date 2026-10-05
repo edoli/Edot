@@ -458,7 +458,7 @@ const ANCHOR_X: *const u16 = windows_sys::w!("Edot.BodyAnchorX");
 const ANCHOR_Y: *const u16 = windows_sys::w!("Edot.BodyAnchorY");
 const WRAP: *const u16 = windows_sys::w!("Edot.BodyWrap");
 unsafe fn padding(editor: HWND, horizontal: bool) -> i32 {
-    unsafe { (if horizontal { 12 } else { 8 }) * GetDpiForWindow(editor) as i32 / 96 }
+    unsafe { (if horizontal { 16 } else { 12 }) * GetDpiForWindow(editor) as i32 / 96 }
 }
 unsafe fn offset(editor: HWND, horizontal: bool) -> i32 {
     unsafe {
@@ -618,18 +618,12 @@ pub unsafe fn layout_body(editor: HWND) {
             (area.right - left - right).max(0),
             (area.bottom - top - bottom).max(0),
         );
-        let wrap = GetPropW(editor, WRAP) as usize == 2;
         let changed = position_window(
             editor,
             -right,
             -bottom,
             area.right + GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(editor)),
-            area.bottom
-                + if wrap {
-                    0
-                } else {
-                    GetSystemMetricsForDpi(SM_CYHSCROLL, GetDpiForWindow(editor))
-                },
+            area.bottom + GetSystemMetricsForDpi(SM_CYHSCROLL, GetDpiForWindow(editor)),
         ) || changed;
         if changed {
             RedrawWindow(
