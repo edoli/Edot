@@ -34,6 +34,7 @@ const ID_EDIT: usize = 104;
 const ID_TREE: usize = 105;
 const ID_TABS: usize = 106;
 const ID_TAB_ADD: usize = 107;
+const ID_TAB_NAME: usize = 125;
 const ID_SETTINGS: usize = 120;
 const ID_SETTINGS_THEME: usize = 121;
 const ID_SETTINGS_FONT: usize = 122;
@@ -71,6 +72,7 @@ const DRAG_SCROLL_TIMER: usize = 2;
 const TAB_DRAG_SCROLL_TIMER: usize = 3;
 const POSITION_RENAME: u32 = WM_APP + 1;
 const REFRESH_UI: u32 = WM_APP + 2;
+const FINISH_TAB_RENAME: u32 = WM_APP + 3;
 
 unsafe fn popup_menu(entries: &[(usize, &str, bool)]) -> HMENU {
     unsafe {
@@ -133,6 +135,12 @@ struct TreePress {
     clicked: bool,
 }
 
+#[derive(Clone, Copy)]
+struct TabRename {
+    id: u64,
+    focus: HWND,
+}
+
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
 
 struct MutexGuard(HANDLE);
@@ -158,6 +166,8 @@ struct App {
     tree: HWND,
     tree_host: HWND,
     tabs: HWND,
+    tab_name_edit: HWND,
+    tab_rename: Option<TabRename>,
     edit: HWND,
     empty_edit: HWND,
     editor_host: HWND,
@@ -338,9 +348,20 @@ unsafe extern "system" fn tab_subclass(
 ) -> LRESULT {
     unsafe {
         match msg {
+            WM_COMMAND | WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
+                return SendMessageW(GetParent(hwnd), msg, wp, lp);
+            }
             WM_ERASEBKGND => return 1,
             WM_PAINT => {
                 ui::paint_window(hwnd, |dc| ui::with_view(|v| v.paint_tabs(dc)));
+                return 0;
+            }
+            WM_PRINT => return DefWindowProcW(hwnd, msg, wp, lp),
+            WM_PRINTCLIENT => {
+                let dc = wp as HDC;
+                let saved = SaveDC(dc);
+                ui::with_view(|view| view.paint_tabs(dc));
+                RestoreDC(dc, saved);
                 return 0;
             }
             WM_LBUTTONDOWN => {
@@ -426,6 +447,38 @@ unsafe extern "system" fn tab_subclass(
             WM_GETDLGCODE => return DLGC_WANTARROWS as isize,
             WM_NCDESTROY => {
                 RemoveWindowSubclass(hwnd, Some(tab_subclass), id);
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+unsafe extern "system" fn tab_name_subclass(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    _: usize,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_KEYDOWN if matches!(wp as u16, VK_RETURN | VK_ESCAPE | VK_TAB) => {
+                with_app(|app| {
+                    if let Err(error) = app.finish_tab_rename(wp != VK_ESCAPE as usize, true) {
+                        report(app.hwnd, "메모 이름을 저장하지 못했습니다.", error);
+                    }
+                });
+                return 0;
+            }
+            WM_CHAR if matches!(wp as u16, VK_RETURN | VK_ESCAPE | VK_TAB) => return 0,
+            WM_KILLFOCUS => {
+                // Focus changes can occur inside an App mutation. Commit after it finishes.
+                PostMessageW(GetParent(GetParent(hwnd)), FINISH_TAB_RENAME, 0, 0);
+            }
+            WM_NCDESTROY => {
+                RemoveWindowSubclass(hwnd, Some(tab_name_subclass), id);
             }
             _ => {}
         }
@@ -931,7 +984,7 @@ impl App {
                 hwnd,
                 wide("STATIC").as_ptr(),
                 "",
-                common | WS_TABSTOP | SS_NOTIFY,
+                common | WS_TABSTOP | WS_CLIPCHILDREN | SS_NOTIFY,
                 0,
                 ID_TABS,
             )
@@ -1123,6 +1176,8 @@ impl App {
             tree,
             tree_host,
             tabs,
+            tab_name_edit: null_mut(),
+            tab_rename: None,
             edit,
             empty_edit: edit,
             editor_host,
@@ -1268,6 +1323,9 @@ impl App {
                 self.tabs,
             ] {
                 SendMessageW(item, WM_SETFONT, self.theme.ui as WPARAM, 0);
+            }
+            if !self.tab_name_edit.is_null() {
+                SendMessageW(self.tab_name_edit, WM_SETFONT, self.theme.tab as usize, 0);
             }
             for tab in &self.open {
                 if !tab.editor.is_null() {
@@ -1761,6 +1819,7 @@ impl App {
             sidebar_visible: self.sidebar_visible,
             status_text: self.status_text.borrow().clone(),
             tab_layout: self.tab_layout.get(),
+            tab_rename: self.tab_rename.map(|rename| rename.id),
             tree_scroll: self.tree_scroll,
             visible: Rc::clone(&self.visible),
             find_visible: self.find_visible,
@@ -1990,6 +2049,7 @@ impl App {
                 }
             }
             self.layout_search();
+            self.layout_tab_rename();
             ui::with_view(|view| view.refresh_editor_scroll());
             self.layout_settings();
             RedrawWindow(
@@ -2116,7 +2176,10 @@ impl App {
 
     unsafe fn hover_tab_tooltip(&mut self, x: i32, y: i32) {
         unsafe {
-            if GetCapture() == self.tab_scroll || self.dragging.is_some() || y >= self.theme.px(32)
+            if GetCapture() == self.tab_scroll
+                || self.dragging.is_some()
+                || self.tab_rename.is_some()
+                || y >= self.theme.px(32)
             {
                 self.tooltip.hide();
                 return;
@@ -2406,6 +2469,7 @@ impl App {
                     tabs.scroll(target - tabs.offset);
                     self.tab_layout.set(tabs);
                     self.publish_view();
+                    self.layout_tab_rename();
                     InvalidateRect(self.tabs, null(), 0);
                     InvalidateRect(self.tab_scroll, null(), 0);
                 }
@@ -2531,6 +2595,10 @@ impl App {
             return false;
         }
         unsafe {
+            if let Err(error) = self.finish_tab_rename(true, false) {
+                report(self.hwnd, "메모 이름을 저장하지 못했습니다.", error);
+                return false;
+            }
             if self.selection.ids.len() <= 1 {
                 self.selection.single(self.open[index].id);
                 self.refresh_selection();
@@ -2659,6 +2727,10 @@ impl App {
         if !(0..self.open.len()).any(closes) {
             return;
         }
+        if let Err(error) = unsafe { self.finish_tab_rename(true, false) } {
+            report(self.hwnd, "메모 이름을 저장하지 못했습니다.", error);
+            return;
+        }
         if !unsafe { self.save_all() } {
             return;
         }
@@ -2748,41 +2820,175 @@ impl App {
         }
     }
 
-    unsafe fn rename_from_focus(&mut self, focus: HWND) {
+    unsafe fn rename_current(&mut self, focus: HWND) {
         unsafe {
-            if focus == self.tree && self.selection.ids.len() > 1 {
-                return;
-            }
-            if SendMessageW(self.tree, TVM_GETEDITCONTROL, 0, 0) != 0 {
-                self.rename_selected();
-                return;
-            }
-            let target = if focus == self.tree || IsChild(self.tree, focus) != 0 {
-                self.selected_id()
-            } else {
-                self.active.map(|index| self.open[index].id)
-            };
-            let Some(id) = target else {
-                return;
-            };
-            let Some((&handle, _)) = self.handles.iter().find(|&(_, &value)| value == id) else {
-                return;
-            };
-            self.tooltip.hide();
-            self.selection.single(id);
-            self.refresh_selection();
             if !self.sidebar_visible {
-                self.sidebar_visible = true;
-                self.layout();
+                self.rename_tab(focus);
+                return;
             }
-            SendMessageW(self.tree, TVM_SELECTITEM, TVGN_CARET as usize, handle);
-            SendMessageW(self.tree, TVM_ENSUREVISIBLE, 0, handle);
-            if self.refresh_tree_visibility() {
-                self.layout();
+            if self.selection.ids.len() > 1 {
+                return;
             }
-            InvalidateRect(self.tree_scroll, null(), 0);
+            if let Err(error) = self.finish_tab_rename(true, false) {
+                report(self.hwnd, "메모 이름을 저장하지 못했습니다.", error);
+                return;
+            }
+            self.tooltip.hide();
             self.rename_selected();
         }
+    }
+
+    unsafe fn rename_tab(&mut self, focus: HWND) {
+        unsafe {
+            if self.tab_rename.is_some() {
+                SetFocus(self.tab_name_edit);
+                return;
+            }
+            let Some(index) = self.active else {
+                return;
+            };
+            let id = self.open[index].id;
+            let Some(note) = self.book.get(id) else {
+                return;
+            };
+            let title = wide(&note.title);
+            if self.tab_name_edit.is_null() {
+                self.tab_name_edit = child(
+                    self.tabs,
+                    windows_sys::w!("EDIT"),
+                    "",
+                    WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS | ES_AUTOHSCROLL as u32,
+                    0,
+                    ID_TAB_NAME,
+                );
+                if self.tab_name_edit.is_null() {
+                    report(
+                        self.hwnd,
+                        "이름 편집기를 만들지 못했습니다.",
+                        std::io::Error::last_os_error(),
+                    );
+                    return;
+                }
+                SetWindowSubclass(self.tab_name_edit, Some(tab_name_subclass), 1, 0);
+            }
+            self.tooltip.hide();
+            self.cancel_tab_drag();
+            self.tab_rename = Some(TabRename { id, focus });
+            let mut tabs = self.tab_layout.get();
+            tabs.reveal(index);
+            self.tab_layout.set(tabs);
+            self.publish_view();
+            SetWindowTextW(self.tab_name_edit, title.as_ptr());
+            SendMessageW(self.tab_name_edit, WM_SETFONT, self.theme.tab as usize, 0);
+            SendMessageW(
+                self.tab_name_edit,
+                EM_SETMARGINS,
+                EC_LEFTMARGIN as usize | EC_RIGHTMARGIN as usize,
+                0,
+            );
+            self.layout_tab_rename();
+            ShowWindow(self.tab_name_edit, SW_SHOWNA);
+            SetFocus(self.tab_name_edit);
+            SendMessageW(self.tab_name_edit, EM_SETSEL, 0, -1);
+            RedrawWindow(
+                self.tabs,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_NOERASE,
+            );
+            InvalidateRect(self.tab_scroll, null(), 0);
+        }
+    }
+
+    unsafe fn layout_tab_rename(&self) {
+        unsafe {
+            let Some(rename) = self.tab_rename else {
+                return;
+            };
+            let Some(index) = self.open.iter().position(|tab| tab.id == rename.id) else {
+                return;
+            };
+            let layout = self.tab_layout.get();
+            let (left, right) = layout.bounds(index);
+            let p = |v| self.theme.px(v);
+            SetWindowPos(
+                self.tab_name_edit,
+                null_mut(),
+                left + p(33),
+                p(9),
+                (right - left - p(61)).max(1),
+                p(18),
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    unsafe fn finish_tab_rename(
+        &mut self,
+        commit: bool,
+        restore_focus: bool,
+    ) -> std::io::Result<()> {
+        let Some(rename) = self.tab_rename.take() else {
+            return Ok(());
+        };
+        unsafe {
+            let title = if commit {
+                window_text(self.tab_name_edit)
+            } else {
+                String::new()
+            };
+            let had_focus = GetFocus() == self.tab_name_edit;
+            self.publish_view();
+            ShowWindow(self.tab_name_edit, SW_HIDE);
+            let result = if commit {
+                self.rename_note(rename.id, &title)
+            } else {
+                Ok(())
+            };
+            InvalidateRect(self.tabs, null(), 0);
+            if restore_focus && had_focus {
+                let focus = if IsWindow(rename.focus) != 0 && IsWindowVisible(rename.focus) != 0 {
+                    rename.focus
+                } else {
+                    self.edit
+                };
+                SetFocus(focus);
+            }
+            result
+        }
+    }
+
+    fn rename_note(&mut self, id: u64, title: &str) -> std::io::Result<()> {
+        let title = title.trim();
+        let Some(note) = self.book.get_mut(id) else {
+            return Ok(());
+        };
+        if title.is_empty() || note.title == title {
+            return Ok(());
+        }
+        let previous = std::mem::replace(&mut note.title, title.to_owned());
+        if let Err(error) = self.book.save(&self.data_dir) {
+            self.book.get_mut(id).unwrap().title = previous;
+            return Err(error);
+        }
+        if let Some((&handle, _)) = self.handles.iter().find(|&(_, &value)| value == id) {
+            let mut label = wide(title);
+            let item = TVITEMW {
+                mask: TVIF_TEXT,
+                hItem: handle,
+                pszText: label.as_mut_ptr(),
+                ..Default::default()
+            };
+            unsafe {
+                SendMessageW(self.tree, TVM_SETITEMW, 0, &item as *const _ as isize);
+            }
+        }
+        self.sync_tree_view();
+        unsafe {
+            InvalidateRect(self.tree, null(), 0);
+            InvalidateRect(self.tabs, null(), 0);
+        }
+        Ok(())
     }
 
     unsafe fn layout_rename(&self) {
@@ -2846,6 +3052,14 @@ impl App {
         let old_index = self.active.unwrap_or(0);
         let active_id = self.active.map(|i| self.open[i].id);
         let deleted: HashSet<_> = ids.into_iter().collect();
+        if self
+            .tab_rename
+            .is_some_and(|rename| deleted.contains(&rename.id))
+        {
+            unsafe {
+                self.finish_tab_rename(false, false)?;
+            }
+        }
         self.open.retain(|tab| {
             if deleted.contains(&tab.id) {
                 if self.edit == tab.editor {
@@ -3687,16 +3901,10 @@ impl App {
                         let title = title.trim();
                         if !title.is_empty() {
                             let id = event.item.lParam as u64;
-                            let previous = self.book.clone();
-                            if let Some(note) = self.book.get_mut(id) {
-                                note.title = title.to_owned();
-                            }
-                            if let Err(error) = self.book.save(&self.data_dir) {
-                                self.book = previous;
+                            if let Err(error) = self.rename_note(id, title) {
                                 report(self.hwnd, "메모 이름을 저장하지 못했습니다.", error);
                                 return 0;
                             }
-                            self.sync_tree_view();
                             unsafe {
                                 self.layout();
                                 PostMessageW(self.hwnd, REFRESH_UI, 0, 0);
@@ -3739,6 +3947,16 @@ impl App {
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        FINISH_TAB_RENAME => {
+            with_app(|app| unsafe {
+                if GetFocus() != app.tab_name_edit
+                    && let Err(error) = app.finish_tab_rename(true, false)
+                {
+                    report(app.hwnd, "메모 이름을 저장하지 못했습니다.", error);
+                }
+            });
+            0
+        }
         REFRESH_UI => {
             with_app(|app| unsafe {
                 for control in [app.tree, app.tabs, app.status] {
@@ -4046,6 +4264,11 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_CLOSE => {
             let mut ok = true;
             with_app(|app| {
+                if let Err(error) = unsafe { app.finish_tab_rename(true, false) } {
+                    report(app.hwnd, "메모 이름을 저장하지 못했습니다.", error);
+                    ok = false;
+                    return;
+                }
                 ok = unsafe { app.save_all() };
                 if ok && let Err(error) = app.save_session() {
                     report(app.hwnd, "탭 상태를 저장하지 못했습니다.", error);
@@ -4081,7 +4304,15 @@ fn shortcut(msg: &MSG) -> bool {
     let key = msg.wParam as u32;
     let mut handled = false;
     with_app(|app| unsafe {
-        if ctrl && key == VK_OEM_COMMA as u32 {
+        if msg.hwnd == app.tab_name_edit
+            && app.tab_rename.is_some()
+            && matches!(key as u16, VK_RETURN | VK_ESCAPE | VK_TAB)
+        {
+            if let Err(error) = app.finish_tab_rename(key != VK_ESCAPE as u32, true) {
+                report(app.hwnd, "메모 이름을 저장하지 못했습니다.", error);
+            }
+            handled = true;
+        } else if ctrl && key == VK_OEM_COMMA as u32 {
             app.show_settings(!app.settings_visible);
             handled = true;
         } else if app.settings_visible && key == VK_ESCAPE as u32 {
@@ -4176,6 +4407,7 @@ fn shortcut(msg: &MSG) -> bool {
                 handled = true;
             } else if msg.hwnd == app.find_input
                 || msg.hwnd == app.replace_input
+                || msg.hwnd == app.tab_name_edit
                 || msg.hwnd == SendMessageW(app.tree, TVM_GETEDITCONTROL, 0, 0) as HWND
             {
                 SendMessageW(msg.hwnd, EM_SETSEL, 0, -1);
@@ -4267,7 +4499,7 @@ fn shortcut(msg: &MSG) -> bool {
             });
             handled = true;
         } else if key == VK_F2 as u32 {
-            app.rename_from_focus(msg.hwnd);
+            app.rename_current(msg.hwnd);
             handled = true;
         } else if key == VK_DELETE as u32 && msg.hwnd == app.tree {
             app.delete_selected();
@@ -5404,6 +5636,355 @@ mod interaction_tests {
         }
     }
 
+    unsafe fn verify_rename() {
+        unsafe {
+            let mut editor = null_mut();
+            let mut name_edit = null_mut();
+            let mut hwnd = null_mut();
+            let mut tree = null_mut();
+            let mut tabs = null_mut();
+            let mut id = 0;
+            let mut selected = Vec::new();
+            let mut original_title = String::new();
+            let mut tree_title = String::new();
+            let mut settings = Settings::default();
+            with_app(|app| {
+                editor = app.edit;
+                hwnd = app.hwnd;
+                tree = app.tree;
+                tabs = app.tabs;
+                id = app.open[app.active.unwrap()].id;
+                selected = app.open[..2].iter().map(|tab| tab.id).collect();
+                original_title = app.book.get(id).unwrap().title.clone();
+                tree_title = app.book.get(selected[0]).unwrap().title.clone();
+                settings = app.settings.clone();
+                app.selection.all(&selected);
+                app.sidebar_visible = false;
+                app.layout();
+            });
+            editing::select(editor, editing::CharRange { start: 1, end: 3 });
+            SendMessageW(
+                editor,
+                EM_REPLACESEL,
+                1,
+                wide("이름 변경 검증 ").as_ptr() as isize,
+            );
+            let original_text = window_text(editor);
+            let selection = editing::selection(editor);
+            let undo = SendMessageW(editor, EM_CANUNDO, 0, 0);
+            assert_ne!(undo, 0);
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                with_app(|app| {
+                    let mut next = app.settings.clone();
+                    next.theme = mode;
+                    app.apply_settings(next);
+                });
+                SetFocus(editor);
+                assert!(shortcut(&MSG {
+                    hwnd: editor,
+                    message: WM_KEYDOWN,
+                    wParam: VK_F2 as usize,
+                    ..Default::default()
+                }));
+                with_app(|app| {
+                    name_edit = app.tab_name_edit;
+                    assert_eq!(app.tab_rename.unwrap().id, id);
+                    assert_eq!(GetParent(name_edit), tabs);
+                    assert_eq!(GetFocus(), name_edit);
+                    assert_ne!(IsWindowVisible(name_edit), 0);
+                    assert!(!app.sidebar_visible);
+                    assert_eq!(*app.selection.ids, selected.iter().copied().collect());
+                    assert_eq!(SendMessageW(tree, TVM_GETEDITCONTROL, 0, 0), 0);
+                    assert_eq!(
+                        SendMessageW(name_edit, WM_GETFONT, 0, 0),
+                        app.theme.tab as isize
+                    );
+                    let mut area = RECT::default();
+                    GetClientRect(name_edit, &mut area);
+                    let screen = GetDC(hwnd);
+                    let dc = CreateCompatibleDC(screen);
+                    let bitmap = CreateCompatibleBitmap(screen, area.right, area.bottom);
+                    let original = SelectObject(dc, bitmap);
+                    let brush =
+                        SendMessageW(tabs, WM_CTLCOLOREDIT, dc as usize, name_edit as isize);
+                    assert_eq!(brush, app.theme.white_brush as isize);
+                    assert_eq!(GetBkColor(dc), app.theme.colors.white);
+                    assert_eq!(GetTextColor(dc), app.theme.colors.ink);
+                    SendMessageW(name_edit, EM_SETSEL, 0, 0);
+                    theme::fill(dc, area, theme::rgb(255, 0, 255));
+                    SendMessageW(
+                        name_edit,
+                        WM_PRINTCLIENT,
+                        dc as usize,
+                        (PRF_CLIENT | PRF_ERASEBKGND) as isize,
+                    );
+                    assert_eq!(
+                        GetPixel(dc, area.right - 1, area.bottom - 1),
+                        app.theme.colors.white
+                    );
+                    SelectObject(dc, original);
+                    DeleteObject(bitmap);
+                    GetClientRect(tabs, &mut area);
+                    let bitmap = CreateCompatibleBitmap(screen, area.right, area.bottom);
+                    let original = SelectObject(dc, bitmap);
+                    let left = app.tab_layout.get().bounds(app.active.unwrap()).0;
+                    for message in [WM_PRINTCLIENT, WM_PRINT] {
+                        theme::fill(dc, area, theme::rgb(255, 0, 255));
+                        SendMessageW(
+                            tabs,
+                            message,
+                            dc as usize,
+                            (PRF_CLIENT | PRF_CHILDREN) as isize,
+                        );
+                        assert_eq!(
+                            GetPixel(dc, left + app.theme.px(60), app.theme.px(6)),
+                            app.theme.colors.blue
+                        );
+                        assert_eq!(GetFocus(), name_edit);
+                    }
+                    SelectObject(dc, original);
+                    DeleteObject(bitmap);
+                    DeleteDC(dc);
+                    ReleaseDC(hwnd, screen);
+                });
+                SetWindowTextW(name_edit, wide("  변경한 탭 이름 한글😀  ").as_ptr());
+                SendMessageW(name_edit, EM_SETSEL, 2, 4);
+                assert!(shortcut(&MSG {
+                    hwnd: name_edit,
+                    message: WM_KEYDOWN,
+                    wParam: VK_F2 as usize,
+                    ..Default::default()
+                }));
+                let mut start = 0u32;
+                let mut end = 0u32;
+                SendMessageW(
+                    name_edit,
+                    EM_GETSEL,
+                    &mut start as *mut _ as usize,
+                    &mut end as *mut _ as isize,
+                );
+                assert_eq!((start, end), (2, 4)); // Repeated F2 keeps edits and selection.
+                SendMessageW(name_edit, WM_KEYDOWN, VK_RETURN as usize, 0);
+                with_app(|app| {
+                    assert!(app.tab_rename.is_none());
+                    assert_eq!(IsWindowVisible(name_edit), 0);
+                    assert_eq!(GetFocus(), editor);
+                    assert!(!app.sidebar_visible);
+                    assert_eq!(app.book.get(id).unwrap().title, "변경한 탭 이름 한글😀");
+                    assert_eq!(
+                        Notebook::load(&app.data_dir)
+                            .unwrap()
+                            .get(id)
+                            .unwrap()
+                            .title,
+                        "변경한 탭 이름 한글😀"
+                    );
+                    assert_eq!(app.edit, editor);
+                    assert_eq!(window_text(editor), original_text);
+                    assert_eq!(editing::selection(editor).start, selection.start);
+                    assert_eq!(editing::selection(editor).end, selection.end);
+                    assert_eq!(SendMessageW(editor, EM_CANUNDO, 0, 0), undo);
+                    assert!(app.open[app.active.unwrap()].dirty);
+                });
+                // Cancellation and whitespace keep the saved title.
+                for (text, key) in [("취소할 이름", VK_ESCAPE), ("   ", VK_RETURN)] {
+                    assert!(shortcut(&MSG {
+                        hwnd: editor,
+                        message: WM_KEYDOWN,
+                        wParam: VK_F2 as usize,
+                        ..Default::default()
+                    }));
+                    assert_eq!(GetFocus(), name_edit); // Reuses the native editor.
+                    SetWindowTextW(name_edit, wide(text).as_ptr());
+                    SendMessageW(name_edit, WM_KEYDOWN, key as usize, 0);
+                    with_app(|app| {
+                        assert_eq!(app.book.get(id).unwrap().title, "변경한 탭 이름 한글😀")
+                    });
+                }
+            }
+            // A queued focus-loss commit must preserve the newly focused control.
+            SetFocus(tabs);
+            assert!(shortcut(&MSG {
+                hwnd: tabs,
+                message: WM_KEYDOWN,
+                wParam: VK_F2 as usize,
+                ..Default::default()
+            }));
+            with_app(|app| {
+                app.sidebar_visible = true;
+                app.layout();
+            });
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                0,
+                0,
+                560,
+                760,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            with_app(|app| {
+                assert!(app.tab_layout.get().overflow);
+                let index = app.open.iter().position(|tab| tab.id == id).unwrap();
+                let (left, right) = app.tab_layout.get().bounds(index);
+                let mut area = RECT::default();
+                GetWindowRect(name_edit, &mut area);
+                let mut point = POINT {
+                    x: area.left,
+                    y: area.top,
+                };
+                ScreenToClient(tabs, &mut point);
+                assert_eq!(point.x, left + app.theme.px(33));
+                assert_eq!(area.right - area.left, right - left - app.theme.px(61));
+                assert_eq!(GetFocus(), name_edit);
+                assert!(app.sidebar_visible);
+            });
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                0,
+                0,
+                1100,
+                760,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            with_app(|app| {
+                app.sidebar_visible = false;
+                app.layout();
+            });
+            SetWindowTextW(name_edit, wide("포커스 이동 저장").as_ptr());
+            SetFocus(editor);
+            let mut pending = MSG::default();
+            while PeekMessageW(
+                &mut pending,
+                hwnd,
+                FINISH_TAB_RENAME,
+                FINISH_TAB_RENAME,
+                PM_REMOVE,
+            ) != 0
+            {
+                DispatchMessageW(&pending);
+            }
+            with_app(|app| {
+                assert!(app.tab_rename.is_none());
+                assert_eq!(app.book.get(id).unwrap().title, "포커스 이동 저장");
+                assert_eq!(GetFocus(), editor);
+                assert!(!app.sidebar_visible);
+                app.rename_current(editor);
+                SetWindowTextW(name_edit, wide("탭 전환 전 저장").as_ptr());
+                assert!(app.activate(0));
+                assert!(app.tab_rename.is_none());
+                assert_eq!(app.book.get(id).unwrap().title, "탭 전환 전 저장");
+                assert!(!app.sidebar_visible);
+                let index = app.open.iter().position(|tab| tab.id == id).unwrap();
+                assert!(app.activate(index));
+                app.rename_current(editor);
+                SetWindowTextW(name_edit, wide("저장 실패 이름").as_ptr());
+                let blocker = app.data_dir.join("tree.tmp");
+                fs::create_dir(&blocker).unwrap();
+                assert!(app.finish_tab_rename(true, true).is_err());
+                fs::remove_dir(&blocker).unwrap();
+                assert_eq!(app.book.get(id).unwrap().title, "탭 전환 전 저장");
+                assert_eq!(
+                    Notebook::load(&app.data_dir)
+                        .unwrap()
+                        .get(id)
+                        .unwrap()
+                        .title,
+                    "탭 전환 전 저장"
+                );
+                app.rename_note(id, &original_title).unwrap();
+                app.sidebar_visible = true;
+                app.selection.single(selected[0]);
+                let handle = *app
+                    .handles
+                    .iter()
+                    .find(|&(_, &value)| value == selected[0])
+                    .unwrap()
+                    .0;
+                SendMessageW(tree, TVM_SELECTITEM, TVGN_CARET as usize, handle);
+                app.layout();
+            });
+            SetFocus(tree);
+            assert!(shortcut(&MSG {
+                hwnd: tree,
+                message: WM_KEYDOWN,
+                wParam: VK_F2 as usize,
+                ..Default::default()
+            }));
+            let tree_edit = SendMessageW(tree, TVM_GETEDITCONTROL, 0, 0) as HWND;
+            assert!(!tree_edit.is_null());
+            with_app(|app| assert!(app.tab_rename.is_none()));
+            SetWindowTextW(tree_edit, wide("사이드바에서 수정").as_ptr());
+            assert!(shortcut(&MSG {
+                hwnd: tree_edit,
+                message: WM_KEYDOWN,
+                wParam: VK_F2 as usize,
+                ..Default::default()
+            }));
+            assert_eq!(GetFocus(), tree_edit);
+            assert_eq!(window_text(tree_edit), "사이드바에서 수정");
+            SendMessageW(tree, TVM_ENDEDITLABELNOW, 0, 0);
+            with_app(|app| {
+                assert_eq!(
+                    app.book.get(selected[0]).unwrap().title,
+                    "사이드바에서 수정"
+                );
+                app.selection.all(&selected);
+            });
+            SetFocus(tree);
+            assert!(shortcut(&MSG {
+                hwnd: tree,
+                message: WM_KEYDOWN,
+                wParam: VK_F2 as usize,
+                ..Default::default()
+            }));
+            assert_eq!(SendMessageW(tree, TVM_GETEDITCONTROL, 0, 0), 0);
+            // A visible sidebar keeps its multi-selection restriction regardless of focus.
+            SetFocus(editor);
+            assert!(shortcut(&MSG {
+                hwnd: editor,
+                message: WM_KEYDOWN,
+                wParam: VK_F2 as usize,
+                ..Default::default()
+            }));
+            with_app(|app| {
+                assert!(app.tab_rename.is_none());
+                assert_eq!(SendMessageW(tree, TVM_GETEDITCONTROL, 0, 0), 0);
+                assert_eq!(*app.selection.ids, selected.iter().copied().collect());
+                app.selection.single(selected[0]);
+            });
+            // Both body and tab focus edit the selected sidebar row when it is visible.
+            for focus in [editor, tabs] {
+                SetFocus(focus);
+                assert!(shortcut(&MSG {
+                    hwnd: focus,
+                    message: WM_KEYDOWN,
+                    wParam: VK_F2 as usize,
+                    ..Default::default()
+                }));
+                let tree_edit = SendMessageW(tree, TVM_GETEDITCONTROL, 0, 0) as HWND;
+                assert!(!tree_edit.is_null());
+                assert_eq!(GetFocus(), tree_edit);
+                assert_eq!(window_text(tree_edit), "사이드바에서 수정");
+                with_app(|app| {
+                    assert!(app.tab_rename.is_none());
+                    assert_eq!(app.open[app.active.unwrap()].id, id);
+                    assert!(app.sidebar_visible);
+                });
+                SendMessageW(tree, TVM_ENDEDITLABELNOW, 1, 0);
+            }
+            with_app(|app| {
+                assert!(app.sidebar_visible);
+                app.rename_note(selected[0], &tree_title).unwrap();
+                app.apply_settings(settings);
+                app.layout();
+            });
+            SendMessageW(editor, WM_UNDO, 0, 0);
+            assert_eq!(window_text(editor), format!("본문 {id}"));
+        }
+    }
+
     unsafe fn verify_interactions() {
         unsafe {
             InitCommonControlsEx(&INITCOMMONCONTROLSEX {
@@ -5485,6 +6066,7 @@ mod interaction_tests {
                 }
                 tabs = app.tabs;
             });
+            verify_rename();
             click_tree(tree, ids[0], 0, true);
             with_app(|app| {
                 assert_eq!(app.open[app.active.unwrap()].id, ids[0]);

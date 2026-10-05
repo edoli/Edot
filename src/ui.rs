@@ -47,6 +47,7 @@ pub struct View {
     pub sidebar_visible: bool,
     pub status_text: String,
     pub tab_layout: TabLayout,
+    pub tab_rename: Option<u64>,
     pub tree_scroll: HWND,
     pub visible: Rc<Vec<isize>>,
     pub find_visible: bool,
@@ -502,14 +503,24 @@ impl View {
                     .get(tab.id)
                     .map(|n| n.title.as_str())
                     .unwrap_or("");
-                theme::text(
-                    dc,
-                    title,
-                    rect(left + p(30), 0, right - p(25), p(36)),
-                    self.theme.tab,
-                    self.theme.colors.ink,
-                    DT_LEFT,
-                );
+                if self.tab_rename == Some(tab.id) {
+                    theme::rounded(
+                        dc,
+                        rect(left + p(30), p(6), right - p(25), p(30)),
+                        self.theme.colors.white,
+                        self.theme.colors.blue,
+                        p(4),
+                    );
+                } else {
+                    theme::text(
+                        dc,
+                        title,
+                        rect(left + p(30), 0, right - p(25), p(36)),
+                        self.theme.tab,
+                        self.theme.colors.ink,
+                        DT_LEFT,
+                    );
+                }
                 let close_area = rect(right - p(24), p(7), right - p(3), p(29));
                 if PtInRect(&close_area, mouse) != 0 {
                     theme::rounded(
