@@ -3,6 +3,7 @@ use crate::model::{Notebook, replace_file};
 #[cfg(test)]
 use crate::scrollbar::ScrollRange;
 use crate::scrollbar::{self, Kind};
+use crate::selection::Selection;
 use crate::settings::{self, Panel, Settings, ThemeMode};
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme};
@@ -19,7 +20,7 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::*;
-use windows_sys::Win32::System::SystemServices::{MK_SHIFT, SS_NOTIFY, SS_OWNERDRAW};
+use windows_sys::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT, SS_NOTIFY, SS_OWNERDRAW};
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::*;
@@ -61,11 +62,13 @@ const MENU_DELETE: usize = 204;
 const MENU_UP: usize = 205;
 const MENU_DOWN: usize = 206;
 const MENU_OUTDENT: usize = 207;
+const MENU_GROUP: usize = 208;
 const MENU_TAB_CLOSE: usize = 401;
 const MENU_TAB_CLOSE_OTHERS: usize = 402;
 const MENU_TAB_CLOSE_RIGHT: usize = 403;
 const AUTOSAVE_TIMER: usize = 1;
 const DRAG_SCROLL_TIMER: usize = 2;
+const TAB_DRAG_SCROLL_TIMER: usize = 3;
 const POSITION_RENAME: u32 = WM_APP + 1;
 const REFRESH_UI: u32 = WM_APP + 2;
 
@@ -103,6 +106,31 @@ unsafe fn sidebar_menu(nested: bool) -> HMENU {
             (MENU_DELETE, "삭제", true),
         ])
     }
+}
+
+unsafe fn sidebar_multi_menu() -> HMENU {
+    unsafe {
+        popup_menu(&[
+            (MENU_DELETE, "삭제", true),
+            (MENU_GROUP, "선택한 항목과 함께 새 폴더 만들기", true),
+        ])
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TabDrag {
+    id: u64,
+    start: POINT,
+    moving: bool,
+    gap: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TreePress {
+    id: u64,
+    collapse: bool,
+    focus_editor: bool,
+    clicked: bool,
 }
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
@@ -182,6 +210,11 @@ struct App {
     sidebar_visible: bool,
     resizing: bool,
     dragging: Option<u64>,
+    drag_sources: Rc<Vec<u64>>,
+    selection: Selection,
+    tree_press: Option<TreePress>,
+    tree_mouse_input: bool,
+    tab_drag: Option<TabDrag>,
     tree_hover: Option<isize>,
     drop_target: Option<DropTarget>,
 }
@@ -330,6 +363,19 @@ unsafe extern "system" fn tab_subclass(
                 return 0;
             }
             WM_MOUSEMOVE => {
+                let mut dragging = false;
+                with_app(|app| {
+                    dragging = app.tab_drag.is_some();
+                    if dragging {
+                        app.update_tab_drag(POINT {
+                            x: point_x(lp),
+                            y: point_y(lp),
+                        });
+                    }
+                });
+                if dragging {
+                    return 0;
+                }
                 with_app(|app| {
                     let layout = app.tab_layout.get();
                     let hover = layout
@@ -359,6 +405,16 @@ unsafe extern "system" fn tab_subclass(
                 return 0;
             }
             WM_LBUTTONUP => {
+                with_app(|app| {
+                    app.finish_tab_drag(POINT {
+                        x: point_x(lp),
+                        y: point_y(lp),
+                    })
+                });
+                return 0;
+            }
+            WM_CAPTURECHANGED | WM_CANCELMODE => {
+                with_app(|app| app.cancel_tab_drag());
                 return 0;
             }
             WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
@@ -570,10 +626,50 @@ unsafe extern "system" fn tree_subclass(
             with_app(|app| app.context_menu(lp));
             return 0;
         }
+        if msg == WM_LBUTTONUP {
+            with_app(|app| app.tree_mouse_input = true);
+        }
         if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
-            with_app(|app| app.tooltip.hide());
+            with_app(|app| {
+                app.tree_mouse_input = true;
+                app.tree_mouse_down(
+                    POINT {
+                        x: point_x(lp),
+                        y: point_y(lp),
+                    },
+                    msg == WM_RBUTTONDOWN,
+                    wp & MK_CONTROL as usize != 0,
+                    wp & MK_SHIFT as usize != 0,
+                );
+            });
+        }
+        if msg == WM_KEYDOWN && wp == VK_SPACE as usize && GetKeyState(VK_CONTROL as i32) < 0 {
+            with_app(|app| {
+                if let Some(id) = app.selected_id() {
+                    app.selection.click(id, &[], true, false);
+                    app.refresh_selection();
+                }
+            });
+            return 0;
         }
         let result = DefSubclassProc(hwnd, msg, wp, lp);
+        if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_LBUTTONUP) {
+            with_app(|app| app.tree_mouse_input = false);
+        }
+        if matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONUP) {
+            with_app(|app| {
+                if msg == WM_LBUTTONUP || app.tree_press.is_some_and(|press| press.clicked) {
+                    app.tree_mouse_up();
+                }
+            });
+        }
+        if msg == WM_CANCELMODE || (msg == WM_CAPTURECHANGED && lp as HWND != hwnd) {
+            with_app(|app| {
+                if !app.tree_mouse_input {
+                    app.tree_press = None;
+                }
+            });
+        }
 
         if msg == WM_KEYDOWN {
             ui::with_view(|v| {
@@ -1081,6 +1177,11 @@ impl App {
             sidebar_visible: true,
             resizing: false,
             dragging: None,
+            drag_sources: Rc::new(Vec::new()),
+            selection: Selection::default(),
+            tree_press: None,
+            tree_mouse_input: false,
+            tab_drag: None,
             tree_hover: None,
             drop_target: None,
         };
@@ -1667,6 +1768,12 @@ impl App {
             resizing: self.resizing,
             tree_hover: self.tree_hover,
             dragging: self.dragging,
+            drag_sources: Rc::clone(&self.drag_sources),
+            selected: Rc::clone(&self.selection.ids),
+            tab_insertion: self
+                .tab_drag
+                .filter(|drag| drag.moving)
+                .map(|drag| drag.gap),
             drop_target: self.drop_target,
             search_host: self.search_host,
             find_input: self.find_input,
@@ -2070,7 +2177,7 @@ impl App {
         }
     }
 
-    unsafe fn tab_click(&mut self, x: i32, _y: i32) {
+    unsafe fn tab_click(&mut self, x: i32, y: i32) {
         unsafe {
             self.tooltip.hide();
             let layout = self.tab_layout.get();
@@ -2078,9 +2185,191 @@ impl App {
                 if x >= layout.bounds(index).1 - self.theme.px(24) {
                     self.close_tab(index);
                 } else {
-                    self.activate(index);
+                    if self.activate(index) {
+                        self.tab_drag = Some(TabDrag {
+                            id: self.open[index].id,
+                            start: POINT { x, y },
+                            moving: false,
+                            gap: index,
+                        });
+                        self.publish_view();
+                        SetCapture(self.tabs);
+                    }
                 }
             }
+        }
+    }
+
+    unsafe fn update_tab_drag(&mut self, point: POINT) {
+        unsafe {
+            let Some(mut drag) = self.tab_drag else {
+                return;
+            };
+            if !drag.moving {
+                if (point.x - drag.start.x).abs()
+                    < GetSystemMetricsForDpi(SM_CXDRAG, self.theme.dpi)
+                    && (point.y - drag.start.y).abs()
+                        < GetSystemMetricsForDpi(SM_CYDRAG, self.theme.dpi)
+                {
+                    return;
+                }
+                drag.moving = true;
+                self.tooltip.hide();
+                self.tab_hover.set(None);
+                SetTimer(self.hwnd, TAB_DRAG_SCROLL_TIMER, 80, None);
+            }
+            drag.gap = self.tab_layout.get().insertion(point.x);
+            self.tab_drag = Some(drag);
+            self.publish_view();
+            InvalidateRect(self.tabs, null(), 0);
+            SetCursor(LoadCursorW(null_mut(), IDC_SIZEALL));
+        }
+    }
+
+    unsafe fn cancel_tab_drag(&mut self) {
+        self.tab_drag = None;
+        self.publish_view();
+        unsafe {
+            KillTimer(self.hwnd, TAB_DRAG_SCROLL_TIMER);
+            if GetCapture() == self.tabs {
+                ReleaseCapture();
+            }
+            InvalidateRect(self.tabs, null(), 0);
+        }
+    }
+
+    unsafe fn reorder_tab(&mut self, id: u64, gap: usize) -> std::io::Result<()> {
+        let Some(from) = self.open.iter().position(|tab| tab.id == id) else {
+            return Ok(());
+        };
+        let gap = gap.min(self.open.len());
+        let to = gap - usize::from(gap > from);
+        if from == to {
+            return Ok(());
+        }
+        let old_active = self.active;
+        let active_id = self.active.map(|i| self.open[i].id);
+        let tab = self.open.remove(from);
+        self.open.insert(to, tab);
+        self.active = active_id.and_then(|id| self.open.iter().position(|tab| tab.id == id));
+        if let Err(error) = self.save_session() {
+            let tab = self.open.remove(to);
+            self.open.insert(from, tab);
+            self.active = old_active;
+            return Err(error);
+        }
+        unsafe {
+            self.layout();
+        }
+        Ok(())
+    }
+
+    unsafe fn finish_tab_drag(&mut self, point: POINT) {
+        unsafe {
+            let drag = self.tab_drag;
+            let mut bounds = RECT::default();
+            GetClientRect(self.tabs, &mut bounds);
+            self.cancel_tab_drag();
+            if let Some(drag) = drag.filter(|drag| drag.moving)
+                && point.y >= 0
+                && point.y < bounds.bottom
+                && let Err(error) =
+                    self.reorder_tab(drag.id, self.tab_layout.get().insertion(point.x))
+            {
+                report(self.hwnd, "탭 순서를 저장하지 못했습니다.", error);
+            }
+        }
+    }
+
+    fn visible_note_ids(&self) -> Vec<u64> {
+        self.visible
+            .iter()
+            .filter_map(|handle| self.handles.get(handle).copied())
+            .collect()
+    }
+
+    unsafe fn refresh_selection(&self) {
+        self.publish_view();
+        unsafe {
+            InvalidateRect(self.tree, null(), 0);
+        }
+    }
+
+    unsafe fn tree_mouse_down(&mut self, point: POINT, right: bool, ctrl: bool, shift: bool) {
+        unsafe {
+            self.tooltip.hide();
+            let mut hit = TVHITTESTINFO {
+                pt: point,
+                ..Default::default()
+            };
+            SendMessageW(self.tree, TVM_HITTEST, 0, &mut hit as *mut _ as isize);
+            if hit.flags & TVHT_ONITEMBUTTON != 0 {
+                return;
+            }
+            let Some(&id) = self.handles.get(&hit.hItem) else {
+                if !ctrl && !shift {
+                    self.selection = Selection::default();
+                    self.refresh_selection();
+                }
+                return;
+            };
+            let already = self.selection.ids.contains(&id);
+            let preserve = already && (right || (!ctrl && !shift && self.selection.ids.len() > 1));
+            if !preserve {
+                let visible = if !right && shift {
+                    self.visible_note_ids()
+                } else {
+                    Vec::new()
+                };
+                self.selection.click(
+                    id,
+                    &visible,
+                    if right { false } else { ctrl },
+                    if right { false } else { shift },
+                );
+            }
+            if !right {
+                self.tree_press = Some(TreePress {
+                    id,
+                    collapse: preserve,
+                    focus_editor: !ctrl && !shift,
+                    clicked: false,
+                });
+            }
+            self.refresh_selection();
+            SendMessageW(self.tree, TVM_SELECTITEM, TVGN_CARET as usize, hit.hItem);
+            if !right && !ctrl && !shift {
+                // TreeView's DragDetect can consume mouse-up before the subclass sees it.
+                // Open on selection; only collapse a batch after a completed click.
+                self.open_note(id);
+            }
+        }
+    }
+
+    unsafe fn tree_mouse_up(&mut self) {
+        unsafe {
+            if let Some(press) = self.tree_press.take()
+                && self.dragging.is_none()
+            {
+                if press.collapse {
+                    self.selection.single(press.id);
+                    self.refresh_selection();
+                }
+                if press.focus_editor
+                    && self
+                        .active
+                        .is_some_and(|index| self.open[index].id == press.id)
+                {
+                    SetFocus(self.edit);
+                }
+            }
+        }
+    }
+
+    unsafe fn select_all_tree(&mut self) {
+        self.selection.all(&self.visible_note_ids());
+        unsafe {
+            self.refresh_selection();
         }
     }
     unsafe fn scroll_tree(&self, rows: i32) {
@@ -2139,6 +2428,12 @@ impl App {
 
     unsafe fn rebuild_tree(&mut self, select: Option<u64>) {
         let _timing = startup::span("tree.build");
+        self.selection.retain(|id| self.book.get(id).is_some());
+        if let Some(id) = select
+            && !self.selection.ids.contains(&id)
+        {
+            self.selection.single(id);
+        }
         unsafe {
             SendMessageW(self.tree, WM_SETREDRAW, 0, 0);
             SendMessageW(self.tree, TVM_DELETEITEM, 0, TVI_ROOT as LPARAM);
@@ -2236,6 +2531,10 @@ impl App {
             return false;
         }
         unsafe {
+            if self.selection.ids.len() <= 1 {
+                self.selection.single(self.open[index].id);
+                self.refresh_selection();
+            }
             if self.active == Some(index) {
                 SetFocus(self.edit);
                 return true;
@@ -2451,6 +2750,9 @@ impl App {
 
     unsafe fn rename_from_focus(&mut self, focus: HWND) {
         unsafe {
+            if focus == self.tree && self.selection.ids.len() > 1 {
+                return;
+            }
             if SendMessageW(self.tree, TVM_GETEDITCONTROL, 0, 0) != 0 {
                 self.rename_selected();
                 return;
@@ -2467,6 +2769,8 @@ impl App {
                 return;
             };
             self.tooltip.hide();
+            self.selection.single(id);
+            self.refresh_selection();
             if !self.sidebar_visible {
                 self.sidebar_visible = true;
                 self.layout();
@@ -2513,18 +2817,15 @@ impl App {
     }
 
     unsafe fn delete_selected(&mut self) {
-        let Some(id) = (unsafe { self.selected_id() }) else {
+        let selected: Vec<_> = self.selection.ids.iter().copied().collect();
+        let ids = self.book.selected_subtrees(&selected);
+        if ids.is_empty() {
             return;
-        };
-        let ids = self.book.subtree(id);
-        let prompt = if ids.len() == 1 {
-            "이 메모를 삭제할까요?\n삭제한 파일은 휴지통 폴더에 보관됩니다.".to_owned()
-        } else {
-            format!(
-                "이 메모와 하위 메모 {}개를 삭제할까요?\n삭제한 파일은 휴지통 폴더에 보관됩니다.",
-                ids.len() - 1
-            )
-        };
+        }
+        let prompt = format!(
+            "선택한 항목과 하위 메모 총 {}개를 삭제할까요?\n삭제한 파일은 휴지통 폴더에 보관됩니다.",
+            ids.len()
+        );
         if unsafe { message(self.hwnd, "메모 삭제", &prompt, MB_YESNO | MB_ICONQUESTION) } != IDYES
         {
             return;
@@ -2532,44 +2833,24 @@ impl App {
         if !unsafe { self.save_all() } {
             return;
         }
-        let trash = self.data_dir.join("trash");
-        if let Err(error) = fs::create_dir_all(&trash) {
-            report(self.hwnd, "휴지통을 만들지 못했습니다.", error);
-            return;
+        if let Err(error) = unsafe { self.delete_notes_confirmed(&selected) } {
+            report(self.hwnd, "메모를 삭제하지 못했습니다.", error);
         }
-        let mut moved = Vec::new();
-        for &note_id in &ids {
-            let source = self.book.file(&self.data_dir, note_id);
-            let target = trash.join(format!(
-                "{}-{}.txt",
-                note_id,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            ));
-            if let Err(error) = fs::rename(&source, &target) {
-                for (from, to) in moved.iter().rev() {
-                    let _ = fs::rename(to, from);
-                }
-                report(self.hwnd, "메모를 휴지통으로 옮기지 못했습니다.", error);
-                return;
-            }
-            moved.push((source, target));
+    }
+
+    unsafe fn delete_notes_confirmed(&mut self, selected: &[u64]) -> std::io::Result<()> {
+        let ids = self.book.trash_notes(&self.data_dir, selected)?;
+        if ids.is_empty() {
+            return Ok(());
         }
-        let previous = self.book.clone();
-        self.book.remove(id);
-        if let Err(error) = self.book.save(&self.data_dir) {
-            self.book = previous;
-            for (from, to) in moved.iter().rev() {
-                let _ = fs::rename(to, from);
-            }
-            report(self.hwnd, "메모 목록을 저장하지 못했습니다.", error);
-            return;
-        }
-        self.edit = self.empty_edit;
+        let old_index = self.active.unwrap_or(0);
+        let active_id = self.active.map(|i| self.open[i].id);
+        let deleted: HashSet<_> = ids.into_iter().collect();
         self.open.retain(|tab| {
-            if ids.contains(&tab.id) {
+            if deleted.contains(&tab.id) {
+                if self.edit == tab.editor {
+                    self.edit = self.empty_edit;
+                }
                 unsafe {
                     if !tab.editor.is_null() {
                         DestroyWindow(tab.editor);
@@ -2580,22 +2861,69 @@ impl App {
                 true
             }
         });
-        self.active = None;
-        self.loading = true;
+        self.selection.retain(|id| !deleted.contains(&id));
+        self.expanded.retain(|id| !deleted.contains(id));
+        let surviving = active_id.and_then(|id| self.open.iter().position(|t| t.id == id));
+        self.active = surviving;
+        let next = surviving
+            .or_else(|| (!self.open.is_empty()).then(|| old_index.min(self.open.len() - 1)));
         unsafe {
-            SetWindowTextW(self.edit, wide("").as_ptr());
-            EnableWindow(self.edit, 0);
-            self.rebuild_tree(None);
-        }
-        self.loading = false;
-        if !self.open.is_empty() {
-            unsafe {
-                self.activate(0);
+            if let Some(next) = next {
+                let id = self.open[next].id;
+                self.rebuild_tree(Some(id));
+                if surviving.is_some() {
+                    self.layout();
+                } else {
+                    self.activate(next);
+                }
+            } else {
+                self.edit = self.empty_edit;
+                self.loading = true;
+                SetWindowTextW(self.edit, wide("").as_ptr());
+                EnableWindow(self.edit, 0);
+                self.loading = false;
+                self.rebuild_tree(None);
+                self.set_status("준비됨");
+                self.layout();
             }
         }
+        Ok(())
+    }
+
+    fn group_selected_notes(&mut self) -> std::io::Result<Option<u64>> {
+        if self.selection.ids.len() < 2 {
+            return Ok(None);
+        }
+        let selected: Vec<_> = self.selection.ids.iter().copied().collect();
+        let previous = self.book.clone();
+        let Some(folder) = self.book.group_notes(&selected) else {
+            return Ok(None);
+        };
+        let file = self.book.file(&self.data_dir, folder);
+        if let Err(error) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file)
+        {
+            self.book = previous;
+            return Err(error);
+        }
+        if let Err(error) = self.book.save(&self.data_dir) {
+            self.book = previous;
+            let _ = fs::remove_file(file);
+            return Err(error);
+        }
+        self.expanded.insert(folder);
+        let mut parent = self.book.get(folder).unwrap().parent;
+        while parent != 0 {
+            self.expanded.insert(parent);
+            parent = self.book.get(parent).unwrap().parent;
+        }
         unsafe {
+            self.rebuild_tree(Some(folder));
             self.layout();
         }
+        Ok(Some(folder))
     }
 
     unsafe fn shift_selected(&mut self, direction: i32) {
@@ -2679,7 +3007,7 @@ impl App {
     }
 
     unsafe fn drag_target_at_pointer(&self) -> Option<DropTarget> {
-        let source = self.dragging?;
+        self.dragging?;
         unsafe {
             let mut point = POINT::default();
             let mut bounds = RECT::default();
@@ -2700,10 +3028,33 @@ impl App {
                 } else {
                     DropZone::Inside
                 };
-                DropTarget::resolve(&self.book, source, Some(target), zone)
+                DropTarget::resolve_many(&self.book, &self.drag_sources, Some(target), zone)
             } else {
-                DropTarget::resolve(&self.book, source, None, DropZone::Root)
+                DropTarget::resolve_many(&self.book, &self.drag_sources, None, DropZone::Root)
             }
+        }
+    }
+
+    unsafe fn begin_tree_drag(&mut self, id: u64) {
+        if !self.selection.ids.contains(&id) {
+            self.selection.single(id);
+        }
+        let selected: Vec<_> = self.selection.ids.iter().copied().collect();
+        self.drag_sources = Rc::new(self.book.selected_roots(&selected));
+        if self.drag_sources.is_empty() {
+            return;
+        }
+        self.dragging = Some(id);
+        self.tree_press = None;
+        self.tree_hover = None;
+        self.drop_target = None;
+        self.publish_view();
+        unsafe {
+            self.tooltip.hide();
+            SetCapture(self.hwnd);
+            SetTimer(self.hwnd, DRAG_SCROLL_TIMER, 160, None);
+            self.update_drag_feedback();
+            self.repaint_drag_feedback();
         }
     }
 
@@ -2741,11 +3092,14 @@ impl App {
 
     unsafe fn cancel_interaction(&mut self) {
         self.dragging = None;
+        self.drag_sources = Rc::new(Vec::new());
+        self.tree_press = None;
         self.drop_target = None;
         self.tree_hover = None;
         self.resizing = false;
         self.publish_view();
         unsafe {
+            self.cancel_tab_drag();
             KillTimer(self.hwnd, DRAG_SCROLL_TIMER);
             for control in [
                 self.editor_scroll[0],
@@ -2773,13 +3127,20 @@ impl App {
 
     unsafe fn finish_drag(&mut self) {
         let target = unsafe { self.drag_target_at_pointer() };
+        unsafe {
+            self.finish_drag_to(target);
+        }
+    }
+
+    unsafe fn finish_drag_to(&mut self, target: Option<DropTarget>) {
         let source = self.dragging;
+        let sources = Rc::clone(&self.drag_sources);
         unsafe {
             self.cancel_interaction();
         }
         if let (Some(id), Some(target)) = (source, target) {
             let previous = self.book.clone();
-            if self.book.move_note(id, target.parent, target.before) {
+            if self.book.move_notes(&sources, target.parent, target.before) {
                 self.expanded.insert(target.parent);
                 unsafe {
                     self.persist_tree(previous, Some(id));
@@ -2849,6 +3210,11 @@ impl App {
                 if !self.handles.contains_key(&hit.hItem) {
                     return;
                 }
+                let clicked = self.handles[&hit.hItem];
+                if !self.selection.ids.contains(&clicked) {
+                    self.selection.single(clicked);
+                }
+                self.refresh_selection();
                 SendMessageW(
                     self.tree,
                     TVM_SELECTITEM,
@@ -2857,8 +3223,16 @@ impl App {
                 );
             } else {
                 let handle = SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0);
+                if self.selection.ids.is_empty() {
+                    return;
+                }
                 if !self.handles.contains_key(&handle) {
                     return;
+                }
+                let id = self.handles[&handle];
+                if !self.selection.ids.contains(&id) {
+                    self.selection.single(id);
+                    self.refresh_selection();
                 }
                 let mut area = RECT::default();
                 *(&mut area as *mut RECT as *mut isize) = handle;
@@ -2874,7 +3248,11 @@ impl App {
             let Some(note) = self.selected_id().and_then(|id| self.book.get(id)) else {
                 return;
             };
-            let menu = sidebar_menu(note.parent != 0);
+            let menu = if self.selection.ids.len() > 1 {
+                sidebar_multi_menu()
+            } else {
+                sidebar_menu(note.parent != 0)
+            };
             self.tooltip.hide();
             let chosen = TrackPopupMenu(
                 menu,
@@ -3211,6 +3589,13 @@ impl App {
             MENU_DELETE => unsafe {
                 self.delete_selected();
             },
+            MENU_GROUP => match self.group_selected_notes() {
+                Ok(Some(_)) => unsafe {
+                    self.rename_selected();
+                },
+                Ok(None) => {}
+                Err(error) => report(self.hwnd, "폴더를 만들지 못했습니다.", error),
+            },
             MENU_UP => unsafe {
                 self.shift_selected(-1);
             },
@@ -3239,36 +3624,48 @@ impl App {
             }
         } else if hdr.hwndFrom == self.tree {
             match hdr.code {
-                TVN_BEGINLABELEDITW => unsafe {
-                    PostMessageW(self.hwnd, POSITION_RENAME, 0, 0);
-                },
                 NM_CLICK => {
-                    let mut pt = POINT::default();
-                    unsafe {
-                        GetCursorPos(&mut pt);
-                        ScreenToClient(self.tree, &mut pt);
-                    }
-                    let mut hit = TVHITTESTINFO {
-                        pt,
-                        flags: 0,
-                        hItem: 0,
-                    };
-                    unsafe {
-                        SendMessageW(self.tree, TVM_HITTEST, 0, &mut hit as *mut _ as LPARAM);
-                    }
-                    if hit.flags & (TVHT_ONITEMLABEL | TVHT_ONITEMICON | TVHT_ONITEMRIGHT) != 0
-                        && let Some(&id) = self.handles.get(&hit.hItem)
-                    {
-                        unsafe {
-                            self.open_note(id);
-                        }
+                    // Finish after DefSubclassProc restores focus and completes DragDetect.
+                    if let Some(press) = &mut self.tree_press {
+                        press.clicked = true;
                     }
                 }
+                TVN_BEGINLABELEDITW => unsafe {
+                    if self.selection.ids.len() > 1 {
+                        return 1;
+                    }
+                    PostMessageW(self.hwnd, POSITION_RENAME, 0, 0);
+                },
                 TVN_SELCHANGEDW => {
+                    if self.tree_mouse_input
+                        || self.tree_press.is_some()
+                        || self.dragging.is_some()
+                        || self.loading
+                    {
+                        return 0;
+                    }
                     let event = unsafe { &*(hdr as *const _ as *const NMTREEVIEWW) };
                     if event.itemNew.lParam > 0 {
+                        let id = event.itemNew.lParam as u64;
+                        let keyboard = event.action == TVC_BYKEYBOARD;
+                        let ctrl = keyboard && unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
+                        let shift = keyboard && unsafe { GetKeyState(VK_SHIFT as i32) } < 0;
+                        if !ctrl || shift {
+                            let visible = if shift {
+                                self.visible_note_ids()
+                            } else {
+                                Vec::new()
+                            };
+                            self.selection.click(id, &visible, ctrl, shift);
+                        }
                         unsafe {
-                            self.open_note(event.itemNew.lParam as u64);
+                            self.refresh_selection();
+                            if !ctrl && !shift {
+                                self.open_note(id);
+                                if keyboard {
+                                    SetFocus(self.tree);
+                                }
+                            }
                         }
                     }
                 }
@@ -3311,18 +3708,8 @@ impl App {
                 TVN_BEGINDRAGW => {
                     let event = unsafe { &*(hdr as *const _ as *const NMTREEVIEWW) };
                     if event.itemNew.lParam > 0 {
-                        self.dragging = Some(event.itemNew.lParam as u64);
                         unsafe {
-                            self.tooltip.hide();
-                        }
-                        self.tree_hover = None;
-                        self.drop_target = None;
-                        self.publish_view();
-                        unsafe {
-                            SetCapture(self.hwnd);
-                            SetTimer(self.hwnd, DRAG_SCROLL_TIMER, 160, None);
-                            self.update_drag_feedback();
-                            self.repaint_drag_feedback();
+                            self.begin_tree_drag(event.itemNew.lParam as u64);
                         }
                     }
                 }
@@ -3526,6 +3913,29 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_TIMER if wp == AUTOSAVE_TIMER => {
             with_app(|app| unsafe {
                 app.save_all();
+            });
+            0
+        }
+        WM_TIMER if wp == TAB_DRAG_SCROLL_TIMER => {
+            with_app(|app| unsafe {
+                if app.tab_drag.is_some_and(|drag| drag.moving) {
+                    let mut point = POINT::default();
+                    GetCursorPos(&mut point);
+                    ScreenToClient(app.tabs, &mut point);
+                    let mut bounds = RECT::default();
+                    GetClientRect(app.tabs, &mut bounds);
+                    let mut layout = app.tab_layout.get();
+                    if point.y >= 0 && point.y < bounds.bottom {
+                        if point.x < app.theme.px(24) {
+                            layout.scroll(-app.theme.px(24));
+                        } else if point.x >= layout.viewport - app.theme.px(24) {
+                            layout.scroll(app.theme.px(24));
+                        }
+                    }
+                    app.tab_layout.set(layout);
+                    app.update_tab_drag(point);
+                    InvalidateRect(app.tab_scroll, null(), 0);
+                }
             });
             0
         }
@@ -3742,6 +4152,7 @@ fn shortcut(msg: &MSG) -> bool {
             handled = true;
         } else if key == VK_ESCAPE as u32
             && (app.dragging.is_some()
+                || app.tab_drag.is_some()
                 || app.resizing
                 || [
                     app.editor_scroll[0],
@@ -3754,7 +4165,10 @@ fn shortcut(msg: &MSG) -> bool {
             app.cancel_interaction();
             handled = true;
         } else if ctrl && key == b'A' as u32 {
-            if app.active.is_some()
+            if msg.hwnd == app.tree {
+                app.select_all_tree();
+                handled = true;
+            } else if app.active.is_some()
                 && (msg.hwnd == app.edit || msg.hwnd == app.tree || msg.hwnd == app.tabs)
             {
                 SetFocus(app.edit);
@@ -4907,6 +5321,406 @@ mod settings_tests {
                 drop(app);
             }
             fs::remove_dir_all(root).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    use windows_sys::Win32::System::StationsAndDesktops::*;
+
+    #[test]
+    fn native_selection_tab_drag_and_batch_commands_preserve_editors() {
+        unsafe {
+            // No SwitchDesktop or physical input: all HWNDs live on an unshown desktop.
+            let name = wide(&format!("EdotInteractionTest{}", std::process::id()));
+            let desktop = CreateDesktopW(
+                name.as_ptr(),
+                null(),
+                null(),
+                0,
+                DESKTOP_CREATEWINDOW
+                    | DESKTOP_CREATEMENU
+                    | DESKTOP_READOBJECTS
+                    | DESKTOP_WRITEOBJECTS,
+                null(),
+            );
+            assert!(!desktop.is_null());
+            let desktop_id = desktop as usize;
+            let result = std::thread::spawn(move || {
+                assert_ne!(SetThreadDesktop(desktop_id as HDESK), 0);
+                verify_interactions();
+            })
+            .join();
+            assert_ne!(CloseDesktop(desktop), 0);
+            result.unwrap();
+        }
+    }
+
+    unsafe fn click_tree(tree: HWND, id: u64, modifiers: usize, release: bool) {
+        unsafe {
+            let mut point = POINT::default();
+            with_app(|app| {
+                let handle = *app
+                    .handles
+                    .iter()
+                    .find(|&(_, &value)| value == id)
+                    .unwrap()
+                    .0;
+                let mut row = RECT::default();
+                *(&mut row as *mut RECT as *mut isize) = handle;
+                assert_ne!(
+                    SendMessageW(tree, TVM_GETITEMRECT, 1, &mut row as *mut _ as isize),
+                    0
+                );
+                point = POINT {
+                    x: row.left + app.theme.px(4),
+                    y: (row.top + row.bottom) / 2,
+                };
+            });
+            let coordinates = (point.x as u16 as u32 | ((point.y as u16 as u32) << 16)) as isize;
+            if !release {
+                // Stage a held press before injecting the drag notification, without a release.
+                with_app(|app| {
+                    app.tree_mouse_input = true;
+                    app.tree_mouse_down(
+                        point,
+                        false,
+                        modifiers & MK_CONTROL as usize != 0,
+                        modifiers & MK_SHIFT as usize != 0,
+                    );
+                    app.tree_mouse_input = false;
+                });
+                return;
+            }
+            // Native TreeView's synchronous DragDetect reads the thread queue.
+            PostMessageW(tree, WM_LBUTTONUP, modifiers, coordinates);
+            SendMessageW(tree, WM_LBUTTONDOWN, modifiers | 1, coordinates);
+            let mut pending = MSG::default();
+            while PeekMessageW(&mut pending, tree, WM_LBUTTONUP, WM_LBUTTONUP, PM_REMOVE) != 0 {
+                DispatchMessageW(&pending);
+            }
+        }
+    }
+
+    unsafe fn verify_interactions() {
+        unsafe {
+            InitCommonControlsEx(&INITCOMMONCONTROLSEX {
+                dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES,
+            });
+            assert!(!LoadLibraryW(wide("Msftedit.dll").as_ptr()).is_null());
+            let dir = std::env::temp_dir().join(format!(
+                "edot-interactions-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let mut book = Notebook::load(&dir).unwrap();
+            let ids: Vec<_> = (0..4).map(|i| book.add(0, format!("메모 {i}"))).collect();
+            let child = book.add(ids[0], "하위 메모".into());
+            for &id in ids.iter().chain([child].iter()) {
+                fs::write(book.file(&dir, id), format!("본문 {id}")).unwrap();
+            }
+            book.save(&dir).unwrap();
+            let instance = GetModuleHandleW(null());
+            let class = wide("EdotInteractionTestWindow");
+            assert_ne!(
+                RegisterClassW(&WNDCLASSW {
+                    lpfnWndProc: Some(window_proc),
+                    hInstance: instance,
+                    lpszClassName: class.as_ptr(),
+                    ..Default::default()
+                }),
+                0
+            );
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                windows_sys::w!("test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                1100,
+                760,
+                null_mut(),
+                null_mut(),
+                instance,
+                null(),
+            );
+            assert!(!hwnd.is_null());
+            struct WindowGuard(HWND);
+            impl Drop for WindowGuard {
+                fn drop(&mut self) {
+                    unsafe {
+                        DestroyWindow(self.0);
+                    }
+                }
+            }
+            let guard = WindowGuard(hwnd);
+            APP.with(|cell| {
+                *cell.borrow_mut() = Some(App::new(hwnd, dir.clone(), book, Settings::default()))
+            });
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let mut tree = null_mut();
+            let mut tabs = null_mut();
+            with_app(|app| {
+                tree = app.tree;
+                assert!(app.open.is_empty());
+            });
+            click_tree(tree, ids[0], 0, true);
+            with_app(|app| {
+                assert_eq!(app.open.len(), 1);
+                assert_eq!(app.open[app.active.unwrap()].id, ids[0]);
+                assert_eq!(window_text(app.edit), format!("본문 {}", ids[0]));
+                assert_eq!(GetFocus(), app.edit);
+                assert!(app.tree_press.is_none());
+            });
+            with_app(|app| {
+                for &id in &ids {
+                    app.open_note(id);
+                }
+                tabs = app.tabs;
+            });
+            click_tree(tree, ids[0], 0, true);
+            with_app(|app| {
+                assert_eq!(app.open[app.active.unwrap()].id, ids[0]);
+                assert_eq!(GetFocus(), app.edit);
+                assert!(app.tree_press.is_none());
+            });
+            click_tree(tree, ids[2], MK_CONTROL as usize, true);
+            with_app(|app| {
+                assert_eq!(*app.selection.ids, HashSet::from([ids[0], ids[2]]));
+                assert_eq!(app.open.len(), 4); // Ctrl selection does not open new tabs.
+                assert_eq!(app.open[app.active.unwrap()].id, ids[0]);
+            });
+            click_tree(tree, ids[0], MK_CONTROL as usize, true);
+            with_app(|app| assert_eq!(*app.selection.ids, HashSet::from([ids[2]])));
+            let mut keys = [0u8; 256];
+            GetKeyboardState(keys.as_mut_ptr());
+            let mut ctrl_keys = keys;
+            ctrl_keys[VK_CONTROL as usize] = 0x80;
+            SetKeyboardState(ctrl_keys.as_ptr()); // Private test thread's keyboard queue only.
+            assert!(shortcut(&MSG {
+                hwnd: tree,
+                message: WM_KEYDOWN,
+                wParam: b'A' as usize,
+                ..Default::default()
+            }));
+            with_app(|app| assert_eq!(app.selection.ids.len(), 5));
+            SendMessageW(tree, WM_KEYDOWN, VK_SPACE as usize, 0);
+            with_app(|app| {
+                assert_eq!(app.selection.ids.len(), 4);
+                assert!(!app.selection.ids.contains(&ids[0]));
+            });
+            SetKeyboardState(keys.as_ptr());
+            click_tree(tree, ids[0], 0, true);
+            click_tree(tree, ids[1], MK_SHIFT as usize, true);
+            with_app(|app| {
+                assert_eq!(*app.selection.ids, HashSet::from([ids[0], child, ids[1]]));
+                assert_eq!(app.open[app.active.unwrap()].id, ids[0]);
+            });
+            // Right-clicking a selected row keeps the batch without opening a tab.
+            with_app(|app| {
+                let handle = *app.handles.iter().find(|&(_, &id)| id == ids[1]).unwrap().0;
+                let mut row = RECT::default();
+                *(&mut row as *mut RECT as *mut isize) = handle;
+                SendMessageW(tree, TVM_GETITEMRECT, 1, &mut row as *mut _ as isize);
+                app.tree_mouse_down(
+                    POINT {
+                        x: row.left + 4,
+                        y: (row.top + row.bottom) / 2,
+                    },
+                    true,
+                    false,
+                    false,
+                );
+                assert_eq!(app.selection.ids.len(), 3);
+            });
+            // Custom rows use the same selection set in both palettes.
+            for dark in [false, true] {
+                with_app(|app| {
+                    app.theme = Rc::new(Theme::new(app.theme.dpi, dark, "Consolas"));
+                    app.apply_theme(true, true, true);
+                    app.publish_view();
+                    let screen = GetDC(hwnd);
+                    let dc = CreateCompatibleDC(screen);
+                    let bitmap = CreateCompatibleBitmap(screen, 700, 700);
+                    let original = SelectObject(dc, bitmap);
+                    for id in [ids[0], ids[1], ids[2]] {
+                        let handle = *app
+                            .handles
+                            .iter()
+                            .find(|&(_, &value)| value == id)
+                            .unwrap()
+                            .0;
+                        let mut row = RECT::default();
+                        *(&mut row as *mut RECT as *mut isize) = handle;
+                        SendMessageW(tree, TVM_GETITEMRECT, 0, &mut row as *mut _ as isize);
+                        ui::with_view(|view| {
+                            view.paint_tree_item(&NMTVCUSTOMDRAW {
+                                nmcd: NMCUSTOMDRAW {
+                                    hdc: dc,
+                                    rc: row,
+                                    dwItemSpec: handle as usize,
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            })
+                        });
+                        let expected = if id == ids[2] {
+                            app.theme.colors.sidebar
+                        } else {
+                            app.theme.colors.selected
+                        };
+                        assert_eq!(
+                            GetPixel(dc, app.theme.px(6), (row.top + row.bottom) / 2),
+                            expected
+                        );
+                    }
+                    SelectObject(dc, original);
+                    DeleteObject(bitmap);
+                    DeleteDC(dc);
+                    ReleaseDC(hwnd, screen);
+                });
+            }
+            with_app(|app| {
+                app.activate(2);
+                SetFocus(tree);
+            });
+            click_tree(tree, ids[0], 0, false);
+            with_app(|app| {
+                assert_eq!(app.selection.ids.len(), 3); // Kept until click-up or drag.
+                assert_eq!(app.open[app.active.unwrap()].id, ids[0]); // Opens before release.
+            });
+            let mut event = NMTREEVIEWW::default();
+            event.hdr.hwndFrom = tree;
+            event.hdr.code = TVN_BEGINDRAGW;
+            event.itemNew.lParam = ids[0] as isize;
+            SendMessageW(hwnd, WM_NOTIFY, ID_TREE, &event as *const _ as isize);
+            with_app(|app| {
+                assert_eq!(&*app.drag_sources, &[ids[0], ids[1]]);
+                let target = DropTarget::resolve_many(
+                    &app.book,
+                    &app.drag_sources,
+                    Some(ids[2]),
+                    DropZone::Inside,
+                );
+                app.finish_drag_to(target);
+                assert_eq!(app.book.children(ids[2]), vec![ids[0], ids[1]]);
+                assert_eq!(app.book.get(child).unwrap().parent, ids[0]);
+                assert_eq!(app.selection.ids.len(), 3);
+                assert!(app.dragging.is_none());
+                assert_eq!(GetCapture(), null_mut());
+            });
+            click_tree(tree, ids[0], 0, true);
+            with_app(|app| assert_eq!(*app.selection.ids, HashSet::from([ids[0]])));
+
+            // Reorder a dirty editor through actual tab subclass messages.
+            let mut x = 0;
+            let mut editor = null_mut();
+            let mut selection = editing::CharRange { start: 0, end: 0 };
+            with_app(|app| {
+                app.activate(3);
+                editor = app.edit;
+                editing::select(editor, editing::CharRange { start: 0, end: 0 });
+                SendMessageW(editor, EM_REPLACESEL, 1, wide("수정 ").as_ptr() as isize);
+                selection = editing::selection(editor);
+                assert_ne!(SendMessageW(editor, EM_CANUNDO, 0, 0), 0);
+                x = app.tab_layout.get().bounds(3).0 + app.theme.px(35);
+            });
+            let y = 15;
+            SendMessageW(tabs, WM_LBUTTONDOWN, 1, ((y << 16) | x) as isize);
+            SendMessageW(tabs, WM_MOUSEMOVE, 1, (y << 16) as isize);
+            with_app(|app| assert_eq!(app.tab_drag.unwrap().gap, 0));
+            SendMessageW(tabs, WM_LBUTTONUP, 0, (y << 16) as isize);
+            SendMessageW(tabs, WM_LBUTTONDOWN, 1, ((y << 16) | 35) as isize);
+            SendMessageW(tabs, WM_MOUSEMOVE, 1, ((y << 16) | 350) as isize);
+            assert!(shortcut(&MSG {
+                hwnd: tabs,
+                message: WM_KEYDOWN,
+                wParam: VK_ESCAPE as usize,
+                ..Default::default()
+            }));
+            with_app(|app| {
+                assert!(app.tab_drag.is_none());
+                assert_eq!(GetCapture(), null_mut());
+            });
+            with_app(|app| {
+                assert_eq!(
+                    app.open.iter().map(|t| t.id).collect::<Vec<_>>(),
+                    vec![ids[3], ids[0], ids[1], ids[2]]
+                );
+                assert_eq!(app.active, Some(0));
+                assert_eq!(app.edit, editor);
+                assert_eq!(editing::selection(editor), selection);
+                assert_ne!(SendMessageW(editor, EM_CANUNDO, 0, 0), 0);
+                assert_eq!(
+                    fs::read_to_string(dir.join("session.tsv"))
+                        .unwrap()
+                        .lines()
+                        .skip(2)
+                        .map(|s| s.parse::<u64>().unwrap())
+                        .collect::<Vec<_>>(),
+                    vec![ids[3], ids[0], ids[1], ids[2]]
+                );
+                fs::create_dir(dir.join("session.tmp")).unwrap();
+                assert!(app.reorder_tab(ids[3], 4).is_err());
+                assert_eq!(app.active, Some(0));
+                assert_eq!(app.open[0].id, ids[3]);
+                fs::remove_dir(dir.join("session.tmp")).unwrap();
+                app.selection.all(&[ids[0], ids[1]]);
+                let menu = sidebar_multi_menu();
+                assert_eq!(GetMenuItemCount(menu), 2);
+                assert_eq!(GetMenuItemID(menu, 0), MENU_DELETE as u32);
+                assert_eq!(GetMenuItemID(menu, 1), MENU_GROUP as u32);
+                DestroyMenu(menu);
+                let before = app.book.notes.clone();
+                let next_id = app.book.next_id;
+                fs::create_dir(dir.join("tree.tmp")).unwrap();
+                assert!(app.group_selected_notes().is_err());
+                assert_eq!(app.book.notes, before);
+                assert_eq!(app.book.next_id, next_id);
+                assert!(!app.book.file(&dir, next_id).exists());
+                assert_eq!(app.selection.ids.len(), 2);
+                fs::remove_dir(dir.join("tree.tmp")).unwrap();
+                let folder = app.group_selected_notes().unwrap().unwrap();
+                assert_eq!(app.book.children(folder), vec![ids[0], ids[1]]);
+                assert_eq!(app.book.get(folder).unwrap().parent, ids[2]);
+                assert_eq!(app.edit, editor);
+                assert_eq!(editing::selection(editor), selection);
+                assert!(app.save_all());
+                app.delete_notes_confirmed(&[folder, ids[0], child])
+                    .unwrap();
+                assert_eq!(
+                    app.open.iter().map(|t| t.id).collect::<Vec<_>>(),
+                    vec![ids[3], ids[2]]
+                );
+                assert_eq!(app.edit, editor);
+                assert_eq!(editing::selection(editor), selection);
+                assert_ne!(SendMessageW(editor, EM_CANUNDO, 0, 0), 0);
+                assert_eq!(fs::read_dir(dir.join("trash")).unwrap().count(), 4);
+                assert!(
+                    fs::read_to_string(app.book.file(&dir, ids[3]))
+                        .unwrap()
+                        .starts_with("수정 ")
+                );
+                assert_eq!(
+                    Notebook::load(&dir).unwrap().children(0),
+                    vec![ids[2], ids[3]]
+                );
+            });
+            drop(guard);
+            UnregisterClassW(class.as_ptr(), instance);
+            assert!(
+                dir.canonicalize()
+                    .unwrap()
+                    .starts_with(std::env::temp_dir().canonicalize().unwrap())
+            );
+            fs::remove_dir_all(dir).unwrap();
         }
     }
 }

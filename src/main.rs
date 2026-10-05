@@ -5,6 +5,7 @@ mod drag;
 mod editing;
 mod model;
 mod scrollbar;
+mod selection;
 mod settings;
 mod settings_controls;
 mod startup;

@@ -17,16 +17,32 @@ pub struct DropTarget {
 }
 
 impl DropTarget {
+    #[cfg(test)]
     pub fn resolve(
         book: &Notebook,
         source: u64,
         note: Option<u64>,
         zone: DropZone,
     ) -> Option<Self> {
-        book.get(source)?;
+        Self::resolve_many(book, &[source], note, zone)
+    }
+
+    pub fn resolve_many(
+        book: &Notebook,
+        sources: &[u64],
+        note: Option<u64>,
+        zone: DropZone,
+    ) -> Option<Self> {
+        if sources.is_empty() || sources.iter().any(|&id| book.get(id).is_none()) {
+            return None;
+        }
+        let roots = sources;
         let (parent, before) = match (note, zone) {
             (None, DropZone::Root) => (0, None),
-            (Some(id), zone) if id != source => {
+            (Some(id), zone)
+                if !roots.contains(&id)
+                    && !roots.iter().any(|&root| book.is_descendant(root, id)) =>
+            {
                 let target = book.get(id)?;
                 match zone {
                     DropZone::Before => (target.parent, Some(id)),
@@ -37,7 +53,7 @@ impl DropTarget {
                         let next = siblings[position + 1..]
                             .iter()
                             .copied()
-                            .find(|&s| s != source);
+                            .find(|s| !roots.contains(s));
                         (target.parent, next)
                     }
                     DropZone::Root => return None,
@@ -45,7 +61,10 @@ impl DropTarget {
             }
             _ => return None,
         };
-        if parent == source || book.is_descendant(source, parent) {
+        if roots
+            .iter()
+            .any(|&source| parent == source || book.is_descendant(source, parent))
+        {
             return None;
         }
         Some(Self {
@@ -94,5 +113,31 @@ mod tests {
         assert!(book.move_note(b, drop.parent, drop.before));
         assert_eq!(book.children(0), vec![a, b]);
         assert!(DropTarget::resolve(&book, b, None, DropZone::Root).is_some());
+    }
+
+    #[test]
+    fn batch_feedback_skips_selected_siblings_and_rejects_every_selected_subtree() {
+        let mut book = Notebook {
+            next_id: 1,
+            ..Default::default()
+        };
+        let ids: Vec<_> = (0..5).map(|i| book.add(0, format!("{i}"))).collect();
+        let child = book.add(ids[3], "child".into());
+        let selected = [ids[1], ids[3]];
+        assert!(
+            DropTarget::resolve_many(&book, &selected, Some(child), DropZone::Inside).is_none()
+        );
+        assert!(
+            DropTarget::resolve_many(&book, &selected, Some(ids[1]), DropZone::Before).is_none()
+        );
+        let target =
+            DropTarget::resolve_many(&book, &selected, Some(ids[2]), DropZone::After).unwrap();
+        assert_eq!(target.before, Some(ids[4]));
+        assert!(book.move_notes(&selected, target.parent, target.before));
+        assert_eq!(
+            book.children(0),
+            vec![ids[0], ids[2], ids[1], ids[3], ids[4]]
+        );
+        assert_eq!(book.get(child).unwrap().parent, ids[3]);
     }
 }

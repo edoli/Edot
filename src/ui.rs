@@ -54,6 +54,9 @@ pub struct View {
     pub resizing: bool,
     pub tree_hover: Option<isize>,
     pub dragging: Option<u64>,
+    pub drag_sources: Rc<Vec<u64>>,
+    pub selected: Rc<HashSet<u64>>,
+    pub tab_insertion: Option<usize>,
     pub drop_target: Option<DropTarget>,
     pub search_host: HWND,
     pub find_input: HWND,
@@ -206,7 +209,14 @@ impl View {
             }
             None => "이 위치에는 놓을 수 없습니다".to_owned(),
         };
-        format!("{source} → {action}   ·   Esc: 취소")
+        if self.drag_sources.len() > 1 {
+            format!(
+                "{}개 항목 → {action}   ·   Esc: 취소",
+                self.drag_sources.len()
+            )
+        } else {
+            format!("{source} → {action}   ·   Esc: 취소")
+        }
     }
 
     pub unsafe fn paint_drag_feedback(&self, dc: HDC) {
@@ -512,6 +522,16 @@ impl View {
                 }
                 theme::close(dc, right - p(17), p(14), p(8), self.theme.colors.muted);
             }
+            if let Some(gap) = self.tab_insertion {
+                let x = (gap as i32 * self.tab_layout.width - self.tab_layout.offset)
+                    .clamp(p(1), (self.tab_layout.viewport - p(2)).max(p(1)));
+                theme::line(
+                    dc,
+                    &[(x, p(3)), (x, area.bottom - p(3))],
+                    self.theme.colors.blue,
+                    p(2),
+                );
+            }
             RestoreDC(dc, saved);
         }
     }
@@ -533,7 +553,7 @@ impl View {
             area.left = 0;
             area.right = client.right;
             theme::fill(dc, area, self.theme.colors.sidebar);
-            let selected = custom.nmcd.uItemState & CDIS_SELECTED != 0;
+            let selected = self.selected.contains(&id);
             let inside = self
                 .drop_target
                 .is_some_and(|target| target.note == Some(id) && target.zone == DropZone::Inside);
@@ -645,7 +665,7 @@ impl View {
                     theme::fill(
                         dc,
                         rect(gx, gy, gx + p(2), gy + p(2)),
-                        if self.dragging == Some(id) {
+                        if self.dragging.is_some() && self.selected.contains(&id) {
                             self.theme.colors.blue
                         } else {
                             self.theme.colors.muted

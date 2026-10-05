@@ -55,6 +55,15 @@ impl TabLayout {
         self.offset = (self.offset + pixels)
             .clamp(0, (self.count as i32 * self.width - self.viewport).max(0));
     }
+
+    /// Insertion gap in the original order, before removing the dragged tab.
+    pub fn insertion(&self, x: i32) -> usize {
+        if self.width <= 0 {
+            return 0;
+        }
+        ((x.saturating_add(self.offset).saturating_add(self.width / 2)).max(0) / self.width)
+            .min(self.count as i32) as usize
+    }
 }
 
 #[cfg(test)]
@@ -79,5 +88,16 @@ mod tests {
         assert_eq!(overflow.offset, 0);
         overflow.scroll(i32::MAX / 2);
         assert_eq!(overflow.offset, 960);
+    }
+
+    #[test]
+    fn insertion_uses_tab_midpoints_and_the_scroll_offset() {
+        let layout = TabLayout::new(300, 6, 100, 100, 200);
+        assert_eq!(layout.insertion(0), 2);
+        assert_eq!(layout.insertion(49), 2);
+        assert_eq!(layout.insertion(50), 3);
+        assert_eq!(layout.insertion(300), 5);
+        assert_eq!(layout.insertion(i32::MAX), 6);
+        assert_eq!(layout.insertion(i32::MIN), 0);
     }
 }
