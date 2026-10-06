@@ -2378,6 +2378,8 @@ impl App {
             self.active = old_active;
             return Err(error);
         }
+        // The number of tabs stays the same, so invalidate the cached render order.
+        *self.view_tabs.borrow_mut() = Rc::new(Vec::new());
         unsafe {
             self.layout();
         }
@@ -6674,6 +6676,12 @@ mod interaction_tests {
                     vec![ids[3], ids[0], ids[1], ids[2]]
                 );
                 assert_eq!(app.active, Some(0));
+                ui::with_view(|view| {
+                    assert_eq!(
+                        view.open.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                        app.open.iter().map(|tab| tab.id).collect::<Vec<_>>()
+                    );
+                });
                 assert_eq!(app.edit, editor);
                 assert_eq!(editing::selection(editor), selection);
                 assert_ne!(SendMessageW(editor, EM_CANUNDO, 0, 0), 0);
