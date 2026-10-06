@@ -675,7 +675,7 @@ unsafe extern "system" fn global_results_proc(
                             hwnd,
                             index as u64,
                             ui::result_replace_bounds(&app.theme, area.right, top),
-                            "이 결과 바꾸기 (Ctrl+Shift+Enter)",
+                            "이 결과 바꾸기",
                             point,
                         );
                     } else {
@@ -5920,18 +5920,6 @@ fn shortcut(msg: &MSG) -> bool {
         } else if ctrl && key == VK_OEM_COMMA as u32 {
             app.show_settings(!app.settings_visible);
             handled = true;
-        } else if ctrl
-            && shift
-            && key == VK_RETURN as u32
-            && msg.hwnd == app.global_results
-            && app.global_replace
-        {
-            if let Some(row) = app.global_focus
-                && let Some(hit) = row.hit
-            {
-                app.replace_global_result(row.group, hit);
-            }
-            handled = true;
         } else if app.settings_visible && key == VK_ESCAPE as u32 {
             let dropped = app.settings_panel.is_some_and(|panel| {
                 SendMessageW(panel.theme, CB_GETDROPPEDSTATE, 0, 0) != 0
@@ -8579,13 +8567,16 @@ mod interaction_tests {
             replace_keys[VK_CONTROL as usize] = 0x80;
             replace_keys[VK_SHIFT as usize] = 0x80;
             SetKeyboardState(replace_keys.as_ptr());
-            assert!(shortcut(&MSG {
+            assert!(!shortcut(&MSG {
                 hwnd: results,
                 message: WM_KEYDOWN,
                 wParam: VK_RETURN as usize,
                 ..Default::default()
             }));
+            SendMessageW(results, WM_KEYDOWN, VK_RETURN as usize, 0);
+            assert_eq!(window_text(editor), sample);
             SetKeyboardState(original_keys.as_ptr());
+            click_search_replace(ids[0], 1, false);
             assert_eq!(window_text(editor), "🙂 item12 item34\r\n>item5");
             SendMessageW(editor, WM_UNDO, 0, 0);
             assert_eq!(window_text(editor), sample);
