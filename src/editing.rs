@@ -1,71 +1,4 @@
-//! Messages and layouts from the Windows SDK Richedit.h (system Msftedit.dll).
-use windows_sys::Win32::Foundation::HWND;
-use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_USER};
-pub const EM_EXGETSEL: u32 = WM_USER + 52;
-#[cfg(test)]
-pub const EM_EXLINEFROMCHAR: u32 = WM_USER + 54;
-pub const EM_EXSETSEL: u32 = WM_USER + 55;
-pub const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
-pub const EM_SETCHARFORMAT: u32 = WM_USER + 68;
-pub const EM_SETTARGETDEVICE: u32 = WM_USER + 72;
-pub const EM_SETSCROLLPOS: u32 = WM_USER + 222;
-pub const EM_SETZOOM: u32 = WM_USER + 225;
-#[cfg(test)]
-pub const EM_GETZOOM: u32 = WM_USER + 224;
-pub const EM_SETEVENTMASK: u32 = WM_USER + 69;
-pub const EM_REDO: u32 = WM_USER + 84;
-pub const EM_STOPGROUPTYPING: u32 = WM_USER + 88;
-pub const EM_SETTEXTMODE: u32 = WM_USER + 89;
-pub const EM_FINDTEXTEXW: u32 = WM_USER + 124;
-pub const EN_SELCHANGE: u32 = 0x0702;
-pub const ENM_CHANGE: isize = 1;
-pub const ENM_SELCHANGE: isize = 0x00080000;
-
-#[repr(C)]
-#[derive(Default)]
-struct CharFormat {
-    size: u32,
-    mask: u32,
-    effects: u32,
-    height: i32,
-    offset: i32,
-    color: u32,
-    charset: u8,
-    pitch: u8,
-    face: [u16; 32],
-}
-
-pub unsafe fn text_color(edit: HWND, color: u32) {
-    let format = CharFormat {
-        size: std::mem::size_of::<CharFormat>() as u32,
-        mask: 0x40000000,
-        color,
-        ..Default::default()
-    }; // CFM_COLOR; clear CFE_AUTOCOLOR
-    unsafe {
-        // Plain-text RichEdit has one format for the whole document. Changing
-        // its default format also colors existing text without selecting it.
-        SendMessageW(edit, EM_SETCHARFORMAT, 0, &format as *const _ as isize);
-    }
-}
-
-#[cfg(test)]
-pub unsafe fn format(edit: HWND) -> (String, u32) {
-    let mut format = CharFormat {
-        size: std::mem::size_of::<CharFormat>() as u32,
-        ..Default::default()
-    };
-    unsafe {
-        SendMessageW(edit, WM_USER + 58, 0, &mut format as *mut _ as isize);
-    }
-    let len = format
-        .face
-        .iter()
-        .position(|&c| c == 0)
-        .unwrap_or(format.face.len());
-    (String::from_utf16_lossy(&format.face[..len]), format.color)
-}
-
+//! UTF-16 paragraph coordinates shared with the original Edot search format.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct CharRange {
@@ -73,146 +6,77 @@ pub struct CharRange {
     pub end: i32,
 }
 
-#[repr(C)]
-struct TextLength {
-    flags: u32,
-    codepage: u32,
+/// Convert normalized UTF-16 paragraph positions to original UTF-8 bytes.
+pub fn byte_range(text: &str, range: CharRange) -> std::ops::Range<usize> {
+    let mut positions = [text.len(); 2];
+    let mut chars = text.char_indices().peekable();
+    let mut units = 0;
+    let mut byte = 0;
+    for (index, target) in [range.start, range.end].into_iter().enumerate() {
+        while units < target {
+            let Some((at, ch)) = chars.next() else {
+                break;
+            };
+            units += ch.len_utf16() as i32;
+            byte = at + ch.len_utf8();
+            if ch == '\r' && chars.peek().is_some_and(|(_, c)| *c == '\n') {
+                byte = chars.next().unwrap().0 + 1;
+            }
+        }
+        positions[index] = byte;
+    }
+    positions[0]..positions[1]
+}
+pub fn paragraph_units(text: &str) -> i32 {
+    paragraph_units_iter(text.chars())
+}
+pub fn paragraph_units_iter(chars: impl Iterator<Item = char>) -> i32 {
+    let mut previous = '\0';
+    chars
+        .map(|ch| {
+            let units = if ch == '\n' && previous == '\r' {
+                0
+            } else {
+                ch.len_utf16() as i32
+            };
+            previous = ch;
+            units
+        })
+        .sum()
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct CharacterCount {
-    pub total: usize,
-    pub selected: usize,
+#[derive(Default)]
+pub struct TextMetrics {
+    pub total: i32,
+    pub lines: Vec<usize>,
 }
-
-impl std::fmt::Display for CharacterCount {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.selected > 0 {
-            write!(f, "{}/{}자", self.selected, self.total)
-        } else {
-            write!(f, "{}자", self.total)
+impl TextMetrics {
+    pub fn new(text: &str) -> Self {
+        let mut lines = vec![0];
+        let mut chars = text.char_indices().peekable();
+        while let Some((offset, ch)) = chars.next() {
+            if ch == '\r' && chars.peek().is_some_and(|(_, c)| *c == '\n') {
+                lines.push(chars.next().unwrap().0 + 1);
+            } else if matches!(ch, '\r' | '\n') {
+                lines.push(offset + 1);
+            }
+        }
+        Self {
+            total: paragraph_units(text),
+            lines,
         }
     }
-}
-
-pub unsafe fn character_count(edit: HWND) -> CharacterCount {
-    let request = TextLength {
-        flags: 2 | 8,
-        codepage: 1200,
-    }; // GTL_PRECISE | GTL_NUMCHARS, UTF-16
-    // No GTL_USECRLF: paragraph breaks count once, matching RichEdit selection offsets.
-    let total = unsafe { SendMessageW(edit, WM_USER + 95, &request as *const _ as usize, 0) }.max(0)
-        as usize;
-    let range = unsafe { selection(edit) };
-    CharacterCount {
-        total,
-        selected: range.end.saturating_sub(range.start).max(0) as usize,
+    pub fn line(&self, byte: usize) -> (usize, usize) {
+        let line = self
+            .lines
+            .partition_point(|offset| *offset <= byte)
+            .saturating_sub(1);
+        (line + 1, self.lines.get(line).copied().unwrap_or(0))
     }
 }
-#[repr(C)]
-struct FindText {
-    range: CharRange,
-    text: *const u16,
-    result: CharRange,
-}
-pub unsafe fn selection(edit: HWND) -> CharRange {
-    let mut range = CharRange::default();
-    unsafe {
-        SendMessageW(edit, EM_EXGETSEL, 0, &mut range as *mut _ as isize);
-    }
-    range
-}
-pub unsafe fn select(edit: HWND, range: CharRange) {
-    unsafe {
-        SendMessageW(edit, EM_EXSETSEL, 0, &range as *const _ as isize);
-    }
-}
-pub unsafe fn find(
-    edit: HWND,
-    query: &str,
-    start: i32,
-    end: i32,
-    backwards: bool,
-    case: bool,
-) -> Option<CharRange> {
-    if query.is_empty() {
-        return None;
-    }
-    let query: Vec<u16> = query.encode_utf16().chain(Some(0)).collect();
-    let mut request = FindText {
-        range: CharRange { start, end },
-        text: query.as_ptr(),
-        result: CharRange::default(),
-    };
-    let flags = if backwards { 0 } else { 1 } | if case { 4 } else { 0 }; // FR_DOWN, FR_MATCHCASE
-    let found =
-        unsafe { SendMessageW(edit, EM_FINDTEXTEXW, flags, &mut request as *mut _ as isize) };
-    (found >= 0).then_some(request.result)
-}
-
-pub unsafe fn each_match(
-    edit: HWND,
-    query: &str,
-    case: bool,
-    mut visit: impl FnMut(CharRange),
-) -> usize {
-    if query.is_empty() {
-        return 0;
-    }
-    let query: Vec<u16> = query.encode_utf16().chain(Some(0)).collect();
-    let mut request = FindText {
-        range: CharRange { start: 0, end: -1 },
-        text: query.as_ptr(),
-        result: CharRange::default(),
-    };
-    let mut count = 0;
-    loop {
-        let found = unsafe {
-            SendMessageW(
-                edit,
-                EM_FINDTEXTEXW,
-                1 | if case { 4 } else { 0 },
-                &mut request as *mut _ as isize,
-            )
-        };
-        if found < 0 || request.result.end <= request.range.start {
-            break;
-        }
-        visit(request.result);
-        count += 1;
-        request.range.start = request.result.end;
-    }
-    count
-}
-
-/// RichEdit search offsets count UTF-16 code units and one CR per paragraph.
-pub fn replace_ranges(text: &str, ranges: &[CharRange], replacement: &str) -> String {
-    let mut units: Vec<u16> = text
-        .replace("\r\n", "\r")
-        .replace('\n', "\r")
-        .encode_utf16()
-        .collect();
-    let replacement: Vec<u16> = replacement.encode_utf16().collect();
-    for range in ranges.iter().rev() {
-        units.splice(
-            range.start as usize..range.end as usize,
-            replacement.iter().copied(),
-        );
-    }
-    String::from_utf16_lossy(&units)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn replacing_preserves_unicode_and_paragraph_offsets() {
-        let text = "🙂 가나다\r\nABC 가나다";
-        let ranges = [
-            CharRange { start: 3, end: 6 },
-            CharRange { start: 11, end: 14 },
-        ];
-        assert_eq!(replace_ranges(text, &ranges, "끝"), "🙂 끝\rABC 끝");
-        assert_eq!(replace_ranges(text, &ranges, ""), "🙂 \rABC ");
+pub fn paragraph_range(text: &str, range: std::ops::Range<usize>) -> CharRange {
+    CharRange {
+        start: paragraph_units(&text[..range.start]),
+        end: paragraph_units(&text[..range.end]),
     }
 }

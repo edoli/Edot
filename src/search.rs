@@ -1,14 +1,12 @@
-//! Shared regular expression semantics and RichEdit UTF-16 paragraph coordinates.
-use crate::editing::{self, CharRange};
+//! Shared literal/regex search with stable UTF-16 paragraph coordinates.
+use crate::editing::CharRange;
 use regex_lite::{Regex, RegexBuilder};
-use std::rc::Rc;
-use windows_sys::Win32::Foundation::HWND;
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub enum Pattern {
-    Literal { query: Rc<str>, case: bool },
-    Regex(Rc<Regex>),
+    Literal { query: Arc<str>, case: bool },
+    Regex(Arc<Regex>),
 }
 
 #[derive(Default)]
@@ -65,14 +63,6 @@ impl<'a> Positions<'a> {
     }
 }
 
-pub unsafe fn editor_text(edit: HWND) -> String {
-    unsafe {
-        let mut units = vec![0; GetWindowTextLengthW(edit).max(0) as usize + 1];
-        let length = GetWindowTextW(edit, units.as_mut_ptr(), units.len() as i32);
-        String::from_utf16_lossy(&units[..length.max(0) as usize])
-    }
-}
-
 impl Pattern {
     pub fn compile(query: &str, case: bool, regex: bool) -> Result<Self, String> {
         if !regex {
@@ -86,7 +76,7 @@ impl Pattern {
             .multi_line(true)
             .size_limit(256 * 1024)
             .build()
-            .map(|regex| Self::Regex(Rc::new(regex)))
+            .map(|regex| Self::Regex(Arc::new(regex)))
             .map_err(|error| {
                 format!(
                     "정규식 오류: {}",
@@ -95,10 +85,13 @@ impl Pattern {
             })
     }
 
-    /// Only used for Regex. UTF-8 matches are mapped in one sequential pass.
+    /// UTF-8 matches are mapped in one sequential pass without a per-character table.
     pub fn visit_text(&self, text: &str, mut visit: impl FnMut(CharRange) -> bool) -> usize {
         let Self::Regex(regex) = self else {
-            return 0;
+            let Self::Literal { query, case } = self else {
+                unreachable!()
+            };
+            return visit_literal(text, query, *case, visit);
         };
         let text = normalized(text);
         let mut positions = Positions::new(&text);
@@ -112,40 +105,18 @@ impl Pattern {
         count
     }
 
-    pub unsafe fn find_editor(
-        &self,
-        edit: HWND,
-        start: i32,
-        end: i32,
-        backwards: bool,
-        skip_empty: bool,
-    ) -> Option<CharRange> {
-        unsafe {
-            if let Self::Literal { query, case } = self {
-                return editing::find(edit, query, start, end, backwards, *case);
-            }
-            let mut found = None;
-            self.visit_text(&editor_text(edit), |range| {
-                let inside = if backwards {
-                    range.start >= end && range.end <= start
-                } else {
-                    range.start >= start && (end < 0 || range.end <= end)
-                };
-                if inside && !(skip_empty && range.start == start && range.end == start) {
-                    found = Some(range);
-                    if !backwards {
-                        return false;
-                    }
-                }
-                !backwards || range.start <= start
-            });
-            found
-        }
-    }
-
     pub fn edits_text(&self, text: &str, replacement: &str) -> Vec<Edit> {
         let Self::Regex(regex) = self else {
-            return Vec::new();
+            let Self::Literal { query, case } = self else {
+                unreachable!()
+            };
+            return literal_ranges(text, query, *case)
+                .into_iter()
+                .map(|range| Edit {
+                    range,
+                    replacement: replacement.to_owned(),
+                })
+                .collect();
         };
         let text = normalized(text);
         let mut positions = Positions::new(&text);
@@ -162,40 +133,69 @@ impl Pattern {
             })
             .collect()
     }
+}
 
-    pub unsafe fn replacement_editor(
-        &self,
-        edit: HWND,
-        range: CharRange,
-        replacement: &str,
-    ) -> Option<String> {
-        unsafe {
-            if let Self::Literal { query, case } = self {
-                return (range.end > range.start
-                    && editing::find(edit, query, range.start, range.end, false, *case)
-                        == Some(range))
-                .then(|| replacement.to_owned());
+/// Lowercase with original character boundaries, preserving Unicode offsets.
+fn literal_ranges(text: &str, query: &str, case: bool) -> Vec<CharRange> {
+    let mut ranges = vec![];
+    visit_literal(text, query, case, |range| {
+        ranges.push(range);
+        true
+    });
+    ranges
+}
+
+fn visit_literal(
+    text: &str,
+    query: &str,
+    case: bool,
+    mut visit: impl FnMut(CharRange) -> bool,
+) -> usize {
+    if query.is_empty() {
+        return 0;
+    }
+    let text = normalized(text);
+    let query = normalized(query);
+    if case {
+        let mut positions = Positions::new(&text);
+        let mut count = 0;
+        for (at, hit) in text.match_indices(&query) {
+            count += 1;
+            if !visit(positions.range(at, at + hit.len())) {
+                break;
             }
-            let Self::Regex(regex) = self else {
-                return None;
-            };
-            let text = normalized(&editor_text(edit));
-            let mut positions = Positions::new(&text);
-            for captures in regex.captures_iter(&text) {
-                let hit = captures.get(0).unwrap();
-                let found = positions.range(hit.start(), hit.end());
-                if found == range {
-                    let mut expanded = String::new();
-                    captures.expand(replacement, &mut expanded);
-                    return Some(expanded);
-                }
-                if found.start > range.start {
-                    break;
-                }
+        }
+        return count;
+    }
+    let folded: String = text.chars().flat_map(char::to_lowercase).collect();
+    let mut chars = text.chars();
+    let mut byte = 0;
+    let mut units = 0;
+    let query: String = query.chars().flat_map(char::to_lowercase).collect();
+    let mut count = 0;
+    for (at, hit) in folded.match_indices(&query) {
+        let mut bounds = [0; 2];
+        let mut valid = true;
+        for (index, target) in [at, at + hit.len()].into_iter().enumerate() {
+            while byte < target {
+                let ch = chars.next().expect("folded text retains source boundaries");
+                byte += ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+                units += ch.len_utf16() as i32;
             }
-            None
+            valid &= byte == target;
+            bounds[index] = units;
+        }
+        if valid {
+            count += 1;
+            if !visit(CharRange {
+                start: bounds[0],
+                end: bounds[1],
+            }) {
+                break;
+            }
         }
     }
+    count
 }
 
 /// Preserve source line endings outside replacement ranges, including closed memo files.
@@ -231,6 +231,43 @@ pub fn apply_edits(text: &str, edits: &[Edit]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn literal_unicode_boundaries_line_endings_and_early_stop() {
+        let p = Pattern::compile("i\u{307}", false, false).unwrap();
+        let mut ranges = vec![];
+        p.visit_text("🙂İ\r\ni\u{307}", |range| {
+            ranges.push(range);
+            true
+        });
+        assert_eq!(
+            ranges,
+            [
+                CharRange { start: 2, end: 3 },
+                CharRange { start: 4, end: 6 }
+            ]
+        );
+        assert_eq!(
+            Pattern::compile("i", false, false)
+                .unwrap()
+                .visit_text("İI", |_| true),
+            1
+        );
+        assert_eq!(
+            Pattern::compile("a", false, false)
+                .unwrap()
+                .visit_text("aAaA", |_| false),
+            1
+        );
+        assert_eq!(
+            apply_edits(
+                "한글\r\n한글",
+                &Pattern::compile("한글", true, false)
+                    .unwrap()
+                    .edits_text("한글\r\n한글", "$1")
+            ),
+            "$1\r\n$1"
+        );
+    }
     #[test]
     fn regex_coordinates_captures_and_mixed_paragraphs() {
         let pattern = Pattern::compile(r"(?<word>한글)(\d+)", true, true).unwrap();

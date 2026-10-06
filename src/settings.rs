@@ -126,6 +126,9 @@ fn system_dark() -> bool {
 }
 
 /// Called only on the first visit to settings; no font enumeration at startup.
+///
+/// # Safety
+/// `hwnd` must be null or a valid window handle on the calling UI thread.
 pub unsafe fn installed_fonts(hwnd: HWND) -> Vec<String> {
     unsafe extern "system" fn collect(
         font: *const LOGFONTW,
@@ -156,29 +159,6 @@ pub unsafe fn installed_fonts(hwnd: HWND) -> Vec<String> {
     names.sort_unstable();
     names.dedup();
     names
-}
-
-#[derive(Clone, Copy)]
-pub struct Panel {
-    pub host: HWND,
-    pub theme: HWND,
-    pub font: HWND,
-    pub size: HWND,
-    pub wrap: HWND,
-    pub close: HWND,
-    pub theme_label: HWND,
-    pub font_label: HWND,
-    pub size_label: HWND,
-}
-
-impl Panel {
-    pub fn dropdown(self, id: usize) -> Option<HWND> {
-        [self.theme, self.font, self.size]
-            .into_iter()
-            .find(|&control| unsafe {
-                windows_sys::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(control) as usize == id
-            })
-    }
 }
 
 #[cfg(test)]

@@ -1,30 +1,6 @@
-use crate::editing::{self, CharRange};
+use crate::editing::CharRange;
 use crate::model::replace_file;
-use std::{collections::HashSet, fs, io, ops::Range, path::PathBuf, ptr::null_mut, rc::Rc};
-use windows_sys::Win32::Foundation::HWND;
-use windows_sys::Win32::UI::WindowsAndMessaging::*;
-
-/// Hidden until styled and laid out; reused when switching sidebar modes.
-#[derive(Clone, Copy)]
-pub struct Panel {
-    pub host: HWND,
-    pub find: HWND,
-    pub replace: HWND,
-    pub buttons: [HWND; 9], // case, previous, next, close, regex, all, disclosure, refresh, collapse
-}
-pub fn message_y(replace: bool, _narrow: bool) -> i32 {
-    if !replace { 64 } else { 98 }
-}
-
-pub fn message_height(message: &str) -> i32 {
-    message.lines().count().max(1) as i32 * 18 + 8
-}
-
-pub const FIELD_LEFT: i32 = 26;
-pub const FIND_TOP: i32 = 28;
-pub const REPLACE_TOP: i32 = 62;
-pub const FIELD_HEIGHT: i32 = 30;
-
+use std::{collections::HashSet, fs, io, ops::Range, path::PathBuf, sync::Arc};
 // Bound interactive result memory; replacement still considers every match.
 pub const MAX_RESULTS: usize = 20_000;
 pub const ROW_HEIGHT: i32 = 26;
@@ -34,7 +10,7 @@ pub struct Match {
     pub range: CharRange,
     pub line: usize,
     pub column: usize,
-    pub preview: Rc<str>,
+    pub preview: Arc<str>,
     pub highlight: Range<usize>, // UTF-8 byte boundaries in the preview
 }
 #[derive(Clone, Debug)]
@@ -79,7 +55,7 @@ fn match_previews(text: &str, ranges: &[CharRange]) -> Vec<Match> {
     let mut line = 1;
     let mut line_start = 0;
     let mut line_units = 0;
-    let mut cached: Option<(usize, usize, Rc<str>)> = None;
+    let mut cached: Option<(usize, usize, Arc<str>)> = None;
     let mut cached_line_end = (usize::MAX, 0);
     let mut matches = Vec::with_capacity(ranges.len());
     for &range in ranges {
@@ -135,9 +111,9 @@ fn match_previews(text: &str, ranges: &[CharRange]) -> Vec<Match> {
             && *a == excerpt_start
             && *b == excerpt_end
         {
-            Rc::clone(preview)
+            Arc::clone(preview)
         } else {
-            let preview: Rc<str> = format!(
+            let preview: Arc<str> = format!(
                 "{leading}{}{}",
                 normalized[excerpt_start..excerpt_end].replace('\t', " "),
                 if excerpt_end < cached_line_end.1 {
@@ -147,7 +123,7 @@ fn match_previews(text: &str, ranges: &[CharRange]) -> Vec<Match> {
                 }
             )
             .into();
-            cached = Some((excerpt_start, excerpt_end, Rc::clone(&preview)));
+            cached = Some((excerpt_start, excerpt_end, Arc::clone(&preview)));
             preview
         };
         let highlight = leading.len() + start - excerpt_start
@@ -163,112 +139,24 @@ fn match_previews(text: &str, ranges: &[CharRange]) -> Vec<Match> {
     matches
 }
 
-pub struct Job {
-    pub pattern: crate::search::Pattern,
-    pub ids: Vec<u64>,
-    pub next: usize,
-    pub rows: Vec<ResultRow>,
-    pub errors: usize,
-    pub displayed: usize,
-}
-
-/// One unshown, plain-text RichEdit shares the in-file search semantics.
-pub struct Scanner(HWND);
-impl Scanner {
-    pub fn scan_pattern(
-        &mut self,
-        id: u64,
-        text: &str,
-        pattern: &crate::search::Pattern,
-        limit: usize,
-    ) -> Option<ResultRow> {
-        if let crate::search::Pattern::Literal { query, case } = pattern {
-            return self.scan(id, text, query, *case, limit);
+pub fn scan(
+    id: u64,
+    text: &str,
+    pattern: &crate::search::Pattern,
+    limit: usize,
+) -> Option<ResultRow> {
+    let mut ranges = Vec::new();
+    let count = pattern.visit_text(text, |range| {
+        if ranges.len() < limit {
+            ranges.push(range);
         }
-        let mut ranges = Vec::new();
-        let count = pattern.visit_text(text, |range| {
-            if ranges.len() < limit {
-                ranges.push(range);
-            }
-            true
-        });
-        (count > 0).then(|| ResultRow {
-            id,
-            count,
-            matches: match_previews(text, &ranges),
-        })
-    }
-    pub fn clear(&mut self) {
-        unsafe {
-            SetWindowTextW(self.0, windows_sys::w!(""));
-        }
-    }
-    pub fn new() -> io::Result<Self> {
-        unsafe {
-            let edit = CreateWindowExW(
-                0,
-                windows_sys::w!("RICHEDIT50W"),
-                windows_sys::w!(""),
-                WS_POPUP | ES_MULTILINE as u32,
-                0,
-                0,
-                0,
-                0,
-                null_mut(),
-                null_mut(),
-                null_mut(),
-                null_mut(),
-            );
-            if edit.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            SendMessageW(edit, editing::EM_SETTEXTMODE, 1, 0);
-            SendMessageW(edit, WM_USER + 53, 0, 0x7fff_ffff);
-            Ok(Self(edit))
-        }
-    }
-
-    pub fn ranges(&mut self, text: &str, query: &str, case: bool) -> Vec<CharRange> {
-        unsafe {
-            let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-            SetWindowTextW(self.0, text.as_ptr());
-            let mut ranges = Vec::new();
-            editing::each_match(self.0, query, case, |range| ranges.push(range));
-            ranges
-        }
-    }
-
-    pub fn scan(
-        &mut self,
-        id: u64,
-        text: &str,
-        query: &str,
-        case: bool,
-        limit: usize,
-    ) -> Option<ResultRow> {
-        unsafe {
-            let units: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-            SetWindowTextW(self.0, units.as_ptr());
-            let mut ranges = Vec::new();
-            let count = editing::each_match(self.0, query, case, |range| {
-                if ranges.len() < limit {
-                    ranges.push(range);
-                }
-            });
-            (count > 0).then(|| ResultRow {
-                id,
-                count,
-                matches: match_previews(text, &ranges),
-            })
-        }
-    }
-}
-impl Drop for Scanner {
-    fn drop(&mut self) {
-        unsafe {
-            DestroyWindow(self.0);
-        }
-    }
+        true
+    });
+    (count > 0).then(|| ResultRow {
+        id,
+        count,
+        matches: match_previews(text, &ranges),
+    })
 }
 
 /// Map RichEdit paragraph/UTF-16 positions back to original UTF-8 without
@@ -370,7 +258,7 @@ mod tests {
         for hit in &matches {
             assert_eq!(&hit.preview[hit.highlight.clone()], "needle");
         }
-        assert!(Rc::ptr_eq(&matches[0].preview, &matches[1].preview));
+        assert!(Arc::ptr_eq(&matches[0].preview, &matches[1].preview));
         let groups = [ResultRow {
             id: 7,
             count: 4,
@@ -406,30 +294,20 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "opt-in hidden RichEdit performance measurement"]
+    #[ignore = "opt-in pure search performance measurement"]
     fn global_search_preview_cost() {
-        unsafe {
-            assert!(
-                !windows_sys::Win32::System::LibraryLoader::LoadLibraryW(windows_sys::w!(
-                    "Msftedit.dll"
-                ))
-                .is_null()
-            );
-        }
-        let mut scanner = Scanner::new().unwrap();
+        let pattern = crate::search::Pattern::compile("needle", false, false).unwrap();
         for lines in [200, 5000, 15000] {
             let text = "🙂 needle needle\r\n".repeat(lines);
             let mut times = Vec::new();
             for _ in 0..5 {
                 let start = std::time::Instant::now();
-                let group = scanner
-                    .scan(1, &text, "needle", false, MAX_RESULTS)
-                    .unwrap();
+                let group = scan(1, &text, &pattern, MAX_RESULTS).unwrap();
                 times.push(start.elapsed().as_secs_f64() * 1000.0);
                 assert_eq!(group.count, lines * 2);
                 assert_eq!(group.matches.len(), (lines * 2).min(MAX_RESULTS));
                 if group.matches.len() > 1 {
-                    assert!(Rc::ptr_eq(
+                    assert!(Arc::ptr_eq(
                         &group.matches[0].preview,
                         &group.matches[1].preview
                     ));
