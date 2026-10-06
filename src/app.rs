@@ -6,7 +6,7 @@ use crate::settings::{self, Panel, Settings, ThemeMode};
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme};
 use crate::tooltip::Tooltip;
-use crate::{datetime, editing, global_search, search, settings_controls, startup, ui};
+use crate::{datetime, editing, global_search, search, settings_controls, splitter, startup, ui};
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -262,9 +262,6 @@ struct App {
     loading: bool,
     sidebar_width: i32,
     sidebar_visible: bool,
-    resizing: bool,
-    splitter_hover: Cell<bool>,
-    resize_offset: i32,
     dragging: Option<u64>,
     drag_sources: Rc<Vec<u64>>,
     selection: Selection,
@@ -1183,112 +1180,28 @@ unsafe extern "system" fn control_subclass(
     }
 }
 
-unsafe extern "system" fn splitter_proc(
+unsafe fn paint_sidebar_splitter(
     hwnd: HWND,
-    msg: u32,
-    wp: WPARAM,
-    lp: LPARAM,
-    id: usize,
-    _: usize,
-) -> LRESULT {
+    dc: HDC,
+    axis: splitter::Axis,
+    feedback: splitter::Feedback,
+) {
     unsafe {
-        match msg {
-            WM_ERASEBKGND => return 1,
-            WM_PAINT => {
-                ui::paint_window(hwnd, |dc| {
-                    ui::with_view(|view| view.paint_splitter(hwnd, dc))
-                });
-                return 0;
-            }
-            WM_PRINT => return DefWindowProcW(hwnd, msg, wp, lp),
-            WM_PRINTCLIENT => {
-                let saved = SaveDC(wp as HDC);
-                ui::with_view(|view| view.paint_splitter(hwnd, wp as HDC));
-                RestoreDC(wp as HDC, saved);
-                return 0;
-            }
-            WM_SETCURSOR => {
-                SetCursor(LoadCursorW(null_mut(), IDC_SIZEWE));
-                return 1;
-            }
-            WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_LBUTTONUP => {
-                let mut local = RECT::default();
-                GetClientRect(hwnd, &mut local);
-                let mut point = POINT {
-                    x: point_x(lp),
-                    y: point_y(lp),
-                };
-                let inside = PtInRect(&local, point) != 0;
-                MapWindowPoints(hwnd, GetParent(hwnd), &mut point, 1);
-                with_app(|app| {
-                    app.set_splitter_hover(inside);
-                    match msg {
-                        WM_LBUTTONDOWN => {
-                            let mut area = RECT::default();
-                            GetClientRect(app.hwnd, &mut area);
-                            app.resize_offset = point.x - app.sidebar_edge(area.right);
-                            app.resizing = true;
-                            app.tooltip.dismiss();
-                            app.publish_view();
-                            SetCapture(hwnd);
-                            InvalidateRect(hwnd, null(), 0);
-                        }
-                        WM_MOUSEMOVE if app.resizing => {
-                            let width = ((point.x - app.resize_offset) * 96
-                                + app.theme.dpi as i32 / 2)
-                                / app.theme.dpi as i32;
-                            let width = width.clamp(150, 600);
-                            if width != app.sidebar_width {
-                                app.sidebar_width = width;
-                                app.layout();
-                            }
-                        }
-                        WM_LBUTTONUP if app.resizing => {
-                            app.resizing = false;
-                            app.publish_view();
-                            if GetCapture() == hwnd {
-                                ReleaseCapture();
-                            }
-                            InvalidateRect(hwnd, null(), 0);
-                        }
-                        _ => {}
-                    }
-                });
-                if msg == WM_MOUSEMOVE {
-                    let mut track = TRACKMOUSEEVENT {
-                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE,
-                        hwndTrack: hwnd,
-                        dwHoverTime: 0,
-                    };
-                    TrackMouseEvent(&mut track);
-                }
-                return 0;
-            }
-            WM_MOUSELEAVE => {
-                with_app(|app| app.set_splitter_hover(false));
-                return 0;
-            }
-            WM_CAPTURECHANGED | WM_CANCELMODE => {
-                with_app(|app| {
-                    app.resizing = false;
-                    app.set_splitter_hover(false);
-                    app.publish_view();
-                    if GetCapture() == hwnd {
-                        ReleaseCapture();
-                    }
-                    InvalidateRect(hwnd, null(), 0);
-                });
-                return 0;
-            }
-            WM_NCDESTROY => {
-                ui::release_buffer(hwnd);
-                RemoveWindowSubclass(hwnd, Some(splitter_proc), id);
+        ui::with_view(|view| view.paint_sidebar_splitter(hwnd, dc, axis, feedback));
+    }
+}
+
+unsafe fn resize_sidebar(_: HWND, event: splitter::Event) {
+    with_app(|app| unsafe {
+        match event {
+            splitter::Event::Begin => app.tooltip.dismiss(),
+            splitter::Event::Resize(width) if width != app.sidebar_width => {
+                app.sidebar_width = width;
+                app.layout();
             }
             _ => {}
         }
-        DefSubclassProc(hwnd, msg, wp, lp)
-    }
+    });
 }
 
 impl App {
@@ -1328,7 +1241,18 @@ impl App {
                 0,
                 133,
             );
-            SetWindowSubclass(control, Some(splitter_proc), 1, 0);
+            splitter::attach(
+                control,
+                splitter::Config {
+                    axis: splitter::Axis::Horizontal,
+                    value: 260,
+                    min: 150,
+                    max: 600,
+                    dpi: GetDpiForWindow(hwnd),
+                },
+                paint_sidebar_splitter,
+                resize_sidebar,
+            );
             control
         };
         let tree_host = unsafe {
@@ -1656,9 +1580,6 @@ impl App {
             loading: false,
             sidebar_width: 260,
             sidebar_visible: true,
-            resizing: false,
-            splitter_hover: Cell::new(false),
-            resize_offset: 0,
             dragging: None,
             drag_sources: Rc::new(Vec::new()),
             selection: Selection::default(),
@@ -2254,13 +2175,6 @@ impl App {
         }
     }
 
-    unsafe fn set_splitter_hover(&self, hover: bool) {
-        if self.splitter_hover.replace(hover) != hover {
-            self.publish_view();
-            unsafe { InvalidateRect(self.splitter, null(), 0) };
-        }
-    }
-
     fn publish_view(&self) {
         if self.view_tabs.borrow().len() != self.open.len() {
             *self.view_tabs.borrow_mut() = Rc::new(
@@ -2318,8 +2232,6 @@ impl App {
             global_focus: self.global_focus,
             global_visible: Rc::clone(&self.global_visible),
             global_collapsed: Rc::clone(&self.global_collapsed),
-            resizing: self.resizing,
-            splitter_hover: self.splitter_hover.get(),
             tree_hover: self.tree_hover,
             dragging: self.dragging,
             drag_sources: Rc::clone(&self.drag_sources),
@@ -2395,6 +2307,16 @@ impl App {
             GetClientRect(self.hwnd, &mut area);
             let (w, h) = (area.right, area.bottom);
             let left = self.sidebar_edge(w);
+            splitter::configure(
+                self.splitter,
+                splitter::Config {
+                    axis: splitter::Axis::Horizontal,
+                    value: (left * 96 + self.theme.dpi as i32 / 2) / self.theme.dpi as i32,
+                    min: 150,
+                    max: 600,
+                    dpi: self.theme.dpi,
+                },
+            );
             let content_x = if self.sidebar_visible { left + 1 } else { 0 };
             let tabs_x = content_x + if self.sidebar_visible { 0 } else { p(42) };
             let available = (w - tabs_x - p(78)).max(1);
@@ -2419,9 +2341,9 @@ impl App {
             let mut positions = vec![
                 (
                     self.splitter,
-                    left - p(4),
+                    left - p(splitter::HIT_RADIUS),
                     p(36),
-                    p(4) * 2 + 1,
+                    p(splitter::HIT_RADIUS) * 2 + 1,
                     (h - p(36)).max(0),
                 ),
                 (
@@ -2591,7 +2513,7 @@ impl App {
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW,
                 );
             } else {
-                self.set_splitter_hover(false);
+                splitter::cancel(self.splitter);
             }
             self.layout_settings();
             RedrawWindow(
@@ -2601,7 +2523,11 @@ impl App {
                 RDW_INVALIDATE
                     | RDW_ALLCHILDREN
                     | RDW_NOERASE
-                    | if self.resizing { RDW_UPDATENOW } else { 0 },
+                    | if splitter::interacting(self.splitter) {
+                        RDW_UPDATENOW
+                    } else {
+                        0
+                    },
             );
         }
     }
@@ -3938,11 +3864,12 @@ impl App {
         self.tree_press = None;
         self.drop_target = None;
         self.tree_hover = None;
-        self.resizing = false;
-        unsafe { self.set_splitter_hover(false) };
         self.publish_view();
         unsafe {
             self.cancel_tab_drag();
+            if splitter::interacting(GetCapture()) {
+                splitter::cancel(GetCapture());
+            }
             KillTimer(self.hwnd, DRAG_SCROLL_TIMER);
             for control in [
                 self.splitter,
@@ -4367,7 +4294,7 @@ impl App {
 
     unsafe fn toggle_sidebar(&mut self) {
         unsafe {
-            if self.resizing {
+            if splitter::interacting(self.splitter) {
                 self.cancel_interaction();
             }
             self.sidebar_visible = !self.sidebar_visible;
@@ -5742,8 +5669,6 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     } else {
                         IDC_NO
                     })
-                } else if view.resizing {
-                    Some(IDC_SIZEWE)
                 } else {
                     None
                 };
@@ -5969,7 +5894,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_CAPTURECHANGED | WM_CANCELMODE => {
             with_app(|app| unsafe {
-                if app.resizing || app.dragging.is_some() {
+                if splitter::interacting(GetCapture()) || app.dragging.is_some() {
                     app.cancel_interaction();
                 }
             });
@@ -6156,7 +6081,7 @@ fn shortcut(msg: &MSG) -> bool {
         } else if key == VK_ESCAPE as u32
             && (app.dragging.is_some()
                 || app.tab_drag.is_some()
-                || app.resizing
+                || splitter::interacting(GetCapture())
                 || [
                     app.editor_scroll[0],
                     app.editor_scroll[1],
@@ -7388,6 +7313,221 @@ mod interaction_tests {
     use windows_sys::Win32::System::StationsAndDesktops::*;
     use windows_sys::Win32::System::SystemServices::MK_LBUTTON;
 
+    thread_local! {
+        static SPLITTER_EVENTS: RefCell<Vec<(usize, splitter::Event)>> = const {RefCell::new(Vec::new())};
+    }
+
+    unsafe fn record_splitter_event(hwnd: HWND, event: splitter::Event) {
+        SPLITTER_EVENTS.with(|events| events.borrow_mut().push((hwnd as usize, event)));
+    }
+
+    unsafe fn paint_test_splitter(
+        hwnd: HWND,
+        dc: HDC,
+        axis: splitter::Axis,
+        feedback: splitter::Feedback,
+    ) {
+        unsafe {
+            let mut area = RECT::default();
+            GetClientRect(hwnd, &mut area);
+            ui::with_view(|view| {
+                theme::fill(dc, area, view.theme.colors.white);
+                splitter::paint(dc, area, &view.theme, axis, feedback);
+            });
+        }
+    }
+
+    unsafe fn verify_shared_splitters() {
+        unsafe {
+            let (parent, dpi, other, blue) = with_app_result(|app| {
+                (app.hwnd, app.theme.dpi, app.splitter, app.theme.colors.blue)
+            });
+            let focus = GetFocus();
+            let radius = (splitter::HIT_RADIUS * dpi as i32 + 48) / 96;
+            let thickness = radius * 2 + 1;
+            let first = child(
+                parent,
+                windows_sys::w!("STATIC"),
+                "test width",
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_NOTIFY,
+                0,
+                901,
+            );
+            let second = child(
+                parent,
+                windows_sys::w!("STATIC"),
+                "test height",
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_NOTIFY,
+                0,
+                902,
+            );
+            for (control, axis, x, y, width, height) in [
+                (first, splitter::Axis::Horizontal, 700, 100, thickness, 200),
+                (second, splitter::Axis::Vertical, 500, 350, 200, thickness),
+            ] {
+                let config = splitter::Config {
+                    axis,
+                    value: 120,
+                    min: 80,
+                    max: 200,
+                    dpi,
+                };
+                assert!(splitter::attach(
+                    control,
+                    config,
+                    paint_test_splitter,
+                    record_splitter_event
+                ));
+                assert!(!splitter::attach(
+                    control,
+                    config,
+                    paint_test_splitter,
+                    record_splitter_event
+                ));
+                SetWindowPos(control, HWND_TOP, x, y, width, height, SWP_NOACTIVATE);
+                let point = if axis == splitter::Axis::Horizontal {
+                    POINT {
+                        x: radius * 2,
+                        y: 20,
+                    }
+                } else {
+                    POINT {
+                        x: 20,
+                        y: radius * 2,
+                    }
+                };
+                let grab = search_mouse_coordinates(control, point);
+                SendMessageW(control, WM_MOUSEMOVE, 0, grab);
+                assert!(!splitter::feedback(other).hovered);
+                let neighbor = if control == first { second } else { first };
+                assert_eq!(splitter::feedback(neighbor), splitter::Feedback::default());
+                let screen = GetDC(control);
+                let dc = CreateCompatibleDC(screen);
+                let bitmap = CreateCompatibleBitmap(screen, width, height);
+                let old = SelectObject(dc, bitmap);
+                for print in [WM_PRINTCLIENT, WM_PRINT] {
+                    SendMessageW(control, print, dc as usize, PRF_CLIENT as isize);
+                    let sample = if axis == splitter::Axis::Horizontal {
+                        POINT { x: radius, y: 20 }
+                    } else {
+                        POINT { x: 20, y: radius }
+                    };
+                    assert_eq!(GetPixel(dc, sample.x, sample.y), blue);
+                }
+                assert_eq!(
+                    SendMessageW(control, WM_SETCURSOR, control as usize, HTCLIENT as isize),
+                    1
+                );
+                SPLITTER_EVENTS.with(|events| events.borrow_mut().clear());
+                SendMessageW(control, WM_LBUTTONDOWN, MK_LBUTTON as usize, grab);
+                assert_eq!(GetCapture(), control);
+                SendMessageW(control, WM_MOUSEMOVE, MK_LBUTTON as usize, grab);
+                let delta = 30 * dpi as i32 / 96;
+                let moved = if axis == splitter::Axis::Horizontal {
+                    POINT {
+                        x: point.x + delta,
+                        y: point.y,
+                    }
+                } else {
+                    POINT {
+                        x: point.x,
+                        y: point.y + delta,
+                    }
+                };
+                let coordinates = |point: POINT| {
+                    (point.x as u16 as u32 | ((point.y as u16 as u32) << 16)) as isize
+                };
+                SendMessageW(
+                    control,
+                    WM_MOUSEMOVE,
+                    MK_LBUTTON as usize,
+                    coordinates(moved),
+                );
+                // The owner can move/reconfigure this instance in response to
+                // Resize without affecting its screen anchor or other splitters.
+                let (next_x, next_y) = if axis == splitter::Axis::Horizontal {
+                    (x + delta, y)
+                } else {
+                    (x, y + delta)
+                };
+                SetWindowPos(
+                    control,
+                    null_mut(),
+                    next_x,
+                    next_y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                splitter::configure(
+                    control,
+                    splitter::Config {
+                        value: 150,
+                        ..config
+                    },
+                );
+                let current = search_mouse_coordinates(control, point);
+                SendMessageW(control, WM_MOUSEMOVE, MK_LBUTTON as usize, current);
+                let far = if axis == splitter::Axis::Horizontal {
+                    POINT {
+                        x: point.x + 5000,
+                        y: point.y,
+                    }
+                } else {
+                    POINT {
+                        x: point.x,
+                        y: point.y + 5000,
+                    }
+                };
+                SendMessageW(control, WM_MOUSEMOVE, MK_LBUTTON as usize, coordinates(far));
+                let far = POINT {
+                    x: -far.x,
+                    y: -far.y,
+                };
+                SendMessageW(control, WM_MOUSEMOVE, MK_LBUTTON as usize, coordinates(far));
+                SendMessageW(control, WM_LBUTTONUP, 0, current);
+                assert!(GetCapture().is_null());
+                assert!(splitter::feedback(control).hovered);
+                SPLITTER_EVENTS.with(|events| {
+                    assert_eq!(
+                        *events.borrow(),
+                        vec![
+                            (control as usize, splitter::Event::Begin),
+                            (control as usize, splitter::Event::Resize(150)),
+                            (control as usize, splitter::Event::Resize(200)),
+                            (control as usize, splitter::Event::Resize(80)),
+                            (control as usize, splitter::Event::End),
+                        ]
+                    )
+                });
+                SendMessageW(control, WM_LBUTTONDOWN, MK_LBUTTON as usize, current);
+                SendMessageW(control, WM_CANCELMODE, 0, 0);
+                SendMessageW(control, WM_CANCELMODE, 0, 0);
+                assert_eq!(splitter::feedback(control), splitter::Feedback::default());
+                assert!(GetCapture().is_null());
+                SendMessageW(control, WM_LBUTTONDOWN, MK_LBUTTON as usize, current);
+                // App's Escape dispatcher also cancels another module instance.
+                assert!(shortcut(&MSG {
+                    hwnd: focus,
+                    message: WM_KEYDOWN,
+                    wParam: VK_ESCAPE as usize,
+                    ..Default::default()
+                }));
+                assert!(!splitter::interacting(control));
+                assert!(GetCapture().is_null());
+                assert_eq!(GetFocus(), focus);
+                SelectObject(dc, old);
+                DeleteObject(bitmap);
+                DeleteDC(dc);
+                ReleaseDC(control, screen);
+            }
+            SendMessageW(first, WM_LBUTTONDOWN, MK_LBUTTON as usize, 0);
+            DestroyWindow(first);
+            assert!(GetCapture().is_null());
+            DestroyWindow(second);
+        }
+    }
+
     #[test]
     fn native_selection_tab_drag_and_batch_commands_preserve_editors() {
         unsafe {
@@ -7863,12 +8003,12 @@ mod interaction_tests {
                         app.layout();
                         SetFocus(if search { app.edit } else { app.tree });
                     });
-                    let (radius, y, blue, selected, border) = with_app_result(|app| {
+                    let (radius, y, blue, background, border) = with_app_result(|app| {
                         (
                             app.theme.px(4),
                             app.theme.px(120),
                             app.theme.colors.blue,
-                            app.theme.colors.selected,
+                            app.theme.colors.sidebar,
                             app.theme.colors.border,
                         )
                     });
@@ -7886,7 +8026,7 @@ mod interaction_tests {
                     for message in [WM_PRINTCLIENT, WM_PRINT] {
                         SendMessageW(splitter, message, dc as usize, PRF_CLIENT as isize);
                         assert_eq!(GetPixel(dc, radius, y), blue);
-                        assert_eq!(GetPixel(dc, 0, y), selected);
+                        assert_eq!(GetPixel(dc, 0, y), background);
                     }
                     let focus = GetFocus();
                     SendMessageW(splitter, WM_LBUTTONDOWN, MK_LBUTTON as usize, grab);
@@ -7907,15 +8047,24 @@ mod interaction_tests {
                     SendMessageW(splitter, WM_MOUSELEAVE, 0, 0);
                     SendMessageW(splitter, WM_PRINTCLIENT, dc as usize, PRF_CLIENT as isize);
                     assert_eq!(GetPixel(dc, radius, y), blue);
-                    assert_eq!(GetPixel(dc, radius - 2, y), blue);
+                    assert_eq!(GetPixel(dc, 0, y), background);
                     SendMessageW(splitter, WM_LBUTTONUP, 0, current);
                     assert!(GetCapture().is_null());
+                    assert_eq!(
+                        splitter::feedback(splitter),
+                        splitter::Feedback {
+                            hovered: true,
+                            dragging: false
+                        }
+                    );
                     SendMessageW(splitter, WM_MOUSELEAVE, 0, 0);
                     SendMessageW(splitter, WM_PRINTCLIENT, dc as usize, PRF_CLIENT as isize);
                     assert_eq!(GetPixel(dc, radius, y), border);
                     with_app(|app| {
-                        assert!(!app.resizing);
-                        assert!(!app.splitter_hover.get());
+                        assert_eq!(
+                            splitter::feedback(app.splitter),
+                            splitter::Feedback::default()
+                        );
                     });
                     SendMessageW(splitter, WM_LBUTTONDOWN, MK_LBUTTON as usize, current);
                     assert!(shortcut(&MSG {
@@ -7927,7 +8076,12 @@ mod interaction_tests {
                     assert!(GetCapture().is_null());
                     SendMessageW(splitter, WM_LBUTTONDOWN, MK_LBUTTON as usize, current);
                     ReleaseCapture();
-                    with_app(|app| assert!(!app.resizing && !app.splitter_hover.get()));
+                    with_app(|app| {
+                        assert_eq!(
+                            splitter::feedback(app.splitter),
+                            splitter::Feedback::default()
+                        )
+                    });
                     assert_eq!(GetFocus(), focus);
                     assert_eq!(window_text(editor), content);
                     assert_eq!(editing::selection(editor), selection);
@@ -7943,7 +8097,10 @@ mod interaction_tests {
             with_app(|app| {
                 app.toggle_sidebar();
                 assert_eq!(IsWindowVisible(splitter), 0);
-                assert!(!app.resizing && !app.splitter_hover.get());
+                assert_eq!(
+                    splitter::feedback(app.splitter),
+                    splitter::Feedback::default()
+                );
                 assert!(GetCapture().is_null());
                 app.toggle_sidebar();
                 app.sidebar_width = original_width;
@@ -9591,6 +9748,7 @@ mod interaction_tests {
             });
             verify_edit_features();
             verify_sidebar_splitter();
+            verify_shared_splitters();
             verify_rename();
             click_tree(tree, ids[0], 0, true);
             with_app(|app| {

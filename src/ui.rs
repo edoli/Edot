@@ -101,8 +101,6 @@ pub struct View {
     pub global_focus: Option<crate::global_search::VisibleRow>,
     pub global_visible: Rc<Vec<crate::global_search::VisibleRow>>,
     pub global_collapsed: Rc<HashSet<u64>>,
-    pub resizing: bool,
-    pub splitter_hover: bool,
     pub tree_hover: Option<isize>,
     pub dragging: Option<u64>,
     pub drag_sources: Rc<Vec<u64>>,
@@ -228,14 +226,20 @@ pub unsafe fn paint_window(hwnd: HWND, draw: impl FnOnce(HDC)) {
     }
 }
 impl View {
-    pub unsafe fn paint_splitter(&self, hwnd: HWND, dc: HDC) {
+    pub unsafe fn paint_sidebar_splitter(
+        &self,
+        hwnd: HWND,
+        dc: HDC,
+        axis: crate::splitter::Axis,
+        feedback: crate::splitter::Feedback,
+    ) {
         unsafe {
             let p = |n| self.theme.px(n);
             let mut area = RECT::default();
             let mut parent = RECT::default();
             GetClientRect(hwnd, &mut area);
             GetClientRect(self.hwnd, &mut parent);
-            let edge = p(4);
+            let edge = p(crate::splitter::HIT_RADIUS);
             theme::fill(dc, area, self.theme.colors.sidebar);
             theme::fill(
                 dc,
@@ -260,20 +264,7 @@ impl View {
                 rect(edge + 1, status_top, area.right, status_top + 1),
                 self.theme.colors.border,
             );
-            let radius = if self.resizing || self.splitter_hover {
-                p(1)
-            } else {
-                0
-            };
-            theme::fill(
-                dc,
-                rect(edge - radius, 0, edge + radius + 1, area.bottom),
-                if self.splitter_hover || self.resizing {
-                    self.theme.colors.blue
-                } else {
-                    self.theme.colors.border
-                },
-            );
+            crate::splitter::paint(dc, area, &self.theme, axis, feedback);
         }
     }
 

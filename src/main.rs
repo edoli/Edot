@@ -11,6 +11,7 @@ mod search;
 mod selection;
 mod settings;
 mod settings_controls;
+mod splitter;
 mod startup;
 mod tabs;
 mod theme;
