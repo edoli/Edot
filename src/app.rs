@@ -6,7 +6,7 @@ use crate::settings::{self, Panel, Settings, ThemeMode};
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme};
 use crate::tooltip::Tooltip;
-use crate::{datetime, editing, global_search, settings_controls, startup, ui};
+use crate::{datetime, editing, global_search, search, settings_controls, startup, ui};
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -36,9 +36,11 @@ const ID_GLOBAL_NEXT: usize = 142;
 const ID_GLOBAL_CLOSE: usize = 143;
 const ID_GLOBAL_CASE: usize = 144;
 const ID_GLOBAL_REPLACE: usize = 145;
-const ID_GLOBAL_ONE: usize = 146;
+const ID_GLOBAL_REGEX: usize = 146;
 const ID_GLOBAL_ALL: usize = 147;
 const ID_GLOBAL_DISCLOSURE: usize = 148;
+const ID_GLOBAL_REFRESH: usize = 150;
+const ID_GLOBAL_COLLAPSE: usize = 151;
 const ID_EDIT: usize = 104;
 const ID_TREE: usize = 105;
 const ID_TABS: usize = 106;
@@ -55,6 +57,7 @@ const ID_FIND_PREV: usize = 111;
 const ID_FIND_NEXT: usize = 112;
 const ID_FIND_CLOSE: usize = 113;
 const ID_FIND_CASE: usize = 114;
+const ID_FIND_REGEX: usize = 118;
 const ID_REPLACE_INPUT: usize = 115;
 const ID_REPLACE_ONE: usize = 116;
 const ID_REPLACE_ALL: usize = 117;
@@ -212,6 +215,7 @@ struct App {
     find_next: HWND,
     find_close: HWND,
     find_case: HWND,
+    find_regex: HWND,
     replace_input: HWND,
     replace_one: HWND,
     replace_all: HWND,
@@ -226,14 +230,24 @@ struct App {
     global_rows: Rc<Vec<global_search::ResultRow>>,
     global_offset: Cell<usize>,
     global_hover: Cell<Option<usize>>,
-    global_selected: Option<u64>,
+    global_action_hover: Cell<Option<usize>>,
+    global_replace_pressed: Option<global_search::MatchKey>,
+    global_selected: Option<global_search::MatchKey>,
+    global_focus: Option<global_search::VisibleRow>,
+    global_visible: Rc<Vec<global_search::VisibleRow>>,
+    global_collapsed: Rc<HashSet<u64>>,
     global_job: Option<global_search::Job>,
     global_pending: Option<bool>,
     global_query: String,
     global_case: bool,
+    global_regex: bool,
+    global_pattern: Option<search::Pattern>,
+    global_cache: search::Cache,
     global_ready: bool,
     global_scanner: Option<global_search::Scanner>,
     find_case_sensitive: bool,
+    find_regex_enabled: bool,
+    find_cache: search::Cache,
     find_message: String,
     last_query: String,
     last_match: Option<editing::CharRange>,
@@ -583,22 +597,89 @@ unsafe extern "system" fn global_results_proc(
             }
             WM_LBUTTONDOWN => {
                 with_app(|app| {
-                    let index =
-                        app.global_offset.get() + (point_y(lp).max(0) / app.theme.px(60)) as usize;
-                    app.open_global_result(index);
+                    let point = POINT {
+                        x: point_x(lp),
+                        y: point_y(lp),
+                    };
+                    if let Some((_, _, _, key)) = app.global_action_at(point) {
+                        app.global_replace_pressed = Some(key);
+                        app.publish_view();
+                        SetFocus(hwnd);
+                        SetCapture(hwnd);
+                        InvalidateRect(hwnd, null(), 0);
+                        return;
+                    }
+                    let index = app.global_offset.get()
+                        + (point_y(lp).max(0) / app.theme.px(global_search::ROW_HEIGHT)) as usize;
+                    app.activate_global_row(index);
                     SetFocus(hwnd);
                 });
                 return 0;
             }
+            WM_LBUTTONUP => {
+                with_app(|app| {
+                    let pressed = app.global_replace_pressed.take();
+                    let action = app.global_action_at(POINT {
+                        x: point_x(lp),
+                        y: point_y(lp),
+                    });
+                    if GetCapture() == hwnd {
+                        ReleaseCapture();
+                    }
+                    app.publish_view();
+                    InvalidateRect(hwnd, null(), 0);
+                    if let Some((_, group, hit, key)) = action
+                        && pressed == Some(key)
+                    {
+                        app.replace_global_result(group, hit);
+                    }
+                });
+                return 0;
+            }
+            WM_CAPTURECHANGED | WM_CANCELMODE => {
+                with_app(|app| {
+                    app.global_replace_pressed = None;
+                    app.publish_view();
+                    InvalidateRect(hwnd, null(), 0);
+                });
+            }
             WM_MOUSEMOVE | WM_MOUSELEAVE => {
                 with_app(|app| {
-                    let index =
-                        app.global_offset.get() + (point_y(lp).max(0) / app.theme.px(60)) as usize;
-                    let hover =
-                        (msg == WM_MOUSEMOVE && index < app.global_rows.len()).then_some(index);
-                    if app.global_hover.replace(hover) != hover {
+                    let index = app.global_offset.get()
+                        + (point_y(lp).max(0) / app.theme.px(global_search::ROW_HEIGHT)) as usize;
+                    let mut area = RECT::default();
+                    GetClientRect(hwnd, &mut area);
+                    let point = POINT {
+                        x: point_x(lp),
+                        y: point_y(lp),
+                    };
+                    let hover = (msg == WM_MOUSEMOVE
+                        && PtInRect(&area, point) != 0
+                        && index < app.global_visible.len())
+                    .then_some(index);
+                    let action = if hover.is_some() {
+                        app.global_action_at(point).map(|(index, _, _, _)| index)
+                    } else {
+                        None
+                    };
+                    let action_changed = app.global_action_hover.replace(action) != action;
+                    if app.global_hover.replace(hover) != hover || action_changed {
                         app.publish_view();
                         InvalidateRect(hwnd, null(), 0);
+                    }
+                    if let Some(index) = action {
+                        let top =
+                            app.theme.px(global_search::ROW_HEIGHT
+                                * (index - app.global_offset.get()) as i32);
+                        app.tooltip.hover(
+                            hwnd,
+                            index as u64,
+                            ui::result_replace_bounds(&app.theme, area.right, top),
+                            "이 결과 바꾸기 (Ctrl+Shift+Enter)",
+                            point,
+                        );
+                    } else {
+                        app.tooltip.hide();
                     }
                 });
                 if msg == WM_MOUSEMOVE {
@@ -612,31 +693,14 @@ unsafe extern "system" fn global_results_proc(
                 }
                 return 0;
             }
-            WM_KEYDOWN if matches!(wp as u16, VK_UP | VK_DOWN | VK_RETURN) => {
+            WM_KEYDOWN
+                if matches!(
+                    wp as u16,
+                    VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT | VK_HOME | VK_END | VK_RETURN | VK_SPACE
+                ) =>
+            {
                 with_app(|app| {
-                    if app.global_rows.is_empty() {
-                        return;
-                    }
-                    let current = app
-                        .global_selected
-                        .and_then(|id| app.global_rows.iter().position(|row| row.id == id));
-                    let index = match (current, wp as u16) {
-                        (Some(index), VK_UP) => index.saturating_sub(1),
-                        (Some(index), VK_DOWN) => (index + 1).min(app.global_rows.len() - 1),
-                        (Some(index), _) => index,
-                        (None, _) => 0,
-                    };
-                    let mut range = ScrollRange::default();
-                    ui::with_view(|view| range = view.scroll_range(Kind::Search));
-                    let offset = if index < app.global_offset.get() {
-                        index
-                    } else if index >= app.global_offset.get() + range.page as usize {
-                        index + 1 - range.page as usize
-                    } else {
-                        app.global_offset.get()
-                    };
-                    app.set_scroll(Kind::Search, offset as i32);
-                    app.open_global_result(index);
+                    app.global_result_key(wp as u16);
                     SetFocus(hwnd);
                 });
                 return 0;
@@ -1005,9 +1069,36 @@ unsafe extern "system" fn control_subclass(
             };
             TrackMouseEvent(&mut tracking);
             InvalidateRect(hwnd, null(), 0);
+            if matches!(
+                GetDlgCtrlID(hwnd) as usize,
+                ID_GLOBAL_ALL | ID_GLOBAL_REGEX | ID_FIND_REGEX
+            ) {
+                with_app(|app| {
+                    let mut area = RECT::default();
+                    GetClientRect(hwnd, &mut area);
+                    app.tooltip.hover(
+                        hwnd,
+                        GetDlgCtrlID(hwnd) as u64,
+                        area,
+                        &window_text(hwnd),
+                        POINT {
+                            x: point_x(lp),
+                            y: point_y(lp),
+                        },
+                    );
+                });
+            }
         }
         if msg == WM_MOUSELEAVE || (reference == 1 && (msg == WM_SETFOCUS || msg == WM_KILLFOCUS)) {
             InvalidateRect(hwnd, null(), 0);
+            if reference == 1
+                && matches!(
+                    GetDlgCtrlID(hwnd) as usize,
+                    ID_GLOBAL_ALL | ID_GLOBAL_REGEX | ID_FIND_REGEX
+                )
+            {
+                with_app(|app| app.tooltip.hide());
+            }
         }
         let result = DefSubclassProc(hwnd, msg, wp, lp);
         if reference == 2
@@ -1327,6 +1418,7 @@ impl App {
         let find_next = button("다음", ID_FIND_NEXT);
         let find_close = button("닫기", ID_FIND_CLOSE);
         let find_case = button("대소문자 구분", ID_FIND_CASE);
+        let find_regex = button("정규식 사용", ID_FIND_REGEX);
         let replace_one = button("바꾸기", ID_REPLACE_ONE);
         let replace_all = button("모두 바꾸기", ID_REPLACE_ALL);
         unsafe {
@@ -1335,6 +1427,7 @@ impl App {
                 find_next,
                 find_close,
                 find_case,
+                find_regex,
                 replace_one,
                 replace_all,
             ] {
@@ -1393,6 +1486,7 @@ impl App {
             find_next,
             find_close,
             find_case,
+            find_regex,
             replace_input,
             replace_one,
             replace_all,
@@ -1407,14 +1501,24 @@ impl App {
             global_rows: Rc::new(Vec::new()),
             global_offset: Cell::new(0),
             global_hover: Cell::new(None),
+            global_action_hover: Cell::new(None),
+            global_replace_pressed: None,
             global_selected: None,
+            global_focus: None,
+            global_visible: Rc::new(Vec::new()),
+            global_collapsed: Rc::new(HashSet::new()),
             global_job: None,
             global_pending: None,
             global_query: String::new(),
             global_case: false,
+            global_regex: false,
+            global_pattern: None,
+            global_cache: search::Cache::default(),
             global_ready: false,
             global_scanner: None,
             find_case_sensitive: false,
+            find_regex_enabled: false,
+            find_cache: search::Cache::default(),
             find_message: "Enter로 다음 결과를 찾습니다".into(),
             last_query: String::new(),
             last_match: None,
@@ -1536,6 +1640,7 @@ impl App {
                 self.find_input,
                 self.replace_input,
                 self.find_case,
+                self.find_regex,
                 self.find_prev,
                 self.find_next,
                 self.find_close,
@@ -2067,13 +2172,19 @@ impl App {
             global_panel: self.global_panel,
             global_replace: self.global_replace,
             global_case: self.global_case,
+            global_regex: self.global_regex,
             global_message: self.global_message.clone(),
             global_results: self.global_results,
             global_scroll: self.global_scroll,
             global_rows: Rc::clone(&self.global_rows),
             global_offset: self.global_offset.get(),
             global_hover: self.global_hover.get(),
+            global_action_hover: self.global_action_hover.get(),
+            global_replace_pressed: self.global_replace_pressed,
             global_selected: self.global_selected,
+            global_focus: self.global_focus,
+            global_visible: Rc::clone(&self.global_visible),
+            global_collapsed: Rc::clone(&self.global_collapsed),
             resizing: self.resizing,
             tree_hover: self.tree_hover,
             dragging: self.dragging,
@@ -2094,8 +2205,10 @@ impl App {
                 self.find_close,
                 self.replace_one,
                 self.replace_all,
+                self.find_regex,
             ],
             find_case_sensitive: self.find_case_sensitive,
+            find_regex_enabled: self.find_regex_enabled,
             find_message: self.find_message.clone(),
         });
     }
@@ -2380,6 +2493,7 @@ impl App {
                     p(24),
                 ),
                 (self.find_case, width - p(143), p(8), p(28), p(28)),
+                (self.find_regex, width - p(177), p(8), p(28), p(28)),
                 (self.find_prev, width - p(109), p(8), p(28), p(28)),
                 (self.find_next, width - p(75), p(8), p(28), p(28)),
                 (self.find_close, width - p(41), p(8), p(28), p(28)),
@@ -2727,6 +2841,7 @@ impl App {
                     self.global_offset
                         .set(target.clamp(0, range.extent() as i32) as usize);
                     self.global_hover.set(None);
+                    self.global_action_hover.set(None);
                     self.publish_view();
                     InvalidateRect(self.global_results, null(), 0);
                     InvalidateRect(self.global_scroll, null(), 0);
@@ -3866,7 +3981,11 @@ impl App {
             let first_show =
                 self.sidebar_visible && self.find_global && IsWindowVisible(panel.host) == 0;
             let narrow = width < p(230);
-            let header = p(global_search::message_y(self.global_replace, narrow) + 46);
+            let dc = GetDC(panel.host);
+            let message_height =
+                ui::global_message_height(dc, &self.theme, &self.global_message, width);
+            ReleaseDC(panel.host, dc);
+            let header = p(global_search::message_y(self.global_replace, narrow)) + message_height;
             SetWindowPos(
                 panel.host,
                 null_mut(),
@@ -3876,28 +3995,64 @@ impl App {
                 height,
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS,
             );
-            let [case, prev, next, close, one, all, disclosure] = panel.buttons;
+            let [
+                case,
+                prev,
+                next,
+                close,
+                regex,
+                all,
+                disclosure,
+                refresh,
+                collapse,
+            ] = panel.buttons;
             for (hwnd, x, y, w, h) in [
-                (disclosure, p(10), p(4), p(24), p(26)),
-                (case, width - p(112), p(4), p(24), p(26)),
-                (prev, width - p(86), p(4), p(24), p(26)),
-                (next, width - p(60), p(4), p(24), p(26)),
-                (close, width - p(34), p(4), p(24), p(26)),
-                (panel.find, p(18), p(42), width - p(36), p(24)),
-                (panel.replace, p(18), p(88), width - p(36), p(24)),
+                (refresh, width - p(82), p(2), p(22), p(22)),
+                (collapse, width - p(58), p(2), p(22), p(22)),
+                (close, width - p(34), p(2), p(22), p(22)),
                 (
-                    one,
-                    p(12),
-                    p(128),
-                    if narrow { width - p(24) } else { p(80) },
-                    p(30),
+                    disclosure,
+                    p(4),
+                    p(global_search::FIND_TOP + 3),
+                    p(18),
+                    p(24),
+                ),
+                (
+                    case,
+                    width - p(58),
+                    p(global_search::FIND_TOP + 3),
+                    p(22),
+                    p(24),
+                ),
+                (
+                    regex,
+                    width - p(34),
+                    p(global_search::FIND_TOP + 3),
+                    p(22),
+                    p(24),
+                ),
+                (prev, width - p(130), p(2), p(22), p(22)),
+                (next, width - p(106), p(2), p(22), p(22)),
+                (
+                    panel.find,
+                    p(global_search::FIELD_LEFT + 6),
+                    p(global_search::FIND_TOP + 4),
+                    width - p(96),
+                    p(22),
+                ),
+                (
+                    panel.replace,
+                    p(global_search::FIELD_LEFT + 6),
+                    p(global_search::REPLACE_TOP + 4),
+                    width - p(72),
+                    p(22),
                 ),
                 (
                     all,
-                    if narrow { p(12) } else { width - p(118) },
-                    p(if narrow { 162 } else { 128 }),
-                    if narrow { width - p(24) } else { p(106) },
-                    p(30),
+                    width - p(34),
+                    p(global_search::REPLACE_TOP + 3),
+                    p(22),
+                    p(24),
                 ),
                 (
                     self.global_results,
@@ -3924,7 +4079,7 @@ impl App {
                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS,
                 );
             }
-            for hwnd in [panel.replace, one, all] {
+            for hwnd in [panel.replace, all] {
                 ShowWindow(
                     hwnd,
                     if self.global_replace {
@@ -3934,19 +4089,21 @@ impl App {
                     },
                 );
             }
-            let page = ((height - header).max(0) / p(60).max(1)).max(1) as usize;
+            let page =
+                ((height - header).max(0) / p(global_search::ROW_HEIGHT).max(1)).max(1) as usize;
             let offset = self
                 .global_offset
                 .get()
-                .min(self.global_rows.len().saturating_sub(page));
+                .min(self.global_visible.len().saturating_sub(page));
             if self.global_offset.replace(offset) != offset {
                 self.global_hover.set(None);
+                self.global_action_hover.set(None);
             }
             self.publish_view();
             ShowWindow(self.global_results, SW_SHOWNA);
             ShowWindow(
                 self.global_scroll,
-                if self.global_rows.len() > page {
+                if self.global_visible.len() > page {
                     SW_SHOWNA
                 } else {
                     SW_HIDE
@@ -3973,7 +4130,23 @@ impl App {
     }
 
     unsafe fn global_message(&mut self, message: &str) {
+        let resize = unsafe {
+            self.global_panel.is_some_and(|panel| {
+                let mut area = RECT::default();
+                GetClientRect(panel.host, &mut area);
+                let dc = GetDC(panel.host);
+                let old =
+                    ui::global_message_height(dc, &self.theme, &self.global_message, area.right);
+                let new = ui::global_message_height(dc, &self.theme, message, area.right);
+                ReleaseDC(panel.host, dc);
+                old != new
+            })
+        };
         self.global_message = message.to_owned();
+        if resize {
+            unsafe { self.layout_global() };
+            return;
+        }
         self.publish_view();
         if let Some(panel) = self.global_panel {
             unsafe {
@@ -4055,38 +4228,42 @@ impl App {
         }
     }
 
-    unsafe fn replace_global_one(&mut self) {
+    unsafe fn replace_global_result(&mut self, group: usize, hit: usize) {
+        let Some(result) = self.global_rows.get(group) else {
+            return;
+        };
+        let Some(matched) = result.matches.get(hit) else {
+            return;
+        };
+        let key = global_search::MatchKey {
+            id: result.id,
+            range: matched.range,
+        };
         unsafe {
-            let Some(panel) = self.global_panel else {
+            self.open_global_result(group, hit);
+            // A changed document queues a new scan. Never fall back to replacing another match.
+            if !self.global_ready
+                || self.global_selected != Some(key)
+                || editing::selection(self.edit) != key.range
+            {
+                return;
+            }
+            let panel = self.global_panel.unwrap();
+            let Some(replacement) = self.global_pattern.as_ref().and_then(|pattern| {
+                pattern.replacement_editor(self.edit, key.range, &window_text(panel.replace))
+            }) else {
                 return;
             };
-            let query = window_text(panel.find);
-            let range = editing::selection(self.edit);
-            if self.active.is_some()
-                && !query.is_empty()
-                && range.end > range.start
-                && editing::find(
-                    self.edit,
-                    &query,
-                    range.start,
-                    range.end,
-                    false,
-                    self.global_case,
-                ) == Some(range)
-            {
-                SendMessageW(self.edit, editing::EM_STOPGROUPTYPING, 0, 0);
-                SendMessageW(
-                    self.edit,
-                    EM_REPLACESEL,
-                    1,
-                    wide(&window_text(panel.replace)).as_ptr() as isize,
-                );
-                self.capture_edit();
-                self.queue_global_search();
-                self.global_pending = Some(false);
-            } else {
-                self.find_global_next(false);
-            }
+            SendMessageW(self.edit, editing::EM_STOPGROUPTYPING, 0, 0);
+            SendMessageW(
+                self.edit,
+                EM_REPLACESEL,
+                1,
+                wide(&replacement).as_ptr() as isize,
+            );
+            self.capture_edit();
+            self.queue_global_search();
+            self.set_status("검색 결과 1개 바꿈");
         }
     }
 
@@ -4129,9 +4306,11 @@ impl App {
                     ("이전 결과", ID_GLOBAL_PREV),
                     ("다음 결과", ID_GLOBAL_NEXT),
                     ("메모 목록으로 돌아가기", ID_GLOBAL_CLOSE),
-                    ("바꾸기", ID_GLOBAL_ONE),
+                    ("정규식 사용", ID_GLOBAL_REGEX),
                     ("모두 바꾸기", ID_GLOBAL_ALL),
                     ("바꾸기 표시 / 숨기기", ID_GLOBAL_DISCLOSURE),
+                    ("검색 새로 고침", ID_GLOBAL_REFRESH),
+                    ("검색 결과 모두 접기 / 펼치기", ID_GLOBAL_COLLAPSE),
                 ]
                 .map(|(label, id)| {
                     child(
@@ -4168,7 +4347,8 @@ impl App {
                     self.global_panel.unwrap().host,
                     windows_sys::w!("STATIC"),
                     "",
-                    WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS,
+                    // STATIC without SS_NOTIFY returns HTTRANSPARENT and never receives real clicks.
+                    WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS | SS_NOTIFY,
                     0,
                     127,
                 );
@@ -4176,7 +4356,7 @@ impl App {
                     self.global_panel.unwrap().host,
                     windows_sys::w!("STATIC"),
                     "",
-                    WS_CHILD | WS_CLIPSIBLINGS,
+                    WS_CHILD | WS_CLIPSIBLINGS | SS_NOTIFY,
                     0,
                     128,
                 );
@@ -4206,6 +4386,13 @@ impl App {
             scanner.clear();
         }
         unsafe {
+            self.global_replace_pressed = None;
+            self.global_hover.set(None);
+            self.global_action_hover.set(None);
+            if GetCapture() == self.global_results {
+                ReleaseCapture();
+            }
+            self.tooltip.hide();
             KillTimer(self.hwnd, GLOBAL_SEARCH_TIMER);
         }
     }
@@ -4214,11 +4401,28 @@ impl App {
         unsafe {
             self.cancel_global_search();
             self.global_rows = Rc::new(Vec::new());
+            self.global_visible = Rc::new(Vec::new());
+            self.global_focus = None;
             self.global_offset.set(0);
             self.global_hover.set(None);
+            self.global_action_hover.set(None);
+            self.global_replace_pressed = None;
             self.global_selected = None;
             self.global_ready = false;
             self.global_query = window_text(self.global_panel.unwrap().find);
+            match self
+                .global_cache
+                .get(&self.global_query, self.global_case, self.global_regex)
+            {
+                Ok(pattern) => self.global_pattern = Some(pattern),
+                Err(error) => {
+                    self.global_pattern = None;
+                    self.global_ready = true;
+                    self.global_message(&error);
+                    self.layout_global();
+                    return;
+                }
+            }
             self.global_message(if self.global_query.is_empty() {
                 "검색어를 입력하세요"
             } else {
@@ -4245,18 +4449,22 @@ impl App {
 
     unsafe fn step_global_search(&mut self) {
         unsafe {
-            if !self.sidebar_visible || !self.find_global || self.global_query.is_empty() {
+            if !self.sidebar_visible
+                || !self.find_global
+                || self.global_query.is_empty()
+                || self.global_pattern.is_none()
+            {
                 self.cancel_global_search();
                 return;
             }
             if self.global_job.is_none() {
                 self.global_job = Some(global_search::Job {
-                    query: self.global_query.clone(),
-                    case: self.global_case,
+                    pattern: self.global_pattern.clone().unwrap(),
                     ids: self.book.notes.iter().map(|note| note.id).collect(),
                     next: 0,
                     rows: Vec::new(),
                     errors: 0,
+                    displayed: 0,
                 });
                 SetTimer(self.hwnd, GLOBAL_SEARCH_TIMER, 15, None);
             }
@@ -4266,12 +4474,13 @@ impl App {
                 if self.book.get(id).is_some() {
                     match self.search_text(id) {
                         Ok(text) => {
-                            if let Some(row) = self
-                                .global_scanner
-                                .as_mut()
-                                .unwrap()
-                                .scan(id, &text, &job.query, job.case)
-                            {
+                            if let Some(row) = self.global_scanner.as_mut().unwrap().scan_pattern(
+                                id,
+                                &text,
+                                &job.pattern,
+                                global_search::MAX_RESULTS.saturating_sub(job.displayed),
+                            ) {
+                                job.displayed += row.matches.len();
                                 job.rows.push(row);
                             }
                         }
@@ -4294,16 +4503,23 @@ impl App {
                 KillTimer(self.hwnd, GLOBAL_SEARCH_TIMER);
                 let count: usize = job.rows.iter().map(|row| row.count).sum();
                 let message = format!(
-                    "{}개 메모, {}곳 일치{}",
-                    job.rows.len(),
+                    "{}곳 · {}개 메모{}",
                     count,
+                    job.rows.len(),
                     if job.errors == 0 {
                         String::new()
                     } else {
-                        format!(" · {}개 읽기 실패", job.errors)
+                        format!("\n{}개 읽기 실패", job.errors)
                     }
                 );
+                let message = if count > job.displayed {
+                    format!("{message}\n{}개까지 표시", global_search::MAX_RESULTS)
+                } else {
+                    message
+                };
                 self.global_rows = Rc::new(job.rows);
+                Rc::make_mut(&mut self.global_collapsed).retain(|id| self.book.get(*id).is_some());
+                self.rebuild_global_visible();
                 self.global_scanner.as_mut().unwrap().clear();
                 self.global_ready = true;
                 self.global_message(&message);
@@ -4315,10 +4531,60 @@ impl App {
         }
     }
 
-    unsafe fn select_global_match(&mut self, id: u64, range: editing::CharRange) {
+    fn rebuild_global_visible(&mut self) {
+        self.global_visible = Rc::new(global_search::visible_rows(
+            &self.global_rows,
+            &self.global_collapsed,
+        ));
+        self.global_hover.set(None);
+        self.global_action_hover.set(None);
+    }
+
+    unsafe fn global_action_at(
+        &self,
+        point: POINT,
+    ) -> Option<(usize, usize, usize, global_search::MatchKey)> {
+        if !self.global_replace || !self.global_ready {
+            return None;
+        }
         unsafe {
-            self.global_selected = Some(id);
-            if let Some(index) = self.global_rows.iter().position(|row| row.id == id) {
+            let mut area = RECT::default();
+            GetClientRect(self.global_results, &mut area);
+            if PtInRect(&area, point) == 0 {
+                return None;
+            }
+            let row = point.y / self.theme.px(global_search::ROW_HEIGHT);
+            let index = self.global_offset.get() + row as usize;
+            let item = self.global_visible.get(index)?;
+            let hit = item.hit?;
+            if PtInRect(
+                &ui::result_replace_bounds(
+                    &self.theme,
+                    area.right,
+                    row * self.theme.px(global_search::ROW_HEIGHT),
+                ),
+                point,
+            ) == 0
+            {
+                return None;
+            }
+            let result = &self.global_rows[item.group];
+            Some((
+                index,
+                item.group,
+                hit,
+                global_search::MatchKey {
+                    id: result.id,
+                    range: result.matches[hit].range,
+                },
+            ))
+        }
+    }
+    unsafe fn reveal_global_row(&mut self, row: global_search::VisibleRow) {
+        unsafe {
+            self.global_focus = Some(row);
+            self.publish_view();
+            if let Some(index) = self.global_visible.iter().position(|item| *item == row) {
                 let mut scroll = ScrollRange::default();
                 ui::with_view(|view| scroll = view.scroll_range(Kind::Search));
                 let offset = self.global_offset.get();
@@ -4328,6 +4594,104 @@ impl App {
                     self.set_scroll(Kind::Search, (index + 1 - scroll.page as usize) as i32);
                 }
             }
+            InvalidateRect(self.global_results, null(), 0);
+        }
+    }
+    unsafe fn toggle_global_group(&mut self, group: usize, expand: Option<bool>) {
+        let Some(result) = self.global_rows.get(group) else {
+            return;
+        };
+        let id = result.id;
+        let expand = expand.unwrap_or_else(|| self.global_collapsed.contains(&id));
+        if expand {
+            Rc::make_mut(&mut self.global_collapsed).remove(&id);
+        } else {
+            Rc::make_mut(&mut self.global_collapsed).insert(id);
+        }
+        if !expand && self.global_focus.is_some_and(|row| row.group == group) {
+            self.global_focus = Some(global_search::VisibleRow { group, hit: None });
+        }
+        self.rebuild_global_visible();
+        unsafe {
+            self.layout_global();
+            self.reveal_global_row(global_search::VisibleRow { group, hit: None });
+        }
+    }
+    unsafe fn activate_global_row(&mut self, index: usize) {
+        let Some(row) = self.global_visible.get(index).copied() else {
+            return;
+        };
+        unsafe {
+            if let Some(hit) = row.hit {
+                self.open_global_result(row.group, hit);
+            } else {
+                self.toggle_global_group(row.group, None);
+            }
+        }
+    }
+    unsafe fn global_result_key(&mut self, key: u16) {
+        if self.global_visible.is_empty() {
+            return;
+        }
+        let current = self
+            .global_focus
+            .and_then(|row| self.global_visible.iter().position(|item| *item == row));
+        let index = match key {
+            VK_UP => current.unwrap_or(0).saturating_sub(1),
+            VK_DOWN => current.map_or(0, |index| (index + 1).min(self.global_visible.len() - 1)),
+            VK_HOME => 0,
+            VK_END => self.global_visible.len() - 1,
+            _ => current.unwrap_or(0),
+        };
+        let row = self.global_visible[index];
+        unsafe {
+            match key {
+                VK_LEFT => {
+                    if row.hit.is_some() {
+                        self.reveal_global_row(global_search::VisibleRow {
+                            group: row.group,
+                            hit: None,
+                        });
+                    } else {
+                        self.toggle_global_group(row.group, Some(false));
+                    }
+                }
+                VK_RIGHT => {
+                    if row.hit.is_none()
+                        && self
+                            .global_collapsed
+                            .contains(&self.global_rows[row.group].id)
+                    {
+                        self.toggle_global_group(row.group, Some(true));
+                    } else if row.hit.is_none() && !self.global_rows[row.group].matches.is_empty() {
+                        self.open_global_result(row.group, 0);
+                    }
+                }
+                VK_RETURN | VK_SPACE => self.activate_global_row(index),
+                _ => {
+                    self.reveal_global_row(row);
+                    if let Some(hit) = row.hit {
+                        self.open_global_result(row.group, hit);
+                    }
+                }
+            }
+        }
+    }
+    unsafe fn select_global_match(&mut self, id: u64, range: editing::CharRange) {
+        unsafe {
+            self.global_selected = Some(global_search::MatchKey { id, range });
+            if let Some(group) = self.global_rows.iter().position(|row| row.id == id) {
+                let hit = self.global_rows[group]
+                    .matches
+                    .iter()
+                    .position(|hit| hit.range == range);
+                if hit.is_some() && self.global_collapsed.contains(&id) {
+                    Rc::make_mut(&mut self.global_collapsed).remove(&id);
+                    self.rebuild_global_visible();
+                    self.layout_global();
+                }
+                self.reveal_global_row(global_search::VisibleRow { group, hit });
+            }
             editing::select(self.edit, range);
             SendMessageW(self.edit, EM_SCROLLCARET, 0, 0);
             self.publish_view();
@@ -4335,32 +4699,32 @@ impl App {
             self.set_status("전체 검색 결과 선택됨");
         }
     }
-
-    unsafe fn open_global_result(&mut self, index: usize) {
+    unsafe fn open_global_result(&mut self, group: usize, hit: usize) {
         if !self.global_ready {
             return;
         }
-        let Some(row) = self.global_rows.get(index) else {
+        let Some(row) = self.global_rows.get(group) else {
             return;
         };
-        let id = row.id;
+        let Some(hit) = row.matches.get(hit) else {
+            return;
+        };
+        let (id, range, line, column) = (row.id, hit.range, hit.line, hit.column);
         if self.book.get(id).is_none() {
             return;
         }
         unsafe {
             self.open_search_note(id);
             if self.active.is_some_and(|index| self.open[index].id == id) {
-                if let Some(range) = editing::find(
-                    self.edit,
-                    &self.global_query,
-                    0,
-                    -1,
-                    false,
-                    self.global_case,
-                ) {
+                if self.global_pattern.as_ref().and_then(|pattern| {
+                    pattern.find_editor(self.edit, range.start, range.end, false, false)
+                }) == Some(range)
+                {
                     self.select_global_match(id, range);
+                    self.set_status(&format!("{line}행 {column}열 · 전체 검색"));
                 } else {
                     self.queue_global_search();
+                    self.global_message("내용이 바뀌어 검색 결과를 갱신합니다");
                 }
             }
         }
@@ -4385,6 +4749,9 @@ impl App {
                 self.global_message("검색어를 입력하세요");
                 return;
             }
+            let Some(pattern) = self.global_pattern.clone() else {
+                return;
+            };
             if !self.global_ready {
                 self.global_pending = Some(backwards);
                 return;
@@ -4398,9 +4765,8 @@ impl App {
                 current_id.and_then(|id| self.global_rows.iter().position(|row| row.id == id));
             if let Some(index) = current {
                 let selection = editing::selection(self.edit);
-                if let Some(range) = editing::find(
+                if let Some(range) = pattern.find_editor(
                     self.edit,
-                    &self.global_query,
                     if backwards {
                         selection.start
                     } else {
@@ -4408,7 +4774,11 @@ impl App {
                     },
                     if backwards { 0 } else { -1 },
                     backwards,
-                    self.global_case,
+                    self.global_selected
+                        == Some(global_search::MatchKey {
+                            id: self.global_rows[index].id,
+                            range: selection,
+                        }),
                 ) {
                     self.select_global_match(self.global_rows[index].id, range);
                     return;
@@ -4430,9 +4800,8 @@ impl App {
                 if self.active.is_none_or(|index| self.open[index].id != id) {
                     continue;
                 }
-                if let Some(range) = editing::find(
+                if let Some(range) = pattern.find_editor(
                     self.edit,
-                    &self.global_query,
                     if backwards {
                         editing::character_count(self.edit).total as i32
                     } else {
@@ -4440,7 +4809,7 @@ impl App {
                     },
                     if backwards { 0 } else { -1 },
                     backwards,
-                    self.global_case,
+                    false,
                 ) {
                     self.select_global_match(id, range);
                     return;
@@ -4460,6 +4829,10 @@ impl App {
                 return Ok(Vec::new());
             }
             let replacement = window_text(self.global_panel.unwrap().replace);
+            let pattern = self
+                .global_cache
+                .get(&query, self.global_case, self.global_regex)
+                .map_err(std::io::Error::other)?;
             let mut changes = Vec::new();
             for note in &self.book.notes {
                 let path = self.book.file(&self.data_dir, note.id);
@@ -4476,15 +4849,23 @@ impl App {
                         std::io::Error::other(format!("{}: {error}", note.title))
                     })?
                 };
-                let ranges =
-                    self.global_scanner
-                        .as_mut()
-                        .unwrap()
-                        .ranges(&text, &query, self.global_case);
-                if ranges.is_empty() {
+                let (after, count) = if matches!(pattern, search::Pattern::Regex(_)) {
+                    let edits = pattern.edits_text(&text, &replacement);
+                    (search::apply_edits(&text, &edits), edits.len())
+                } else {
+                    let ranges = self.global_scanner.as_mut().unwrap().ranges(
+                        &text,
+                        &query,
+                        self.global_case,
+                    );
+                    (
+                        global_search::replace(&text, &ranges, &replacement),
+                        ranges.len(),
+                    )
+                };
+                if count == 0 {
                     continue;
                 }
-                let after = global_search::replace(&text, &ranges, &replacement);
                 if after == text {
                     continue;
                 }
@@ -4493,7 +4874,7 @@ impl App {
                     path,
                     before_disk,
                     after,
-                    count: ranges.len(),
+                    count,
                 });
             }
             self.global_scanner.as_mut().unwrap().clear();
@@ -4647,7 +5028,19 @@ impl App {
                 self.set_status("검색어를 입력하세요");
                 return;
             }
-            let case = self.find_case_sensitive;
+            let pattern =
+                match self
+                    .find_cache
+                    .get(&query, self.find_case_sensitive, self.find_regex_enabled)
+                {
+                    Ok(pattern) => pattern,
+                    Err(error) => {
+                        self.last_match = None;
+                        self.search_message(&error);
+                        self.set_status("정규식 오류");
+                        return;
+                    }
+                };
             let selection = editing::selection(self.edit);
             let start = if backwards || live {
                 selection.start
@@ -4655,11 +5048,17 @@ impl App {
                 selection.end
             };
             let end = if backwards { 0 } else { -1 };
-            let result =
-                editing::find(self.edit, &query, start, end, backwards, case).or_else(|| {
-                    editing::find(
+            let result = pattern
+                .find_editor(
+                    self.edit,
+                    start,
+                    end,
+                    backwards,
+                    !live && self.last_query == query && self.last_match == Some(selection),
+                )
+                .or_else(|| {
+                    pattern.find_editor(
                         self.edit,
-                        &query,
                         if backwards {
                             GetWindowTextLengthW(self.edit)
                         } else {
@@ -4667,7 +5066,7 @@ impl App {
                         },
                         end,
                         backwards,
-                        case,
+                        false,
                     )
                 });
             self.last_query = query;
@@ -4690,13 +5089,22 @@ impl App {
         unsafe {
             let range = editing::selection(self.edit);
             let query = window_text(self.find_input);
-            let case = self.find_case_sensitive;
-            if !query.is_empty()
-                && range.end > range.start
-                && editing::find(self.edit, &query, range.start, range.end, false, case)
-                    == Some(range)
-            {
-                let replacement = window_text(self.replace_input);
+            let pattern =
+                match self
+                    .find_cache
+                    .get(&query, self.find_case_sensitive, self.find_regex_enabled)
+                {
+                    Ok(pattern) => pattern,
+                    Err(error) => {
+                        self.search_message(&error);
+                        return;
+                    }
+                };
+            let replacement = (!query.is_empty()
+                && (range.start != range.end || self.last_match == Some(range)))
+            .then(|| pattern.replacement_editor(self.edit, range, &window_text(self.replace_input)))
+            .flatten();
+            if let Some(replacement) = replacement {
                 SendMessageW(self.edit, editing::EM_STOPGROUPTYPING, 0, 0);
                 SendMessageW(
                     self.edit,
@@ -4720,25 +5128,39 @@ impl App {
                 return;
             }
             let case = self.find_case_sensitive;
-            let mut ranges = Vec::new();
-            let mut start = 0;
-            while let Some(range) = editing::find(self.edit, &query, start, -1, false, case) {
-                if range.end <= start {
-                    break;
+            let pattern = match self.find_cache.get(&query, case, self.find_regex_enabled) {
+                Ok(pattern) => pattern,
+                Err(error) => {
+                    self.search_message(&error);
+                    return;
                 }
-                start = range.end;
-                ranges.push(range);
-            }
+            };
+            let mut ranges = Vec::new();
+            let text = if matches!(pattern, search::Pattern::Regex(_)) {
+                let original = self.current_text();
+                let edits = pattern.edits_text(&original, &window_text(self.replace_input));
+                ranges.extend(edits.iter().map(|edit| edit.range));
+                search::apply_edits(&original, &edits)
+            } else {
+                let mut start = 0;
+                while let Some(range) = editing::find(self.edit, &query, start, -1, false, case) {
+                    if range.end <= start {
+                        break;
+                    }
+                    start = range.end;
+                    ranges.push(range);
+                }
+                editing::replace_ranges(
+                    &self.current_text(),
+                    &ranges,
+                    &window_text(self.replace_input),
+                )
+            };
             if ranges.is_empty() {
                 self.set_status("찾을 수 없음");
                 self.search_message("일치하는 텍스트가 없습니다");
                 return;
             }
-            let text = editing::replace_ranges(
-                &self.current_text(),
-                &ranges,
-                &window_text(self.replace_input),
-            );
             SendMessageW(self.edit, editing::EM_STOPGROUPTYPING, 0, 0);
             SendMessageW(self.edit, WM_SETREDRAW, 0, 0);
             editing::select(self.edit, editing::CharRange { start: 0, end: -1 });
@@ -4829,8 +5251,35 @@ impl App {
                 self.publish_view();
                 self.layout_global();
             },
-            ID_GLOBAL_ONE => unsafe {
-                self.replace_global_one();
+            ID_GLOBAL_REFRESH => unsafe {
+                self.queue_global_search();
+            },
+            ID_GLOBAL_COLLAPSE => unsafe {
+                if self
+                    .global_rows
+                    .iter()
+                    .any(|row| !self.global_collapsed.contains(&row.id))
+                {
+                    self.global_collapsed =
+                        Rc::new(self.global_rows.iter().map(|row| row.id).collect());
+                } else {
+                    Rc::make_mut(&mut self.global_collapsed).clear();
+                }
+                if let Some(row) = self.global_focus {
+                    self.global_focus = Some(global_search::VisibleRow {
+                        group: row.group,
+                        hit: None,
+                    });
+                }
+                self.rebuild_global_visible();
+                self.layout_global();
+                if let Some(row) = self.global_focus {
+                    self.reveal_global_row(row);
+                }
+            },
+            ID_GLOBAL_REGEX => unsafe {
+                self.global_regex = !self.global_regex;
+                self.queue_global_search();
             },
             ID_GLOBAL_ALL => unsafe {
                 self.replace_global_all();
@@ -4875,6 +5324,13 @@ impl App {
             ID_FIND_CASE => unsafe {
                 self.find_case_sensitive = !self.find_case_sensitive;
                 InvalidateRect(self.find_case, null(), 0);
+                self.find_next(false, true);
+            },
+            ID_FIND_REGEX => unsafe {
+                self.find_regex_enabled = !self.find_regex_enabled;
+                self.last_match = None;
+                self.publish_view();
+                InvalidateRect(self.find_regex, null(), 0);
                 self.find_next(false, true);
             },
             ID_FIND_CLOSE => unsafe {
@@ -5464,6 +5920,18 @@ fn shortcut(msg: &MSG) -> bool {
         } else if ctrl && key == VK_OEM_COMMA as u32 {
             app.show_settings(!app.settings_visible);
             handled = true;
+        } else if ctrl
+            && shift
+            && key == VK_RETURN as u32
+            && msg.hwnd == app.global_results
+            && app.global_replace
+        {
+            if let Some(row) = app.global_focus
+                && let Some(hit) = row.hit
+            {
+                app.replace_global_result(row.group, hit);
+            }
+            handled = true;
         } else if app.settings_visible && key == VK_ESCAPE as u32 {
             let dropped = app.settings_panel.is_some_and(|panel| {
                 SendMessageW(panel.theme, CB_GETDROPPEDSTATE, 0, 0) != 0
@@ -5514,13 +5982,19 @@ fn shortcut(msg: &MSG) -> bool {
             controls.extend([
                 panel.buttons[6],
                 panel.buttons[0],
+                panel.buttons[4],
                 panel.buttons[1],
                 panel.buttons[2],
             ]);
             if app.global_replace {
-                controls.extend([panel.buttons[4], panel.buttons[5]]);
+                controls.push(panel.buttons[5]);
             }
-            controls.extend([app.global_results, panel.buttons[3]]);
+            controls.extend([
+                app.global_results,
+                panel.buttons[7],
+                panel.buttons[8],
+                panel.buttons[3],
+            ]);
             let current = controls.iter().position(|&h| h == msg.hwnd).unwrap_or(0);
             SetFocus(
                 controls[if shift {
@@ -5539,10 +6013,8 @@ fn shortcut(msg: &MSG) -> bool {
             && msg.hwnd != app.global_results
         {
             let panel = app.global_panel.unwrap();
-            if msg.hwnd == panel.find {
+            if msg.hwnd == panel.find || msg.hwnd == panel.replace {
                 app.find_global_next(shift);
-            } else if msg.hwnd == panel.replace {
-                app.replace_global_one();
             } else {
                 app.command(GetDlgCtrlID(msg.hwnd) as usize, BN_CLICKED as usize);
             }
@@ -5559,7 +6031,7 @@ fn shortcut(msg: &MSG) -> bool {
             if app.replace_visible {
                 controls.push(app.replace_input);
             }
-            controls.extend([app.find_case, app.find_prev, app.find_next]);
+            controls.extend([app.find_case, app.find_regex, app.find_prev, app.find_next]);
             if app.replace_visible {
                 controls.extend([app.replace_one, app.replace_all]);
             }
@@ -6972,7 +7444,14 @@ mod interaction_tests {
                         dc as usize,
                         (PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN) as isize,
                     );
-                    assert_eq!(GetPixel(dc, 0, 0), app.theme.colors.sidebar);
+                    assert_eq!(
+                        GetPixel(dc, 0, 0),
+                        if control == panel.buttons[0] {
+                            app.theme.colors.white
+                        } else {
+                            app.theme.colors.sidebar
+                        }
+                    );
                 }
                 let brush = SendMessageW(
                     panel.host,
@@ -7110,6 +7589,21 @@ mod interaction_tests {
                 assert!(!app.global_replace);
                 assert_eq!(GetFocus(), panel.find);
                 assert_eq!(IsWindowVisible(panel.replace), 0);
+                let mut list = RECT::default();
+                GetWindowRect(app.global_results, &mut list);
+                MapWindowPoints(null_mut(), panel.host, (&mut list as *mut RECT).cast(), 2);
+                assert_eq!(list.top, app.theme.px(90), "compact search header grew");
+                let short_top = list.top;
+                app.global_message(
+                    "내용이 바뀌어 검색 결과를 갱신합니다\n읽을 수 없는 메모가 있습니다",
+                );
+                GetWindowRect(app.global_results, &mut list);
+                MapWindowPoints(null_mut(), panel.host, (&mut list as *mut RECT).cast(), 2);
+                assert!(
+                    list.top > short_top,
+                    "wrapped status must not overlap result rows"
+                );
+                app.global_message("검색어를 입력하세요");
             }
             app.show_note_list();
             for row in extras {
@@ -7131,6 +7625,386 @@ mod interaction_tests {
             assert!(!frames.borrow().is_empty());
             assert!(frames.borrow().iter().all(|ready| *ready));
         });
+    }
+
+    unsafe fn verify_result_navigation(ids: &[u64]) {
+        unsafe {
+            let (results, group, before, active) = with_app_result(|app| {
+                (
+                    app.global_results,
+                    app.global_rows
+                        .iter()
+                        .position(|row| row.id == ids[1])
+                        .unwrap(),
+                    app.open.len(),
+                    app.active,
+                )
+            });
+            let mut point = POINT { x: 4, y: 10 };
+            ClientToScreen(results, &mut point);
+            let screen_position =
+                (point.x as u16 as u32 | ((point.y as u16 as u32) << 16)) as isize;
+            assert_eq!(
+                SendMessageW(results, WM_NCHITTEST, 0, screen_position),
+                HTCLIENT as isize,
+                "result rows must receive mouse input rather than pass it through"
+            );
+            let click = |hit| {
+                let y = with_app_result(|app| {
+                    let index = app
+                        .global_visible
+                        .iter()
+                        .position(|row| row.group == group && row.hit == hit)
+                        .unwrap();
+                    app.theme.px(global_search::ROW_HEIGHT
+                        * (index - app.global_offset.get()) as i32
+                        + 10)
+                });
+                let coordinates = search_mouse_coordinates(results, POINT { x: 4, y });
+                SendMessageW(results, WM_LBUTTONDOWN, 1, coordinates);
+            };
+            click(None);
+            with_app(|app| {
+                assert!(app.global_collapsed.contains(&ids[1]));
+                assert_eq!(app.global_visible.len(), 8);
+                assert_eq!(app.open.len(), before); // Header clicks only fold; they do not open memo tabs.
+                assert_eq!(app.active, active);
+                assert!(app.global_ready);
+            });
+            SendMessageW(results, WM_KEYDOWN, VK_RIGHT as usize, 0);
+            click(Some(1)); // Jump directly to the second occurrence on the same line, after an emoji.
+            with_app(|app| {
+                assert_eq!(app.open[app.active.unwrap()].id, ids[1]);
+                assert_eq!(
+                    editing::selection(app.edit),
+                    editing::CharRange { start: 17, end: 23 }
+                );
+                assert_eq!(
+                    app.global_selected,
+                    Some(global_search::MatchKey {
+                        id: ids[1],
+                        range: editing::CharRange { start: 17, end: 23 }
+                    })
+                );
+                assert_eq!(GetFocus(), results);
+                assert_eq!(window_text(app.edit), "unsaved needle🙂 needle");
+            });
+            SendMessageW(results, WM_KEYDOWN, VK_LEFT as usize, 0);
+            SendMessageW(results, WM_KEYDOWN, VK_SPACE as usize, 0);
+            with_app(|app| assert!(app.global_collapsed.contains(&ids[1])));
+            SendMessageW(results, WM_KEYDOWN, VK_RIGHT as usize, 0);
+            SendMessageW(results, WM_KEYDOWN, VK_RIGHT as usize, 0);
+            with_app(|app| {
+                assert_eq!(
+                    editing::selection(app.edit),
+                    editing::CharRange { start: 8, end: 14 }
+                );
+                app.command(ID_GLOBAL_COLLAPSE, 0);
+                assert_eq!(app.global_visible.len(), 4);
+                assert!(
+                    app.global_rows
+                        .iter()
+                        .all(|row| app.global_collapsed.contains(&row.id))
+                );
+                app.command(ID_GLOBAL_COLLAPSE, 0);
+                assert_eq!(app.global_visible.len(), 10);
+                assert_eq!(app.open.len(), before);
+                app.command(ID_GLOBAL_REFRESH, 0);
+            });
+            finish_global_job();
+            with_app(|app| assert_eq!(app.global_visible.len(), 10));
+        }
+    }
+
+    // Validate native mouse targeting before dispatching test input on the unshown desktop.
+    // Sending directly to an HWND alone bypasses STATIC's HTTRANSPARENT behavior.
+    unsafe fn search_mouse_coordinates(control: HWND, mut point: POINT) -> LPARAM {
+        unsafe {
+            ClientToScreen(control, &mut point);
+            let coordinates = (point.x as u16 as u32 | ((point.y as u16 as u32) << 16)) as isize;
+            assert_eq!(
+                SendMessageW(control, WM_NCHITTEST, 0, coordinates),
+                HTCLIENT as isize
+            );
+            assert_eq!(
+                WindowFromPoint(point),
+                control,
+                "mouse input targets another window"
+            );
+            ScreenToClient(control, &mut point);
+            (point.x as u16 as u32 | ((point.y as u16 as u32) << 16)) as isize
+        }
+    }
+
+    unsafe fn verify_search_mouse_feedback() {
+        unsafe {
+            let (results, index, y, hover_color, background) = with_app_result(|app| {
+                let index = app
+                    .global_visible
+                    .iter()
+                    .enumerate()
+                    .skip(app.global_offset.get())
+                    .find(|(_, row)| Some(**row) != app.global_focus)
+                    .unwrap()
+                    .0;
+                (
+                    app.global_results,
+                    index,
+                    app.theme.px(global_search::ROW_HEIGHT
+                        * (index - app.global_offset.get()) as i32
+                        + 10),
+                    app.theme.colors.hover,
+                    app.theme.colors.sidebar,
+                )
+            });
+            let coordinates = search_mouse_coordinates(results, POINT { x: 4, y });
+            SendMessageW(results, WM_MOUSEMOVE, 0, coordinates);
+            with_app(|app| assert_eq!(app.global_hover.get(), Some(index)));
+            let mut area = RECT::default();
+            GetClientRect(results, &mut area);
+            let screen = GetDC(results);
+            let dc = CreateCompatibleDC(screen);
+            let bitmap = CreateCompatibleBitmap(screen, area.right, area.bottom);
+            let old = SelectObject(dc, bitmap);
+            for (message, color) in [(WM_MOUSEMOVE, hover_color), (WM_MOUSELEAVE, background)] {
+                SendMessageW(results, message, 0, coordinates);
+                for print in [WM_PRINTCLIENT, WM_PRINT] {
+                    SendMessageW(results, print, dc as usize, PRF_CLIENT as isize);
+                    assert_eq!(
+                        GetPixel(dc, 4, y),
+                        color,
+                        "row hover feedback was not rendered"
+                    );
+                }
+            }
+            with_app(|app| assert_eq!(app.global_hover.get(), None));
+            SelectObject(dc, old);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
+            ReleaseDC(results, screen);
+        }
+    }
+
+    unsafe fn verify_distant_search_result(id: u64, previous: u64, dir: &std::path::Path) {
+        unsafe {
+            let path = dir.join("notes").join(format!("{id}.txt"));
+            let original = fs::read(&path).unwrap();
+            let text = format!(
+                "{}가🙂 needle target\r\nending",
+                "prefix line\r\n".repeat(6000)
+            );
+            fs::write(&path, text).unwrap();
+            with_app(|app| app.queue_global_search());
+            finish_global_job();
+            with_app(|app| {
+                let group = app.global_rows.iter().position(|row| row.id == id).unwrap();
+                SetFocus(app.global_results);
+                app.open_global_result(group, 0);
+                assert_eq!(
+                    editing::selection(app.edit),
+                    editing::CharRange {
+                        start: 72004,
+                        end: 72010
+                    }
+                );
+                assert_eq!(GetFocus(), app.global_results);
+                let first = SendMessageW(app.edit, EM_GETFIRSTVISIBLELINE, 0, 0);
+                assert!(
+                    (5900..=6000).contains(&first),
+                    "target line is outside the viewport: {first}"
+                );
+                assert!(scrollbar::body_range(app.edit, false).position > 65_535);
+                let editor = app.edit;
+                // Remove only this test's loaded tab, preserving the dirty editor and disk snapshots.
+                app.loading = true;
+                app.open.retain(|tab| tab.id != id);
+                app.active = None;
+                app.edit = app.empty_edit;
+                DestroyWindow(editor);
+                app.loading = false;
+                let index = app.open.iter().position(|tab| tab.id == previous).unwrap();
+                app.activate(index);
+                app.queue_global_search();
+            });
+            fs::write(&path, original).unwrap();
+            finish_global_job();
+            with_app(|app| {
+                app.global_offset.set(0);
+                app.publish_view();
+            });
+        }
+    }
+
+    unsafe fn click_search_replace(id: u64, hit: usize, cancel: bool) {
+        unsafe {
+            let mut results = null_mut();
+            let mut point = POINT::default();
+            let mut before = String::new();
+            with_app(|app| {
+                let group = app.global_rows.iter().position(|row| row.id == id).unwrap();
+                app.open_global_result(group, hit);
+                let row = global_search::VisibleRow {
+                    group,
+                    hit: Some(hit),
+                };
+                app.reveal_global_row(row);
+                let index = app
+                    .global_visible
+                    .iter()
+                    .position(|item| *item == row)
+                    .unwrap();
+                let mut area = RECT::default();
+                GetClientRect(app.global_results, &mut area);
+                let bounds = ui::result_replace_bounds(
+                    &app.theme,
+                    area.right,
+                    app.theme
+                        .px(global_search::ROW_HEIGHT * (index - app.global_offset.get()) as i32),
+                );
+                point = POINT {
+                    x: (bounds.left + bounds.right) / 2,
+                    y: (bounds.top + bounds.bottom) / 2,
+                };
+                results = app.global_results;
+                before = window_text(app.edit);
+            });
+            let position = search_mouse_coordinates(results, point);
+            SendMessageW(results, WM_MOUSEMOVE, 0, position);
+            SendMessageW(results, WM_LBUTTONDOWN, 1, position);
+            with_app(|app| {
+                assert_eq!(window_text(app.edit), before);
+                assert!(app.global_replace_pressed.is_some());
+                assert!(app.global_action_hover.get().is_some());
+            });
+            assert_eq!(GetCapture(), results);
+            SendMessageW(results, WM_LBUTTONUP, 0, if cancel { -1 } else { position });
+            assert_ne!(GetCapture(), results);
+            with_app(|app| {
+                assert!(app.global_replace_pressed.is_none());
+                if cancel {
+                    assert_eq!(window_text(app.edit), before);
+                }
+            });
+        }
+    }
+
+    unsafe fn save_search_preview(app: &mut App, name: &str, replace: bool) {
+        unsafe {
+            let previous_width = app.sidebar_width;
+            let previous_replace = app.global_replace;
+            let mut previous = RECT::default();
+            GetWindowRect(app.hwnd, &mut previous);
+            app.sidebar_width = 340;
+            app.global_replace = replace;
+            SetWindowPos(
+                app.hwnd,
+                null_mut(),
+                0,
+                0,
+                app.theme.px(1100),
+                app.theme.px(760),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            app.layout();
+            let mut client = RECT::default();
+            GetClientRect(app.hwnd, &mut client);
+            let width = app.theme.px(if app.find_visible { 844 } else { 340 });
+            let height = client.bottom;
+            let screen = GetDC(app.hwnd);
+            let dc = CreateCompatibleDC(screen);
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut pixels = null_mut();
+            let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut pixels, null_mut(), 0);
+            assert!(!bitmap.is_null());
+            let old = SelectObject(dc, bitmap);
+            theme::fill(
+                dc,
+                theme::rect(0, 0, width, height),
+                app.theme.colors.sidebar,
+            );
+            for control in [
+                app.sidebar_tabs[0],
+                app.sidebar_tabs[1],
+                app.toggle,
+                app.global_panel.unwrap().host,
+            ]
+            .into_iter()
+            .chain(app.find_visible.then_some(app.search_host))
+            {
+                let mut bounds = RECT::default();
+                GetWindowRect(control, &mut bounds);
+                MapWindowPoints(null_mut(), app.hwnd, (&mut bounds as *mut RECT).cast(), 2);
+                if control == app.search_host {
+                    bounds.left = app.theme.px(352);
+                    bounds.top = app.theme.px(52);
+                }
+                let saved = SaveDC(dc);
+                SetViewportOrgEx(dc, bounds.left, bounds.top, null_mut());
+                SendMessageW(
+                    control,
+                    WM_PRINT,
+                    dc as usize,
+                    (PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN) as isize,
+                );
+                RestoreDC(dc, saved);
+            }
+            GdiFlush();
+            let bytes =
+                std::slice::from_raw_parts(pixels as *const u8, (width * height * 4) as usize);
+            let expected = if app.theme.dark {
+                theme::rgb(94, 77, 35)
+            } else {
+                theme::rgb(255, 231, 154)
+            };
+            let count = bytes
+                .chunks_exact(4)
+                .filter(|pixel| theme::rgb(pixel[2], pixel[1], pixel[0]) == expected)
+                .count();
+            assert!(count > 100, "query highlights were not rendered");
+            let mut bmp = Vec::with_capacity(54 + bytes.len());
+            bmp.extend_from_slice(b"BM");
+            bmp.extend_from_slice(&(54 + bytes.len() as u32).to_le_bytes());
+            bmp.extend_from_slice(&[0; 4]);
+            bmp.extend_from_slice(&54u32.to_le_bytes());
+            bmp.extend_from_slice(&40u32.to_le_bytes());
+            bmp.extend_from_slice(&width.to_le_bytes());
+            bmp.extend_from_slice(&(-height).to_le_bytes());
+            bmp.extend_from_slice(&1u16.to_le_bytes());
+            bmp.extend_from_slice(&32u16.to_le_bytes());
+            bmp.extend_from_slice(&[0; 24]);
+            bmp.extend_from_slice(bytes);
+            let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target/global-search-validation");
+            fs::create_dir_all(&output).unwrap();
+            fs::write(output.join(format!("{name}.bmp")), bmp).unwrap();
+            SelectObject(dc, old);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
+            ReleaseDC(app.hwnd, screen);
+            app.sidebar_width = previous_width;
+            app.global_replace = previous_replace;
+            SetWindowPos(
+                app.hwnd,
+                null_mut(),
+                0,
+                0,
+                previous.right - previous.left,
+                previous.bottom - previous.top,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            app.layout();
+        }
     }
 
     unsafe fn verify_global_features(ids: &[u64], child: u64, dir: &std::path::Path) {
@@ -7205,8 +8079,8 @@ mod interaction_tests {
                 );
                 assert!(app.open.is_empty()); // Scanning does not load a tab for every file.
                 let row = app.global_rows.iter().find(|row| row.id == child).unwrap();
-                assert_eq!(row.line, 2);
-                assert_eq!(row.preview, "needle 한글");
+                assert_eq!(row.matches[0].line, 2);
+                assert_eq!(row.matches[0].preview.as_ref(), "needle 한글");
                 app.open_note(ids[1]);
                 body = app.edit;
                 app.open.push(OpenTab {
@@ -7235,7 +8109,17 @@ mod interaction_tests {
                 assert!(app.open[app.active.unwrap()].dirty);
                 assert_eq!(app.open.len(), 2);
             });
-            let click_y = with_app_result(|app| app.theme.px(60 * 3 + 10));
+            verify_result_navigation(ids);
+            verify_distant_search_result(ids[3], ids[1], dir);
+            let click_y = with_app_result(|app| {
+                let index = app
+                    .global_visible
+                    .iter()
+                    .position(|row| app.global_rows[row.group].id == child && row.hit == Some(0))
+                    .unwrap();
+                app.theme
+                    .px(global_search::ROW_HEIGHT * (index - app.global_offset.get()) as i32 + 10)
+            });
             SendMessageW(results, WM_LBUTTONDOWN, 1, (click_y << 16) as isize);
             with_app(|app| {
                 assert_eq!(app.open[app.active.unwrap()].id, child);
@@ -7306,6 +8190,15 @@ mod interaction_tests {
                     app.show_note_list();
                     app.show_global_search(None);
                     verify_search_surfaces(app);
+                    save_search_preview(
+                        app,
+                        if mode == ThemeMode::Light {
+                            "light"
+                        } else {
+                            "dark"
+                        },
+                        false,
+                    );
                     let mut area = RECT::default();
                     GetClientRect(results, &mut area);
                     let screen = GetDC(hwnd);
@@ -7337,6 +8230,8 @@ mod interaction_tests {
                     );
                     app.layout();
                 });
+                verify_search_mouse_feedback();
+                search_mouse_coordinates(scroll, POINT { x: 4, y: 10 });
                 SendMessageW(
                     scroll,
                     WM_MOUSEWHEEL,
@@ -7358,25 +8253,29 @@ mod interaction_tests {
                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
                 );
                 app.layout();
-                app.open_global_result(0);
+                app.open_global_result(0, 0);
             });
             SetFocus(results);
             SendMessageW(results, WM_KEYDOWN, VK_DOWN as usize, 0);
+            with_app(|app| {
+                assert_eq!(app.open[app.active.unwrap()].id, ids[0]);
+                assert_eq!(
+                    editing::selection(app.edit),
+                    editing::CharRange { start: 7, end: 13 }
+                );
+            });
+            SendMessageW(results, WM_KEYDOWN, VK_DOWN as usize, 0); // Focus the next memo header.
+            SendMessageW(results, WM_KEYDOWN, VK_RIGHT as usize, 0); // Open its first result.
             with_app(|app| {
                 assert_eq!(app.open[app.active.unwrap()].id, ids[1]);
                 assert_eq!(GetFocus(), results);
             });
             SetWindowTextW(replacement, wide("zzz").as_ptr());
-            SetFocus(replacement);
-            assert!(shortcut(&MSG {
-                hwnd: replacement,
-                message: WM_KEYDOWN,
-                wParam: VK_RETURN as usize,
-                ..Default::default()
-            }));
+            click_search_replace(ids[1], 0, true);
+            click_search_replace(ids[1], 0, false);
             finish_global_job();
             assert_eq!(window_text(body), "unsaved zzz🙂 needle");
-            assert_eq!(GetFocus(), replacement);
+            assert_eq!(GetFocus(), results);
             with_app(|app| {
                 assert_eq!(
                     app.global_rows.iter().map(|row| row.count).sum::<usize>(),
@@ -7511,6 +8410,256 @@ mod interaction_tests {
         let mut result = None;
         with_app(|app| result = Some(f(app)));
         result.unwrap()
+    }
+
+    unsafe fn verify_regex_search(ids: &[u64], child: u64, dir: &std::path::Path) {
+        unsafe {
+            let all_ids: Vec<_> = ids.iter().copied().chain([child]).collect();
+            let originals: Vec<_> = all_ids
+                .iter()
+                .map(|id| fs::read(dir.join("notes").join(format!("{id}.txt"))).unwrap())
+                .collect();
+            let sample = "🙂 item12 item34\r\nitem5";
+            fs::write(dir.join("notes").join(format!("{}.txt", ids[0])), sample).unwrap();
+            let (input, replacement, regex) = with_app_result(|app| {
+                let panel = app.global_panel.unwrap();
+                (panel.find, panel.replace, panel.buttons[4])
+            });
+            with_app(|app| {
+                app.show_global_search(Some(true));
+            });
+            SetWindowTextW(input, wide(r"item(\d+)").as_ptr());
+            SendMessageW(regex, BM_CLICK, 0, 0);
+            finish_global_job();
+            with_app(|app| {
+                assert!(app.global_regex && !app.find_regex_enabled);
+                assert_eq!(app.global_rows.len(), 1);
+                assert_eq!(app.global_rows[0].count, 3);
+                assert_eq!(
+                    app.global_rows[0].matches[1].range,
+                    editing::CharRange { start: 10, end: 16 }
+                );
+                assert!(app.open.is_empty());
+            });
+            SetWindowTextW(replacement, wide("value$1").as_ptr());
+            click_search_replace(ids[0], 1, true);
+            click_search_replace(ids[0], 1, false);
+            finish_global_job();
+            let editor = with_app_result(|app| app.edit);
+            assert_eq!(window_text(editor), "🙂 item12 value34\r\nitem5");
+            assert_eq!(
+                fs::read_to_string(dir.join("notes").join(format!("{}.txt", ids[0]))).unwrap(),
+                sample
+            );
+            SendMessageW(editor, WM_UNDO, 0, 0);
+            assert_eq!(window_text(editor), sample);
+            finish_global_job();
+
+            // A stale range must trigger a scan, never replace another occurrence.
+            with_app(|app| {
+                app.loading = true;
+                SetWindowTextW(editor, wide(&format!("XX{sample}")).as_ptr());
+                app.loading = false;
+                app.replace_global_result(0, 1);
+                assert!(!app.global_ready);
+                assert_eq!(window_text(editor), format!("XX{sample}"));
+            });
+            SetWindowTextW(editor, wide(sample).as_ptr());
+            finish_global_job();
+            SetWindowTextW(input, wide("[").as_ptr());
+            with_app(|app| {
+                assert!(app.global_ready && app.global_rows.is_empty());
+                assert!(app.global_message.starts_with("정규식 오류:"));
+                assert!(app.prepare_global_replacements().is_err());
+                app.find_global_next(false);
+                assert!(app.global_message.starts_with("정규식 오류:"));
+            });
+            assert_eq!(window_text(editor), sample);
+
+            let (local, local_replace, local_regex) =
+                with_app_result(|app| (app.find_input, app.replace_input, app.find_regex));
+            SetWindowTextW(input, wide(r"item(\d+)").as_ptr());
+            finish_global_job();
+            with_app(|app| app.show_find(true));
+            SetWindowTextW(local, wide(r"item(\d+)").as_ptr());
+            SendMessageW(local_regex, BM_CLICK, 0, 0);
+            editing::select(editor, editing::CharRange::default());
+            with_app(|app| {
+                assert!(app.find_regex_enabled && app.global_regex);
+                app.command(ID_FIND_NEXT, 0);
+                assert_eq!(
+                    editing::selection(editor),
+                    editing::CharRange { start: 3, end: 9 }
+                );
+                app.command(ID_FIND_NEXT, 0);
+                assert_eq!(
+                    editing::selection(editor),
+                    editing::CharRange { start: 10, end: 16 }
+                );
+                app.command(ID_FIND_PREV, 0);
+                assert_eq!(
+                    editing::selection(editor),
+                    editing::CharRange { start: 3, end: 9 }
+                );
+            });
+            let original_settings = with_app_result(|app| app.settings.clone());
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                with_app(|app| {
+                    let mut settings = app.settings.clone();
+                    settings.theme = mode;
+                    app.apply_settings(settings);
+                    save_search_preview(
+                        app,
+                        if mode == ThemeMode::Light {
+                            "regex-light"
+                        } else {
+                            "regex-dark"
+                        },
+                        true,
+                    );
+                });
+            }
+            with_app(|app| app.apply_settings(original_settings));
+            SetWindowTextW(local_replace, wide("x$1").as_ptr());
+            with_app(|app| app.replace_one());
+            assert_eq!(window_text(editor), "🙂 x12 item34\r\nitem5");
+            SendMessageW(editor, WM_UNDO, 0, 0);
+            assert_eq!(window_text(editor), sample);
+            with_app(|app| app.replace_all());
+            assert_eq!(window_text(editor), "🙂 x12 x34\r\nx5");
+            SendMessageW(editor, WM_UNDO, 0, 0);
+            assert_eq!(window_text(editor), sample);
+            SetWindowTextW(local, wide("[").as_ptr());
+            with_app(|app| {
+                assert!(app.find_message.starts_with("정규식 오류:"));
+                app.replace_all();
+                app.replace_one();
+            });
+            assert_eq!(window_text(editor), sample);
+            editing::select(editor, editing::CharRange::default());
+            SetWindowTextW(local, wide("^").as_ptr());
+            with_app(|app| {
+                assert_eq!(editing::selection(editor), editing::CharRange::default());
+                app.find_next(false, false);
+                assert_eq!(
+                    editing::selection(editor),
+                    editing::CharRange { start: 17, end: 17 }
+                );
+                app.find_next(true, false);
+                assert_eq!(editing::selection(editor), editing::CharRange::default());
+                app.find_next(true, false);
+                assert_eq!(
+                    editing::selection(editor),
+                    editing::CharRange { start: 17, end: 17 }
+                );
+            });
+            SetWindowTextW(local_replace, wide(">").as_ptr());
+            with_app(|app| app.replace_all());
+            assert_eq!(window_text(editor), ">🙂 item12 item34\r\n>item5");
+            SendMessageW(editor, WM_UNDO, 0, 0);
+            assert_eq!(window_text(editor), sample);
+
+            with_app(|app| app.hide_find());
+            SetWindowTextW(input, wide("^").as_ptr());
+            finish_global_job();
+            with_app(|app| {
+                app.open_global_result(0, 0);
+                assert_eq!(editing::selection(editor), editing::CharRange::default());
+                app.find_global_next(false);
+                assert_eq!(
+                    editing::selection(editor),
+                    editing::CharRange { start: 17, end: 17 }
+                );
+            });
+            SetWindowTextW(replacement, wide(">").as_ptr());
+            let results = with_app_result(|app| app.global_results);
+            let mut original_keys = [0; 256];
+            GetKeyboardState(original_keys.as_mut_ptr());
+            let mut replace_keys = original_keys;
+            replace_keys[VK_CONTROL as usize] = 0x80;
+            replace_keys[VK_SHIFT as usize] = 0x80;
+            SetKeyboardState(replace_keys.as_ptr());
+            assert!(shortcut(&MSG {
+                hwnd: results,
+                message: WM_KEYDOWN,
+                wParam: VK_RETURN as usize,
+                ..Default::default()
+            }));
+            SetKeyboardState(original_keys.as_ptr());
+            assert_eq!(window_text(editor), "🙂 item12 item34\r\n>item5");
+            SendMessageW(editor, WM_UNDO, 0, 0);
+            assert_eq!(window_text(editor), sample);
+            SetWindowTextW(input, wide(r"item(\d+)").as_ptr());
+            fs::write(
+                dir.join("notes").join(format!("{}.txt", ids[1])),
+                "ITEM6\rkeep",
+            )
+            .unwrap();
+            fs::write(
+                dir.join("notes").join(format!("{child}.txt")),
+                "item7\nitem8\r\nend",
+            )
+            .unwrap();
+            with_app(|app| app.queue_global_search());
+            finish_global_job();
+            with_app(|app| {
+                assert_eq!(
+                    app.global_rows.iter().map(|row| row.count).sum::<usize>(),
+                    6
+                );
+                app.command(ID_GLOBAL_CASE, 0);
+            });
+            finish_global_job();
+            with_app(|app| {
+                assert_eq!(
+                    app.global_rows.iter().map(|row| row.count).sum::<usize>(),
+                    5
+                );
+                app.command(ID_GLOBAL_CASE, 0);
+            });
+            finish_global_job();
+            SetWindowTextW(replacement, wide("${1}-done").as_ptr());
+            with_app(|app| {
+                let changes = app.prepare_global_replacements().unwrap();
+                assert_eq!(changes.len(), 3);
+                assert_eq!(changes.iter().map(|change| change.count).sum::<usize>(), 6);
+                app.apply_global_replacements(&changes).unwrap();
+                assert_eq!(window_text(editor), "🙂 12-done 34-done\r\n5-done");
+                assert_eq!(
+                    fs::read_to_string(dir.join("notes").join(format!("{}.txt", ids[1]))).unwrap(),
+                    "6-done\rkeep"
+                );
+                assert_eq!(
+                    fs::read_to_string(dir.join("notes").join(format!("{child}.txt"))).unwrap(),
+                    "7-done\n8-done\r\nend"
+                );
+            });
+            SendMessageW(editor, WM_UNDO, 0, 0);
+            assert_eq!(window_text(editor), sample);
+            with_app(|app| {
+                app.hide_find();
+                app.show_note_list();
+                app.global_regex = false;
+                app.find_regex_enabled = false;
+                app.global_pattern = None;
+                app.global_ready = false;
+                app.loading = true;
+                for tab in app.open.drain(..) {
+                    if !tab.editor.is_null() {
+                        DestroyWindow(tab.editor);
+                    }
+                }
+                app.active = None;
+                app.edit = app.empty_edit;
+                app.loading = false;
+                app.selection = Selection::default();
+                app.layout();
+                KillTimer(app.hwnd, AUTOSAVE_TIMER);
+            });
+            for (&id, bytes) in all_ids.iter().zip(originals) {
+                fs::write(dir.join("notes").join(format!("{id}.txt")), bytes).unwrap();
+            }
+        }
     }
 
     unsafe fn verify_edit_features() {
@@ -8197,6 +9346,7 @@ mod interaction_tests {
             });
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             verify_global_features(&ids, child, &dir);
+            verify_regex_search(&ids, child, &dir);
             let mut tree = null_mut();
             let mut tabs = null_mut();
             with_app(|app| {

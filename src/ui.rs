@@ -19,6 +19,37 @@ pub struct RenderTab {
     pub id: u64,
 }
 
+pub unsafe fn global_message_height(dc: HDC, theme: &Theme, message: &str, width: i32) -> i32 {
+    let minimum = theme.px(crate::global_search::message_height(message));
+    if message.is_empty() {
+        return minimum;
+    }
+    unsafe {
+        let saved = SaveDC(dc);
+        SelectObject(dc, theme.small);
+        let mut text: Vec<u16> = message.encode_utf16().collect();
+        let mut area = rect(0, 0, (width - theme.px(24)).max(1), 0);
+        DrawTextW(
+            dc,
+            text.as_mut_ptr(),
+            text.len() as i32,
+            &mut area,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        );
+        RestoreDC(dc, saved);
+        minimum.max(area.bottom + theme.px(8))
+    }
+}
+
+pub fn result_replace_bounds(theme: &Theme, width: i32, top: i32) -> RECT {
+    rect(
+        width - theme.px(28),
+        top + theme.px(1),
+        width - theme.px(4),
+        top + theme.px(25),
+    )
+}
+
 /// Published separately from mutable application state so synchronous Win32
 /// paint notifications can always draw the same UI, even during a mutation.
 #[derive(Clone)]
@@ -57,13 +88,19 @@ pub struct View {
     pub global_panel: Option<crate::global_search::Panel>,
     pub global_replace: bool,
     pub global_case: bool,
+    pub global_regex: bool,
     pub global_message: String,
     pub global_results: HWND,
     pub global_scroll: HWND,
     pub global_rows: Rc<Vec<crate::global_search::ResultRow>>,
     pub global_offset: usize,
     pub global_hover: Option<usize>,
-    pub global_selected: Option<u64>,
+    pub global_action_hover: Option<usize>,
+    pub global_replace_pressed: Option<crate::global_search::MatchKey>,
+    pub global_selected: Option<crate::global_search::MatchKey>,
+    pub global_focus: Option<crate::global_search::VisibleRow>,
+    pub global_visible: Rc<Vec<crate::global_search::VisibleRow>>,
+    pub global_collapsed: Rc<HashSet<u64>>,
     pub resizing: bool,
     pub tree_hover: Option<isize>,
     pub dragging: Option<u64>,
@@ -74,8 +111,9 @@ pub struct View {
     pub search_host: HWND,
     pub find_input: HWND,
     pub replace_input: HWND,
-    pub search_buttons: [HWND; 6],
+    pub search_buttons: [HWND; 7],
     pub find_case_sensitive: bool,
+    pub find_regex_enabled: bool,
     pub find_message: String,
 }
 thread_local! {
@@ -279,8 +317,9 @@ impl View {
                     GetClientRect(self.global_results, &mut area);
                     ScrollRange {
                         min: 0,
-                        max: self.global_rows.len() as i32 - 1,
-                        page: (area.bottom / self.theme.px(60)).max(1) as u32,
+                        max: self.global_visible.len() as i32 - 1,
+                        page: (area.bottom / self.theme.px(crate::global_search::ROW_HEIGHT)).max(1)
+                            as u32,
                         position: self.global_offset as i32,
                     }
                 }
@@ -402,35 +441,55 @@ impl View {
                 let mut area = RECT::default();
                 GetClientRect(hwnd, &mut area);
                 theme::fill(dc, area, self.theme.colors.sidebar);
-                for (field, y) in [(panel.find, 36), (panel.replace, 82)] {
+                for (field, y) in [
+                    (panel.find, crate::global_search::FIND_TOP),
+                    (panel.replace, crate::global_search::REPLACE_TOP),
+                ] {
                     if field == panel.replace && !self.global_replace {
                         continue;
                     }
                     theme::rounded(
                         dc,
-                        rect(p(12), p(y), area.right - p(12), p(y + 36)),
+                        rect(
+                            p(crate::global_search::FIELD_LEFT),
+                            p(y),
+                            area.right - p(8),
+                            p(y + crate::global_search::FIELD_HEIGHT),
+                        ),
                         self.theme.colors.white,
                         if GetFocus() == field {
                             self.theme.colors.blue
                         } else {
                             self.theme.colors.border
                         },
-                        p(7),
+                        p(5),
+                    );
+                }
+                if area.right > p(185) {
+                    theme::text(
+                        dc,
+                        "검색",
+                        rect(p(8), 0, area.right - p(134), p(26)),
+                        self.theme.small,
+                        self.theme.colors.ink,
+                        DT_LEFT,
                     );
                 }
                 let y = p(crate::global_search::message_y(
                     self.global_replace,
                     area.right < p(230),
                 ));
+                let message_height =
+                    global_message_height(dc, &self.theme, &self.global_message, area.right);
                 theme::text(
                     dc,
                     &self.global_message,
-                    rect(p(12), y, area.right - p(12), y + p(38)),
+                    rect(p(12), y, area.right - p(12), y + message_height - p(8)),
                     self.theme.small,
                     self.theme.colors.muted,
                     DT_LEFT | DT_WORDBREAK,
                 );
-                let bottom = y + p(45);
+                let bottom = y + message_height - 1;
                 theme::fill(
                     dc,
                     rect(0, bottom, area.right, bottom + 1),
@@ -473,7 +532,7 @@ impl View {
                     } else {
                         "찾기"
                     },
-                    rect(p(16), p(6), area.right - p(154), p(38)),
+                    rect(p(16), p(6), area.right - p(188), p(38)),
                     self.theme.ui,
                     self.theme.colors.ink,
                     DT_LEFT,
@@ -507,58 +566,282 @@ impl View {
         }
     }
 
+    unsafe fn paint_search_hit(&self, dc: HDC, hit: &crate::global_search::Match, area: RECT) {
+        if area.right <= area.left {
+            return;
+        }
+        if hit.preview.is_empty() {
+            if hit.range.start == hit.range.end {
+                unsafe {
+                    theme::fill(
+                        dc,
+                        rect(
+                            area.left,
+                            area.top + self.theme.px(4),
+                            area.left + self.theme.px(2),
+                            area.bottom - self.theme.px(4),
+                        ),
+                        self.theme.colors.blue,
+                    );
+                }
+            }
+            return;
+        }
+        unsafe {
+            let saved = SaveDC(dc);
+            SelectObject(dc, self.theme.small);
+            SetBkMode(dc, TRANSPARENT as i32);
+            IntersectClipRect(dc, area.left, area.top, area.right, area.bottom);
+            let units: Vec<u16> = hit.preview.encode_utf16().collect();
+            let start = hit.preview[..hit.highlight.start].encode_utf16().count();
+            let end = hit.preview[..hit.highlight.end].encode_utf16().count();
+            let measure = |text: &[u16]| {
+                let mut size = SIZE::default();
+                if !text.is_empty() {
+                    GetTextExtentPoint32W(dc, text.as_ptr(), text.len() as i32, &mut size);
+                }
+                size.cx
+            };
+            // Keep the match visible even when the sidebar is very narrow.
+            let mut trim = 0;
+            let prefix_budget = ((area.right - area.left) / 3).max(0);
+            while trim < start && measure(&units[trim..start]) > prefix_budget {
+                trim += if (0xd800..=0xdbff).contains(&units[trim]) {
+                    2
+                } else {
+                    1
+                };
+            }
+            let leading = usize::from(trim > 0);
+            let visible: Vec<u16> = (trim > 0)
+                .then_some('…' as u16)
+                .into_iter()
+                .chain(units[trim..].iter().copied())
+                .collect();
+            let match_start = leading + start - trim;
+            let match_end = leading + end - trim;
+            let flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS;
+            let mut bounds = area;
+            SetTextColor(dc, self.theme.colors.ink);
+            DrawTextW(
+                dc,
+                visible.as_ptr(),
+                visible.len() as i32,
+                &mut bounds,
+                flags,
+            );
+            let x = area.left + measure(&visible[..match_start]);
+            let right = (area.left
+                + measure(&visible[..match_end])
+                + if hit.range.start == hit.range.end {
+                    self.theme.px(2)
+                } else {
+                    0
+                })
+            .min(area.right);
+            if right > x {
+                let mark = rect(
+                    x,
+                    area.top + self.theme.px(4),
+                    right,
+                    area.bottom - self.theme.px(4),
+                );
+                theme::fill(
+                    dc,
+                    mark,
+                    if self.theme.dark {
+                        theme::rgb(94, 77, 35)
+                    } else {
+                        theme::rgb(255, 231, 154)
+                    },
+                );
+                IntersectClipRect(dc, mark.left, mark.top, mark.right, mark.bottom);
+                bounds = area;
+                DrawTextW(
+                    dc,
+                    visible.as_ptr(),
+                    visible.len() as i32,
+                    &mut bounds,
+                    flags,
+                );
+            }
+            RestoreDC(dc, saved);
+        }
+    }
     pub unsafe fn paint_global_results(&self, dc: HDC) {
         unsafe {
             let p = |n| self.theme.px(n);
             let mut area = RECT::default();
             GetClientRect(self.global_results, &mut area);
             theme::fill(dc, area, self.theme.colors.sidebar);
-            let height = p(60);
-            for (index, row) in self.global_rows.iter().enumerate().skip(self.global_offset) {
+            let height = p(crate::global_search::ROW_HEIGHT);
+            let saved = SaveDC(dc);
+            IntersectClipRect(dc, 0, 0, area.right, area.bottom);
+            for (index, item) in self
+                .global_visible
+                .iter()
+                .enumerate()
+                .skip(self.global_offset)
+            {
                 let top = (index - self.global_offset) as i32 * height;
                 if top >= area.bottom {
                     break;
                 }
-                let selected = self.global_selected == Some(row.id);
+                let row = &self.global_rows[item.group];
+                let selected = self.global_focus == Some(*item);
                 if selected || self.global_hover == Some(index) {
-                    theme::rounded(
+                    theme::fill(
                         dc,
-                        rect(p(4), top + p(2), area.right - p(4), top + height - p(2)),
+                        rect(0, top, area.right, top + height),
                         if selected {
                             self.theme.colors.selected
                         } else {
                             self.theme.colors.hover
                         },
-                        if selected && GetFocus() == self.global_results {
-                            self.theme.colors.blue
-                        } else if selected {
-                            self.theme.colors.selected
-                        } else {
-                            self.theme.colors.hover
-                        },
-                        p(7),
                     );
                 }
-                let title = self
-                    .book
-                    .get(row.id)
-                    .map_or("삭제된 메모", |note| note.title.as_str());
-                theme::text(
-                    dc,
-                    &format!("{title}  ·  {}곳", row.count),
-                    rect(p(12), top + p(5), area.right - p(8), top + p(29)),
-                    self.theme.ui,
-                    self.theme.colors.ink,
-                    DT_LEFT,
-                );
-                theme::text(
-                    dc,
-                    &format!("{}행  {}", row.line, row.preview),
-                    rect(p(12), top + p(30), area.right - p(8), top + p(53)),
-                    self.theme.small,
-                    self.theme.colors.muted,
-                    DT_LEFT,
-                );
+                if let Some(hit) = item.hit {
+                    let hit = &row.matches[hit];
+                    let action = result_replace_bounds(&self.theme, area.right, top);
+                    theme::text(
+                        dc,
+                        &hit.line.to_string(),
+                        rect(p(28), top, p(62), top + height),
+                        self.theme.small,
+                        self.theme.colors.muted,
+                        DT_RIGHT,
+                    );
+                    self.paint_search_hit(
+                        dc,
+                        hit,
+                        rect(
+                            p(70),
+                            top,
+                            if self.global_replace {
+                                action.left - p(4)
+                            } else {
+                                area.right - p(6)
+                            },
+                            top + height,
+                        ),
+                    );
+                    if self.global_replace {
+                        let key = crate::global_search::MatchKey {
+                            id: row.id,
+                            range: hit.range,
+                        };
+                        let pressed = self.global_replace_pressed == Some(key);
+                        let hovered = self.global_action_hover == Some(index);
+                        if pressed || hovered {
+                            theme::rounded(
+                                dc,
+                                action,
+                                if pressed {
+                                    self.theme.colors.selected
+                                } else {
+                                    self.theme.colors.hover
+                                },
+                                self.theme.colors.blue,
+                                p(5),
+                            );
+                        }
+                        theme::replace_icon(
+                            dc,
+                            (action.left + action.right) / 2,
+                            (action.top + action.bottom) / 2,
+                            p(7),
+                            false,
+                            if pressed || hovered {
+                                self.theme.colors.blue
+                            } else {
+                                self.theme.colors.muted
+                            },
+                        );
+                    }
+                } else {
+                    let cx = p(12);
+                    let cy = top + height / 2;
+                    let points = if self.global_collapsed.contains(&row.id) {
+                        [
+                            (cx - p(2), cy - p(4)),
+                            (cx + p(2), cy),
+                            (cx - p(2), cy + p(4)),
+                        ]
+                    } else {
+                        [
+                            (cx - p(4), cy - p(2)),
+                            (cx, cy + p(2)),
+                            (cx + p(4), cy - p(2)),
+                        ]
+                    };
+                    if !row.matches.is_empty() {
+                        theme::line(dc, &points, self.theme.colors.muted, p(1));
+                    }
+                    theme::document(
+                        dc,
+                        p(24),
+                        top + (height - p(14)) / 2,
+                        p(14),
+                        self.theme.colors.muted,
+                    );
+                    let count = row.count.to_string();
+                    let text: Vec<u16> = count.encode_utf16().collect();
+                    let old = SelectObject(dc, self.theme.small);
+                    let mut size = SIZE::default();
+                    GetTextExtentPoint32W(dc, text.as_ptr(), text.len() as i32, &mut size);
+                    SelectObject(dc, old);
+                    let badge = rect(
+                        area.right - (size.cx + p(12)).max(p(24)) - p(6),
+                        top + p(4),
+                        area.right - p(6),
+                        top + height - p(4),
+                    );
+                    theme::rounded(
+                        dc,
+                        badge,
+                        self.theme.colors.selected,
+                        self.theme.colors.selected,
+                        p(12),
+                    );
+                    theme::text(
+                        dc,
+                        &count,
+                        badge,
+                        self.theme.small,
+                        if self.global_selected.is_some_and(|key| key.id == row.id) {
+                            self.theme.colors.blue
+                        } else {
+                            self.theme.colors.ink
+                        },
+                        DT_CENTER,
+                    );
+                    let title = self
+                        .book
+                        .get(row.id)
+                        .map_or("삭제된 메모", |note| note.title.as_str());
+                    theme::text(
+                        dc,
+                        title,
+                        rect(p(44), top, badge.left - p(6), top + height),
+                        self.theme.ui,
+                        self.theme.colors.ink,
+                        DT_LEFT,
+                    );
+                }
+                if selected && GetFocus() == self.global_results {
+                    theme::line(
+                        dc,
+                        &[(0, top), (area.right - 1, top)],
+                        self.theme.colors.blue,
+                        1,
+                    );
+                    theme::line(
+                        dc,
+                        &[(0, top + height - 1), (area.right - 1, top + height - 1)],
+                        self.theme.colors.blue,
+                        1,
+                    );
+                }
             }
             if self.global_rows.is_empty() {
                 theme::text(
@@ -570,6 +853,7 @@ impl View {
                     DT_LEFT,
                 );
             }
+            RestoreDC(dc, saved);
         }
     }
 
@@ -997,7 +1281,12 @@ impl View {
                     .iter()
                     .position(|&button| button == draw.hwndItem)
             }) {
-                let base = if global_button.is_some() {
+                let regex_button = if global_button.is_some() {
+                    index == 4
+                } else {
+                    index == 6
+                };
+                let base = if global_button.is_some() && !matches!(index, 0 | 4 | 5) {
                     self.theme.colors.sidebar
                 } else {
                     self.theme.colors.white
@@ -1008,8 +1297,14 @@ impl View {
                     } else {
                         self.find_case_sensitive
                     })
-                    || (index == 6 && self.global_replace);
-                let primary = index == 5;
+                    || (regex_button
+                        && if global_button.is_some() {
+                            self.global_regex
+                        } else {
+                            self.find_regex_enabled
+                        })
+                    || (global_button.is_some() && index == 6 && self.global_replace);
+                let primary = index == 5 && global_button.is_none();
                 let color = if primary {
                     if hovered || pressed {
                         theme::rgb(25, 99, 220)
@@ -1030,7 +1325,7 @@ impl View {
                     color,
                     if focused {
                         self.theme.colors.blue
-                    } else if index == 4 {
+                    } else if index == 4 && global_button.is_none() {
                         self.theme.colors.border
                     } else {
                         color
@@ -1039,6 +1334,25 @@ impl View {
                 );
                 let cx = area.right / 2;
                 let cy = area.bottom / 2;
+                if regex_button {
+                    theme::text(
+                        dc,
+                        ".*",
+                        area,
+                        self.theme.small,
+                        if checked {
+                            self.theme.colors.blue
+                        } else {
+                            self.theme.colors.ink
+                        },
+                        DT_CENTER,
+                    );
+                    return;
+                }
+                if global_button.is_some() && index == 5 {
+                    theme::replace_icon(dc, cx, cy, p(7), true, self.theme.colors.ink);
+                    return;
+                }
                 match index {
                     1 | 2 => {
                         let direction = if index == 1 { -1 } else { 1 };
@@ -1048,6 +1362,57 @@ impl View {
                                 (cx - p(4), cy - direction * p(2)),
                                 (cx, cy + direction * p(2)),
                                 (cx + p(4), cy - direction * p(2)),
+                            ],
+                            self.theme.colors.ink,
+                            p(1),
+                        );
+                    }
+                    7 => {
+                        theme::line(
+                            dc,
+                            &[
+                                (cx + p(5), cy - p(2)),
+                                (cx + p(2), cy - p(5)),
+                                (cx - p(2), cy - p(5)),
+                                (cx - p(5), cy - p(2)),
+                                (cx - p(5), cy + p(2)),
+                                (cx - p(2), cy + p(5)),
+                                (cx + p(2), cy + p(5)),
+                                (cx + p(5), cy + p(2)),
+                            ],
+                            self.theme.colors.ink,
+                            p(1),
+                        );
+                        theme::line(
+                            dc,
+                            &[
+                                (cx + p(5), cy - p(6)),
+                                (cx + p(5), cy - p(1)),
+                                (cx + p(1), cy - p(1)),
+                            ],
+                            self.theme.colors.ink,
+                            p(1),
+                        );
+                    }
+                    8 => {
+                        theme::line(
+                            dc,
+                            &[(cx - p(5), cy + p(1)), (cx + p(5), cy + p(1))],
+                            self.theme.colors.ink,
+                            p(1),
+                        );
+                        theme::line(
+                            dc,
+                            &[(cx - p(5), cy + p(5)), (cx + p(5), cy + p(5))],
+                            self.theme.colors.ink,
+                            p(1),
+                        );
+                        theme::line(
+                            dc,
+                            &[
+                                (cx - p(3), cy - p(2)),
+                                (cx, cy - p(5)),
+                                (cx + p(3), cy - p(2)),
                             ],
                             self.theme.colors.ink,
                             p(1),

@@ -140,6 +140,45 @@ pub fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
     }
 }
 
+pub unsafe fn replace_icon(dc: HDC, cx: i32, cy: i32, radius: i32, all: bool, color: COLORREF) {
+    unsafe {
+        let step = (radius / 2).max(1);
+        // Text lines plus a return arrow distinguish replacement from navigation.
+        line(dc, &[(cx - radius, cy - step), (cx, cy - step)], color, 1);
+        line(dc, &[(cx - radius, cy + step), (cx, cy + step)], color, 1);
+        line(
+            dc,
+            &[
+                (cx + step, cy - radius),
+                (cx + radius, cy - radius),
+                (cx + radius, cy + radius),
+                (cx + step, cy + radius),
+            ],
+            color,
+            1,
+        );
+        line(
+            dc,
+            &[
+                (cx + step * 2, cy + radius - step),
+                (cx + step, cy + radius),
+                (cx + step * 2, cy + radius + step),
+            ],
+            color,
+            1,
+        );
+        if all {
+            line(
+                dc,
+                &[(cx - radius, cy - step * 2), (cx, cy - step * 2)],
+                color,
+                1,
+            );
+            line(dc, &[(cx - radius, cy), (cx, cy)], color, 1);
+        }
+    }
+}
+
 pub unsafe fn fill(dc: HDC, area: RECT, color: COLORREF) {
     unsafe {
         let brush = GetStockObject(DC_BRUSH);

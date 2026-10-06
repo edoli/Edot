@@ -7,6 +7,7 @@ mod editing;
 mod global_search;
 mod model;
 mod scrollbar;
+mod search;
 mod selection;
 mod settings;
 mod settings_controls;
