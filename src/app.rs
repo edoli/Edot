@@ -145,7 +145,6 @@ struct TabDrag {
 struct TreePress {
     id: u64,
     collapse: bool,
-    focus_editor: bool,
     clicked: bool,
 }
 
@@ -2834,6 +2833,7 @@ impl App {
     unsafe fn tree_mouse_down(&mut self, point: POINT, right: bool, ctrl: bool, shift: bool) {
         unsafe {
             self.tooltip.hide();
+            SetFocus(self.tree);
             let mut hit = TVHITTESTINFO {
                 pt: point,
                 ..Default::default()
@@ -2868,7 +2868,6 @@ impl App {
                 self.tree_press = Some(TreePress {
                     id,
                     collapse: preserve,
-                    focus_editor: !ctrl && !shift,
                     clicked: false,
                 });
             }
@@ -2877,7 +2876,7 @@ impl App {
             if !right && !ctrl && !shift {
                 // TreeView's DragDetect can consume mouse-up before the subclass sees it.
                 // Open on selection; only collapse a batch after a completed click.
-                self.open_note(id);
+                self.open_note_with_focus(id, false);
             }
         }
     }
@@ -2886,18 +2885,10 @@ impl App {
         unsafe {
             if let Some(press) = self.tree_press.take()
                 && self.dragging.is_none()
+                && press.collapse
             {
-                if press.collapse {
-                    self.selection.single(press.id);
-                    self.refresh_selection();
-                }
-                if press.focus_editor
-                    && self
-                        .active
-                        .is_some_and(|index| self.open[index].id == press.id)
-                {
-                    SetFocus(self.edit);
-                }
+                self.selection.single(press.id);
+                self.refresh_selection();
             }
         }
     }
@@ -3140,6 +3131,10 @@ impl App {
     }
 
     unsafe fn activate(&mut self, index: usize) -> bool {
+        unsafe { self.activate_with_focus(index, true) }
+    }
+
+    unsafe fn activate_with_focus(&mut self, index: usize, focus_editor: bool) -> bool {
         let _timing = startup::span("tab.activate");
         if index >= self.open.len() {
             return false;
@@ -3154,7 +3149,9 @@ impl App {
                 self.refresh_selection();
             }
             if self.active == Some(index) {
-                SetFocus(self.edit);
+                if focus_editor {
+                    SetFocus(self.edit);
+                }
                 return true;
             }
             if !self.load_editor(index) {
@@ -3183,7 +3180,9 @@ impl App {
                 }
             }
             InvalidateRect(self.tree_scroll, null(), 0);
-            SetFocus(self.edit);
+            if focus_editor {
+                SetFocus(self.edit);
+            }
             self.set_status(if self.open[index].dirty {
                 "저장 중…"
             } else {
@@ -3195,9 +3194,15 @@ impl App {
     }
 
     unsafe fn open_note(&mut self, id: u64) {
+        unsafe {
+            self.open_note_with_focus(id, true);
+        }
+    }
+
+    unsafe fn open_note_with_focus(&mut self, id: u64, focus_editor: bool) {
         if let Some(index) = self.open.iter().position(|t| t.id == id) {
             unsafe {
-                self.activate(index);
+                self.activate_with_focus(index, focus_editor);
             }
             return;
         }
@@ -3209,7 +3214,7 @@ impl App {
             editor: null_mut(),
         });
         unsafe {
-            if !self.activate(index) {
+            if !self.activate_with_focus(index, focus_editor) {
                 self.open.pop();
                 self.layout();
             }
@@ -3585,6 +3590,7 @@ impl App {
     }
 
     unsafe fn delete_selected(&mut self) {
+        let tree_focused = unsafe { GetFocus() == self.tree };
         let selected: Vec<_> = self.selection.ids.iter().copied().collect();
         let ids = self.book.selected_subtrees(&selected);
         if ids.is_empty() {
@@ -3594,8 +3600,14 @@ impl App {
             "선택한 항목과 하위 메모 총 {}개를 삭제할까요?\n삭제한 파일은 휴지통 폴더에 보관됩니다.",
             ids.len()
         );
-        if unsafe { message(self.hwnd, "메모 삭제", &prompt, MB_YESNO | MB_ICONQUESTION) } != IDYES
-        {
+        let confirmed =
+            unsafe { message(self.hwnd, "메모 삭제", &prompt, MB_YESNO | MB_ICONQUESTION) };
+        if tree_focused {
+            unsafe {
+                SetFocus(self.tree);
+            }
+        }
+        if confirmed != IDYES {
             return;
         }
         if !unsafe { self.save_all() } {
@@ -3607,6 +3619,7 @@ impl App {
     }
 
     unsafe fn delete_notes_confirmed(&mut self, selected: &[u64]) -> std::io::Result<()> {
+        let tree_focused = unsafe { GetFocus() == self.tree };
         let ids = self.book.trash_notes(&self.data_dir, selected)?;
         if ids.is_empty() {
             return Ok(());
@@ -3650,7 +3663,7 @@ impl App {
                 if surviving.is_some() {
                     self.layout();
                 } else {
-                    self.activate(next);
+                    self.activate_with_focus(next, !tree_focused);
                 }
             } else {
                 self.edit = self.empty_edit;
@@ -3661,6 +3674,9 @@ impl App {
                 self.rebuild_tree(None);
                 self.set_status("준비됨");
                 self.layout();
+            }
+            if tree_focused {
+                SetFocus(self.tree);
             }
         }
         Ok(())
@@ -5602,10 +5618,8 @@ impl App {
                         unsafe {
                             self.refresh_selection();
                             if !ctrl && !shift {
-                                self.open_note(id);
-                                if keyboard {
-                                    SetFocus(self.tree);
-                                }
+                                self.open_note_with_focus(id, false);
+                                SetFocus(self.tree);
                             }
                         }
                     }
@@ -6200,6 +6214,11 @@ fn shortcut(msg: &MSG) -> bool {
                 app.replace_one();
             } else {
                 app.find_next(shift, false);
+            }
+            handled = true;
+        } else if key == VK_RETURN as u32 && !ctrl && !shift && msg.hwnd == app.tree {
+            if let Some(id) = app.selected_id() {
+                app.open_note(id);
             }
             handled = true;
         } else if ctrl && msg.hwnd == app.edit && (key == b'Z' as u32 || key == b'Y' as u32) {
@@ -10030,8 +10049,18 @@ mod interaction_tests {
                 assert_eq!(app.open.len(), 1);
                 assert_eq!(app.open[app.active.unwrap()].id, ids[0]);
                 assert_eq!(window_text(app.edit), format!("본문 {}", ids[0]));
-                assert_eq!(GetFocus(), app.edit);
+                assert_eq!(GetFocus(), tree);
                 assert!(app.tree_press.is_none());
+            });
+            assert!(shortcut(&MSG {
+                hwnd: tree,
+                message: WM_KEYDOWN,
+                wParam: VK_RETURN as usize,
+                ..Default::default()
+            }));
+            with_app(|app| {
+                assert_eq!(GetFocus(), app.edit);
+                assert_eq!(window_text(app.edit), format!("본문 {}", ids[0]));
             });
             with_app(|app| {
                 for &id in &ids {
@@ -10043,14 +10072,26 @@ mod interaction_tests {
             verify_sidebar_splitter();
             verify_shared_splitters();
             verify_rename();
+            click_tree(tree, ids[1], 0, true);
+            SendMessageW(tree, WM_KEYDOWN, VK_DOWN as usize, 0);
+            with_app(|app| {
+                assert_eq!(GetFocus(), tree);
+                assert_eq!(app.open[app.active.unwrap()].id, ids[2]);
+            });
+            SendMessageW(tree, WM_KEYDOWN, VK_UP as usize, 0);
+            with_app(|app| {
+                assert_eq!(GetFocus(), tree);
+                assert_eq!(app.open[app.active.unwrap()].id, ids[1]);
+            });
             click_tree(tree, ids[0], 0, true);
             with_app(|app| {
                 assert_eq!(app.open[app.active.unwrap()].id, ids[0]);
-                assert_eq!(GetFocus(), app.edit);
+                assert_eq!(GetFocus(), tree);
                 assert!(app.tree_press.is_none());
             });
             click_tree(tree, ids[2], MK_CONTROL as usize, true);
             with_app(|app| {
+                assert_eq!(GetFocus(), tree);
                 assert_eq!(*app.selection.ids, HashSet::from([ids[0], ids[2]]));
                 assert_eq!(app.open.len(), 4); // Ctrl selection does not open new tabs.
                 assert_eq!(app.open[app.active.unwrap()].id, ids[0]);
@@ -10156,6 +10197,7 @@ mod interaction_tests {
             });
             click_tree(tree, ids[0], 0, false);
             with_app(|app| {
+                assert_eq!(GetFocus(), tree);
                 assert_eq!(app.selection.ids.len(), 3); // Kept until click-up or drag.
                 assert_eq!(app.open[app.active.unwrap()].id, ids[0]); // Opens before release.
             });
@@ -10281,6 +10323,21 @@ mod interaction_tests {
                     Notebook::load(&dir).unwrap().children(0),
                     vec![ids[2], ids[3]]
                 );
+            });
+            // Confirmed deletions use only this isolated fixture. Keep the
+            // sidebar focused across active-tab removal and an empty list.
+            click_tree(tree, ids[3], 0, true);
+            with_app(|app| {
+                let remaining_editor = app.open.iter().find(|tab| tab.id == ids[2]).unwrap().editor;
+                app.delete_notes_confirmed(&[ids[3]]).unwrap();
+                assert_eq!(GetFocus(), tree);
+                assert_eq!(app.open[app.active.unwrap()].id, ids[2]);
+                assert_eq!(app.edit, remaining_editor);
+                assert_eq!(Notebook::load(&dir).unwrap().children(0), vec![ids[2]]);
+                app.delete_notes_confirmed(&[ids[2]]).unwrap();
+                assert_eq!(GetFocus(), tree);
+                assert!(app.open.is_empty());
+                assert!(Notebook::load(&dir).unwrap().notes.is_empty());
             });
             drop(guard);
             UnregisterClassW(class.as_ptr(), instance);
