@@ -102,6 +102,7 @@ pub struct View {
     pub global_visible: Rc<Vec<crate::global_search::VisibleRow>>,
     pub global_collapsed: Rc<HashSet<u64>>,
     pub resizing: bool,
+    pub splitter_hover: bool,
     pub tree_hover: Option<isize>,
     pub dragging: Option<u64>,
     pub drag_sources: Rc<Vec<u64>>,
@@ -227,15 +228,53 @@ pub unsafe fn paint_window(hwnd: HWND, draw: impl FnOnce(HDC)) {
     }
 }
 impl View {
-    pub unsafe fn splitter_hit(&self, point: POINT) -> bool {
-        let mut area = RECT::default();
+    pub unsafe fn paint_splitter(&self, hwnd: HWND, dc: HDC) {
         unsafe {
-            GetClientRect(self.hwnd, &mut area);
+            let p = |n| self.theme.px(n);
+            let mut area = RECT::default();
+            let mut parent = RECT::default();
+            GetClientRect(hwnd, &mut area);
+            GetClientRect(self.hwnd, &mut parent);
+            let edge = p(4);
+            theme::fill(dc, area, self.theme.colors.sidebar);
+            theme::fill(
+                dc,
+                rect(edge + 1, 0, area.right, area.bottom),
+                self.theme.colors.white,
+            );
+            if self.tab_layout.overflow {
+                theme::fill(
+                    dc,
+                    rect(edge + 1, 0, area.right, p(12)),
+                    self.theme.colors.bar,
+                );
+            }
+            let status_top = (parent.bottom - p(32) - p(36)).max(0);
+            theme::fill(
+                dc,
+                rect(edge + 1, status_top, area.right, area.bottom),
+                self.theme.colors.bar,
+            );
+            theme::fill(
+                dc,
+                rect(edge + 1, status_top, area.right, status_top + 1),
+                self.theme.colors.border,
+            );
+            let radius = if self.resizing || self.splitter_hover {
+                p(1)
+            } else {
+                0
+            };
+            theme::fill(
+                dc,
+                rect(edge - radius, 0, edge + radius + 1, area.bottom),
+                if self.splitter_hover || self.resizing {
+                    self.theme.colors.blue
+                } else {
+                    self.theme.colors.border
+                },
+            );
         }
-        self.sidebar_visible
-            && point.y > self.theme.px(36)
-            && point.y < area.bottom
-            && (point.x - self.sidebar_edge(area.right)).abs() <= self.theme.px(4)
     }
 
     fn drag_description(&self) -> String {

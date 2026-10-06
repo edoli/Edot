@@ -190,6 +190,7 @@ struct App {
     editor_scroll: [HWND; 2],
     toggle: HWND,
     sidebar_tabs: [HWND; 2],
+    splitter: HWND,
     tab_add: HWND,
     settings_button: HWND,
     settings_panel: Option<Panel>,
@@ -262,6 +263,8 @@ struct App {
     sidebar_width: i32,
     sidebar_visible: bool,
     resizing: bool,
+    splitter_hover: Cell<bool>,
+    resize_offset: i32,
     dragging: Option<u64>,
     drag_sources: Rc<Vec<u64>>,
     selection: Selection,
@@ -1180,6 +1183,114 @@ unsafe extern "system" fn control_subclass(
     }
 }
 
+unsafe extern "system" fn splitter_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    _: usize,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_ERASEBKGND => return 1,
+            WM_PAINT => {
+                ui::paint_window(hwnd, |dc| {
+                    ui::with_view(|view| view.paint_splitter(hwnd, dc))
+                });
+                return 0;
+            }
+            WM_PRINT => return DefWindowProcW(hwnd, msg, wp, lp),
+            WM_PRINTCLIENT => {
+                let saved = SaveDC(wp as HDC);
+                ui::with_view(|view| view.paint_splitter(hwnd, wp as HDC));
+                RestoreDC(wp as HDC, saved);
+                return 0;
+            }
+            WM_SETCURSOR => {
+                SetCursor(LoadCursorW(null_mut(), IDC_SIZEWE));
+                return 1;
+            }
+            WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_LBUTTONUP => {
+                let mut local = RECT::default();
+                GetClientRect(hwnd, &mut local);
+                let mut point = POINT {
+                    x: point_x(lp),
+                    y: point_y(lp),
+                };
+                let inside = PtInRect(&local, point) != 0;
+                MapWindowPoints(hwnd, GetParent(hwnd), &mut point, 1);
+                with_app(|app| {
+                    app.set_splitter_hover(inside);
+                    match msg {
+                        WM_LBUTTONDOWN => {
+                            let mut area = RECT::default();
+                            GetClientRect(app.hwnd, &mut area);
+                            app.resize_offset = point.x - app.sidebar_edge(area.right);
+                            app.resizing = true;
+                            app.tooltip.dismiss();
+                            app.publish_view();
+                            SetCapture(hwnd);
+                            InvalidateRect(hwnd, null(), 0);
+                        }
+                        WM_MOUSEMOVE if app.resizing => {
+                            let width = ((point.x - app.resize_offset) * 96
+                                + app.theme.dpi as i32 / 2)
+                                / app.theme.dpi as i32;
+                            let width = width.clamp(150, 600);
+                            if width != app.sidebar_width {
+                                app.sidebar_width = width;
+                                app.layout();
+                            }
+                        }
+                        WM_LBUTTONUP if app.resizing => {
+                            app.resizing = false;
+                            app.publish_view();
+                            if GetCapture() == hwnd {
+                                ReleaseCapture();
+                            }
+                            InvalidateRect(hwnd, null(), 0);
+                        }
+                        _ => {}
+                    }
+                });
+                if msg == WM_MOUSEMOVE {
+                    let mut track = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    TrackMouseEvent(&mut track);
+                }
+                return 0;
+            }
+            WM_MOUSELEAVE => {
+                with_app(|app| app.set_splitter_hover(false));
+                return 0;
+            }
+            WM_CAPTURECHANGED | WM_CANCELMODE => {
+                with_app(|app| {
+                    app.resizing = false;
+                    app.set_splitter_hover(false);
+                    app.publish_view();
+                    if GetCapture() == hwnd {
+                        ReleaseCapture();
+                    }
+                    InvalidateRect(hwnd, null(), 0);
+                });
+                return 0;
+            }
+            WM_NCDESTROY => {
+                ui::release_buffer(hwnd);
+                RemoveWindowSubclass(hwnd, Some(splitter_proc), id);
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
 impl App {
     unsafe fn new(hwnd: HWND, data_dir: PathBuf, book: Notebook, settings: Settings) -> Self {
         let controls_timing = startup::span("ui.controls");
@@ -1208,6 +1319,18 @@ impl App {
                 id,
             )
         });
+        let splitter = unsafe {
+            let control = child(
+                hwnd,
+                windows_sys::w!("STATIC"),
+                "사이드바 폭 조절",
+                common | SS_NOTIFY,
+                0,
+                133,
+            );
+            SetWindowSubclass(control, Some(splitter_proc), 1, 0);
+            control
+        };
         let tree_host = unsafe {
             child(
                 hwnd,
@@ -1454,6 +1577,7 @@ impl App {
             editor_scroll,
             toggle,
             sidebar_tabs,
+            splitter,
             tab_add,
             settings_button,
             settings_panel: None,
@@ -1533,6 +1657,8 @@ impl App {
             sidebar_width: 260,
             sidebar_visible: true,
             resizing: false,
+            splitter_hover: Cell::new(false),
+            resize_offset: 0,
             dragging: None,
             drag_sources: Rc::new(Vec::new()),
             selection: Selection::default(),
@@ -2128,6 +2254,13 @@ impl App {
         }
     }
 
+    unsafe fn set_splitter_hover(&self, hover: bool) {
+        if self.splitter_hover.replace(hover) != hover {
+            self.publish_view();
+            unsafe { InvalidateRect(self.splitter, null(), 0) };
+        }
+    }
+
     fn publish_view(&self) {
         if self.view_tabs.borrow().len() != self.open.len() {
             *self.view_tabs.borrow_mut() = Rc::new(
@@ -2186,6 +2319,7 @@ impl App {
             global_visible: Rc::clone(&self.global_visible),
             global_collapsed: Rc::clone(&self.global_collapsed),
             resizing: self.resizing,
+            splitter_hover: self.splitter_hover.get(),
             tree_hover: self.tree_hover,
             dragging: self.dragging,
             drag_sources: Rc::clone(&self.drag_sources),
@@ -2283,6 +2417,13 @@ impl App {
             let editor_width = (w - content_x - scroll_width).max(0);
             let editor_height = (h - editor_y - p(32) - scroll_height).max(0);
             let mut positions = vec![
+                (
+                    self.splitter,
+                    left - p(4),
+                    p(36),
+                    p(4) * 2 + 1,
+                    (h - p(36)).max(0),
+                ),
                 (
                     self.toggle,
                     if self.sidebar_visible {
@@ -2416,6 +2557,7 @@ impl App {
             }
             let visible_rows = ((h - p(60)) / p(29).max(1)).max(1) as usize;
             for (hwnd, show) in [
+                (self.splitter, self.sidebar_visible),
                 (self.sidebar_tabs[0], self.sidebar_visible),
                 (self.sidebar_tabs[1], self.sidebar_visible),
                 (self.tree_host, self.sidebar_visible && !self.find_global),
@@ -2436,6 +2578,21 @@ impl App {
             self.layout_global();
             self.layout_tab_rename();
             ui::with_view(|view| view.refresh_editor_scroll());
+            // The input strip must cover both siblings at the visible boundary,
+            // including search controls created after it. Never activate it.
+            if self.sidebar_visible {
+                SetWindowPos(
+                    self.splitter,
+                    HWND_TOP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW,
+                );
+            } else {
+                self.set_splitter_hover(false);
+            }
             self.layout_settings();
             RedrawWindow(
                 self.hwnd,
@@ -3782,11 +3939,13 @@ impl App {
         self.drop_target = None;
         self.tree_hover = None;
         self.resizing = false;
+        unsafe { self.set_splitter_hover(false) };
         self.publish_view();
         unsafe {
             self.cancel_tab_drag();
             KillTimer(self.hwnd, DRAG_SCROLL_TIMER);
             for control in [
+                self.splitter,
                 self.editor_scroll[0],
                 self.editor_scroll[1],
                 self.tree_scroll,
@@ -3796,6 +3955,7 @@ impl App {
             }
             if GetCapture() == self.hwnd
                 || [
+                    self.splitter,
                     self.editor_scroll[0],
                     self.editor_scroll[1],
                     self.tree_scroll,
@@ -4207,6 +4367,9 @@ impl App {
 
     unsafe fn toggle_sidebar(&mut self) {
         unsafe {
+            if self.resizing {
+                self.cancel_interaction();
+            }
             self.sidebar_visible = !self.sidebar_visible;
             if !self.sidebar_visible {
                 self.cancel_global_search();
@@ -5573,16 +5736,13 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_SETCURSOR => {
             let mut handled = false;
             ui::with_view(|view| unsafe {
-                let mut point = POINT::default();
-                GetCursorPos(&mut point);
-                ScreenToClient(hwnd, &mut point);
                 let cursor = if view.dragging.is_some() {
                     Some(if view.drop_target.is_some() {
                         IDC_SIZEALL
                     } else {
                         IDC_NO
                     })
-                } else if view.resizing || view.splitter_hit(point) {
+                } else if view.resizing {
                     Some(IDC_SIZEWE)
                 } else {
                     None
@@ -5787,53 +5947,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             });
             0
         }
-        WM_LBUTTONDOWN => {
-            with_app(|app| {
-                let mut area = RECT::default();
-                unsafe {
-                    GetClientRect(app.hwnd, &mut area);
-                }
-                if app.sidebar_visible
-                    && (point_x(lp) - app.sidebar_edge(area.right)).abs() <= app.theme.px(4)
-                    && point_y(lp) > app.theme.px(36)
-                {
-                    app.resizing = true;
-                    unsafe {
-                        SetCapture(hwnd);
-                        SetCursor(LoadCursorW(null_mut(), IDC_SIZEWE));
-                    }
-                }
-            });
-            0
-        }
         WM_MOUSEMOVE => {
             with_app(|app| {
-                if !app.resizing && app.dragging.is_none() {
-                    let mut area = RECT::default();
-                    unsafe {
-                        GetClientRect(hwnd, &mut area);
-                    }
-                    if app.sidebar_visible
-                        && point_y(lp) > app.theme.px(36)
-                        && (point_x(lp) - app.sidebar_edge(area.right)).abs() <= app.theme.px(4)
-                    {
-                        unsafe {
-                            SetCursor(LoadCursorW(null_mut(), IDC_SIZEWE));
-                        }
-                    }
-                }
-                if app.resizing {
-                    unsafe {
-                        SetCursor(LoadCursorW(null_mut(), IDC_SIZEWE));
-                    }
-                    let width = (point_x(lp) * 96 / app.theme.dpi as i32).clamp(150, 600);
-                    if width != app.sidebar_width {
-                        app.sidebar_width = width;
-                        unsafe {
-                            app.layout();
-                        }
-                    }
-                }
                 if app.dragging.is_some() {
                     unsafe {
                         app.update_drag_feedback();
@@ -5844,12 +5959,6 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_LBUTTONUP => {
             with_app(|app| {
-                if app.resizing {
-                    app.resizing = false;
-                    unsafe {
-                        ReleaseCapture();
-                    }
-                }
                 if app.dragging.is_some() {
                     unsafe {
                         app.finish_drag();
@@ -7277,6 +7386,7 @@ mod settings_tests {
 mod interaction_tests {
     use super::*;
     use windows_sys::Win32::System::StationsAndDesktops::*;
+    use windows_sys::Win32::System::SystemServices::MK_LBUTTON;
 
     #[test]
     fn native_selection_tab_drag_and_batch_commands_preserve_editors() {
@@ -7721,6 +7831,127 @@ mod interaction_tests {
             );
             ScreenToClient(control, &mut point);
             (point.x as u16 as u32 | ((point.y as u16 as u32) << 16)) as isize
+        }
+    }
+
+    unsafe fn verify_sidebar_splitter() {
+        unsafe {
+            let (splitter, editor, original_width, original_settings, original_mode) =
+                with_app_result(|app| {
+                    (
+                        app.splitter,
+                        app.edit,
+                        app.sidebar_width,
+                        app.settings.clone(),
+                        app.find_global,
+                    )
+                });
+            let original_focus = GetFocus();
+            let content = window_text(editor);
+            let selection = editing::selection(editor);
+            let undo = SendMessageW(editor, EM_CANUNDO, 0, 0);
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                with_app(|app| {
+                    let mut settings = app.settings.clone();
+                    settings.theme = mode;
+                    app.apply_settings(settings);
+                });
+                for search in [false, true] {
+                    with_app(|app| {
+                        app.find_global = search;
+                        app.sidebar_width = original_width;
+                        app.layout();
+                        SetFocus(if search { app.edit } else { app.tree });
+                    });
+                    let (radius, y, blue, selected, border) = with_app_result(|app| {
+                        (
+                            app.theme.px(4),
+                            app.theme.px(120),
+                            app.theme.colors.blue,
+                            app.theme.colors.selected,
+                            app.theme.colors.border,
+                        )
+                    });
+                    // Check actual native targeting on both sides, including
+                    // overlap with the editor and the sidebar scrollbar.
+                    for x in [0, radius - 1, radius, radius + 1, radius * 2] {
+                        search_mouse_coordinates(splitter, POINT { x, y });
+                    }
+                    let grab = search_mouse_coordinates(splitter, POINT { x: radius * 2, y });
+                    SendMessageW(splitter, WM_MOUSEMOVE, 0, grab);
+                    let screen = GetDC(splitter);
+                    let dc = CreateCompatibleDC(screen);
+                    let bitmap = CreateCompatibleBitmap(screen, radius * 2 + 1, y + 1);
+                    let old = SelectObject(dc, bitmap);
+                    for message in [WM_PRINTCLIENT, WM_PRINT] {
+                        SendMessageW(splitter, message, dc as usize, PRF_CLIENT as isize);
+                        assert_eq!(GetPixel(dc, radius, y), blue);
+                        assert_eq!(GetPixel(dc, 0, y), selected);
+                    }
+                    let focus = GetFocus();
+                    SendMessageW(splitter, WM_LBUTTONDOWN, MK_LBUTTON as usize, grab);
+                    assert_eq!(GetCapture(), splitter);
+                    assert_eq!(GetFocus(), focus);
+                    SendMessageW(splitter, WM_MOUSEMOVE, MK_LBUTTON as usize, grab);
+                    with_app(|app| assert_eq!(app.sidebar_width, original_width));
+                    // Capture retains input outside the strip. Map subsequent
+                    // input against its new position after resizing.
+                    let delta = with_app_result(|app| app.theme.px(30));
+                    let drag = ((point_x(grab) + delta) as u16 as u32 | ((y as u16 as u32) << 16))
+                        as isize;
+                    SendMessageW(splitter, WM_MOUSEMOVE, MK_LBUTTON as usize, drag);
+                    with_app(|app| assert_eq!(app.sidebar_width, original_width + 30));
+                    let current = search_mouse_coordinates(splitter, POINT { x: radius * 2, y });
+                    SendMessageW(splitter, WM_MOUSEMOVE, MK_LBUTTON as usize, current);
+                    with_app(|app| assert_eq!(app.sidebar_width, original_width + 30));
+                    SendMessageW(splitter, WM_MOUSELEAVE, 0, 0);
+                    SendMessageW(splitter, WM_PRINTCLIENT, dc as usize, PRF_CLIENT as isize);
+                    assert_eq!(GetPixel(dc, radius, y), blue);
+                    assert_eq!(GetPixel(dc, radius - 2, y), blue);
+                    SendMessageW(splitter, WM_LBUTTONUP, 0, current);
+                    assert!(GetCapture().is_null());
+                    SendMessageW(splitter, WM_MOUSELEAVE, 0, 0);
+                    SendMessageW(splitter, WM_PRINTCLIENT, dc as usize, PRF_CLIENT as isize);
+                    assert_eq!(GetPixel(dc, radius, y), border);
+                    with_app(|app| {
+                        assert!(!app.resizing);
+                        assert!(!app.splitter_hover.get());
+                    });
+                    SendMessageW(splitter, WM_LBUTTONDOWN, MK_LBUTTON as usize, current);
+                    assert!(shortcut(&MSG {
+                        hwnd: focus,
+                        message: WM_KEYDOWN,
+                        wParam: VK_ESCAPE as usize,
+                        ..Default::default()
+                    }));
+                    assert!(GetCapture().is_null());
+                    SendMessageW(splitter, WM_LBUTTONDOWN, MK_LBUTTON as usize, current);
+                    ReleaseCapture();
+                    with_app(|app| assert!(!app.resizing && !app.splitter_hover.get()));
+                    assert_eq!(GetFocus(), focus);
+                    assert_eq!(window_text(editor), content);
+                    assert_eq!(editing::selection(editor), selection);
+                    assert_eq!(SendMessageW(editor, EM_CANUNDO, 0, 0), undo);
+                    SelectObject(dc, old);
+                    DeleteObject(bitmap);
+                    DeleteDC(dc);
+                    ReleaseDC(splitter, screen);
+                }
+            }
+            let hide_grab = search_mouse_coordinates(splitter, POINT { x: 1, y: 120 });
+            SendMessageW(splitter, WM_LBUTTONDOWN, MK_LBUTTON as usize, hide_grab);
+            with_app(|app| {
+                app.toggle_sidebar();
+                assert_eq!(IsWindowVisible(splitter), 0);
+                assert!(!app.resizing && !app.splitter_hover.get());
+                assert!(GetCapture().is_null());
+                app.toggle_sidebar();
+                app.sidebar_width = original_width;
+                app.find_global = original_mode;
+                app.apply_settings(original_settings);
+                app.layout();
+            });
+            SetFocus(original_focus);
         }
     }
 
@@ -9359,6 +9590,7 @@ mod interaction_tests {
                 tabs = app.tabs;
             });
             verify_edit_features();
+            verify_sidebar_splitter();
             verify_rename();
             click_tree(tree, ids[0], 0, true);
             with_app(|app| {
