@@ -150,6 +150,71 @@ impl Fixture {
 }
 
 #[gpui::test]
+fn system_theme_uses_gpui_appearance_and_keeps_editor_state(cx: &mut TestAppContext) {
+    use crate::widgets::ActiveTheme;
+    let f = Fixture::new(cx);
+    f.update(cx, |this, window, cx| {
+        assert_eq!(window.appearance(), gpui::WindowAppearance::Light);
+        let editor = this.active_editor().unwrap();
+        let content = editor.read(cx).value();
+        let selection = editor.read(cx).selected_range();
+
+        let mut settings = this.settings.clone();
+        settings.theme = ThemeMode::Dark;
+        this.change_settings(settings, window, cx);
+        assert_eq!(cx.theme().background, gpui::Hsla::from(gpui::rgb(0x1e2127)));
+        assert_eq!(cx.theme().bar, gpui::Hsla::from(gpui::rgb(0x15181d)));
+
+        let mut settings = this.settings.clone();
+        settings.theme = ThemeMode::System;
+        this.change_settings(settings, window, cx);
+        assert_eq!(cx.theme().background, gpui::Hsla::from(gpui::rgb(0xffffff)));
+        assert_eq!(cx.theme().bar, gpui::Hsla::from(gpui::rgb(0xf1f4f8)));
+        assert_eq!(Settings::load(&f.dir).unwrap().theme, ThemeMode::System);
+        assert_eq!(this.active_editor().unwrap(), editor);
+        assert_eq!(editor.read(cx).value(), content);
+        assert_eq!(editor.read(cx).selected_range(), selection);
+    });
+    cx.update_window(f.window, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+}
+
+#[gpui::test]
+fn font_picker_preserves_a_family_missing_from_gpui_fonts(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let missing_font = "Edot Test Missing Font";
+    let picker = f.update(cx, |this, window, cx| {
+        assert!(this.preferences.is_none());
+        assert!(
+            !cx.text_system()
+                .all_font_names()
+                .iter()
+                .any(|name| name == missing_font)
+        );
+        let mut settings = this.settings.clone();
+        settings.font = missing_font.into();
+        this.change_settings(settings, window, cx);
+        this.show_settings(window, cx);
+        let picker = this.preferences.as_ref().unwrap().font.clone();
+        let mut settings = this.settings.clone();
+        settings.font = "Consolas".into();
+        this.change_settings(settings, window, cx);
+        picker.update(cx, |state, cx| state.focus(window, cx));
+        picker
+    });
+    f.press(cx, "enter");
+    f.input(cx, missing_font);
+    f.press(cx, "enter");
+    f.update(cx, |this, window, cx| {
+        assert_eq!(this.settings.font, missing_font);
+        assert_eq!(Settings::load(&f.dir).unwrap().font, missing_font);
+        this.show_settings(window, cx);
+        this.show_settings(window, cx);
+        assert_eq!(this.preferences.as_ref().unwrap().font, picker);
+    });
+}
+
+#[gpui::test]
 fn tabs_restore_lazily_and_keep_selection_history_through_settings(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let editor = f.update(cx, |this, window, cx| {

@@ -1,9 +1,6 @@
 use crate::model::replace_file;
 use std::io;
 use std::path::Path;
-use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::Graphics::Gdi::*;
-use windows_sys::Win32::System::Registry::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeMode {
@@ -87,78 +84,13 @@ impl Settings {
             .as_bytes(),
         )
     }
-
-    pub fn dark(&self) -> bool {
-        match self.theme {
-            ThemeMode::Light => false,
-            ThemeMode::Dark => true,
-            ThemeMode::System => system_dark(),
-        }
-    }
 }
 
-fn valid_font(font: &str) -> bool {
+/// Whether a font family name can round-trip through the existing settings format.
+pub fn valid_font(font: &str) -> bool {
     !font.trim().is_empty()
         && font.encode_utf16().count() < 32
         && !font.chars().any(char::is_control)
-}
-
-fn system_dark() -> bool {
-    let path: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    let name: Vec<u16> = "AppsUseLightTheme".encode_utf16().chain(Some(0)).collect();
-    let mut light = 1u32;
-    let mut size = std::mem::size_of::<u32>() as u32;
-    unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            path.as_ptr(),
-            name.as_ptr(),
-            RRF_RT_REG_DWORD,
-            std::ptr::null_mut(),
-            &mut light as *mut _ as *mut _,
-            &mut size,
-        );
-    }
-    light == 0
-}
-
-/// Called only on the first visit to settings; no font enumeration at startup.
-///
-/// # Safety
-/// `hwnd` must be null or a valid window handle on the calling UI thread.
-pub unsafe fn installed_fonts(hwnd: HWND) -> Vec<String> {
-    unsafe extern "system" fn collect(
-        font: *const LOGFONTW,
-        _: *const TEXTMETRICW,
-        _: u32,
-        data: LPARAM,
-    ) -> i32 {
-        let face = unsafe { &(*font).lfFaceName };
-        let len = face.iter().position(|&c| c == 0).unwrap_or(face.len());
-        let name = String::from_utf16_lossy(&face[..len]);
-        if valid_font(&name) && !name.starts_with('@') {
-            unsafe { &mut *(data as *mut Vec<String>) }.push(name);
-        }
-        1
-    }
-    let mut names = Vec::new();
-    unsafe {
-        let dc = GetDC(hwnd);
-        if !dc.is_null() {
-            let font = LOGFONTW {
-                lfCharSet: DEFAULT_CHARSET,
-                ..Default::default()
-            };
-            EnumFontFamiliesExW(dc, &font, Some(collect), &mut names as *mut _ as LPARAM, 0);
-            ReleaseDC(hwnd, dc);
-        }
-    }
-    names.sort_unstable();
-    names.dedup();
-    names
 }
 
 #[cfg(test)]

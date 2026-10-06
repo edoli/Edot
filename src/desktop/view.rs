@@ -591,11 +591,7 @@ impl Edot {
             .h_flex()
             .h(px(36.))
             .flex_shrink_0()
-            .bg(rgb(if self.settings.dark() {
-                0x15181d
-            } else {
-                0xf1f4f8
-            }))
+            .bg(cx.theme().bar)
             .child(
                 div()
                     .absolute()
@@ -1288,11 +1284,7 @@ impl Edot {
             .flex_shrink_0()
             .border_t_1()
             .border_color(cx.theme().border)
-            .bg(rgb(if self.settings.dark() {
-                0x15181d
-            } else {
-                0xf1f4f8
-            }))
+            .bg(cx.theme().bar)
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .child(

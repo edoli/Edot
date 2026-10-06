@@ -67,15 +67,11 @@ pub trait StyledExt: Styled + Sized {
 impl<T: Styled> StyledExt for T {}
 
 #[derive(Clone, Copy)]
-pub enum ThemeMode {
-    Light,
-    Dark,
-}
-#[derive(Clone, Copy)]
 pub struct Colors {
     pub background: Hsla,
     pub foreground: Hsla,
     pub sidebar: Hsla,
+    pub bar: Hsla,
     pub border: Hsla,
     pub primary: Hsla,
     pub selection: Hsla,
@@ -108,6 +104,7 @@ impl Default for Colors {
             background: bg,
             foreground: fg,
             sidebar: rgb(0xf5f7fa).into(),
+            bar: rgb(0xf1f4f8).into(),
             border: rgb(0xdce2ea).into(),
             primary,
             selection: rgb(0xddebff).into(),
@@ -160,7 +157,6 @@ impl std::ops::Deref for Theme {
 }
 impl Global for Theme {}
 impl Theme {
-    pub fn change(_: ThemeMode, _: Option<&mut Window>, _: &mut App) {}
     pub fn update(cx: &mut App, f: impl FnOnce(&mut Self)) {
         cx.update_global::<Self, _>(|theme, _| f(theme));
         cx.refresh_windows();

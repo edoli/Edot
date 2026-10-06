@@ -743,20 +743,22 @@ impl Edot {
         cx.notify();
     }
     fn apply_theme(&self, window: &mut Window, cx: &mut App) {
-        let mode = if self.settings.dark() {
-            component::ThemeMode::Dark
-        } else {
-            component::ThemeMode::Light
+        let dark = match self.settings.theme {
+            ThemeMode::Light => false,
+            ThemeMode::Dark => true,
+            ThemeMode::System => matches!(
+                window.appearance(),
+                WindowAppearance::Dark | WindowAppearance::VibrantDark
+            ),
         };
-        Theme::change(mode, Some(window), cx);
         Theme::update(cx, |theme| {
             theme.font_family = "Segoe UI".into();
             theme.font_size = px(15.);
             theme.mono_font_family = self.settings.font.clone().into();
             theme.mono_font_size = px(self.settings.font_size as f32);
-            let dark = self.settings.dark();
             theme.colors.background = rgb(if dark { 0x1e2127 } else { 0xffffff }).into();
             theme.colors.foreground = rgb(if dark { 0xe5e9f0 } else { 0x1f2937 }).into();
+            theme.colors.bar = rgb(if dark { 0x15181d } else { 0xf1f4f8 }).into();
             theme.colors.sidebar = rgb(if dark { 0x181b21 } else { 0xf5f7fa }).into();
             theme.colors.border = rgb(if dark { 0x3e4450 } else { 0xdce2ea }).into();
             theme.colors.primary = rgb(if dark { 0x6ba4ff } else { 0x2674f5 }).into();
@@ -830,7 +832,10 @@ impl Edot {
         }
         self.find_visible = false;
         if self.preferences.is_none() {
-            let mut fonts = unsafe { crate::settings::installed_fonts(std::ptr::null_mut()) };
+            let mut fonts = cx.text_system().all_font_names();
+            // Keep names compatible with the existing settings format and omit
+            // vertical aliases, as the previous GDI enumeration did.
+            fonts.retain(|name| crate::settings::valid_font(name) && !name.starts_with('@'));
             if !fonts.contains(&self.settings.font) {
                 fonts.push(self.settings.font.clone());
             }
