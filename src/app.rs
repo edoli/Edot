@@ -850,6 +850,14 @@ unsafe extern "system" fn tree_subclass(
             });
             return 0;
         }
+        if msg == WM_PRINT {
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        if msg == WM_PRINTCLIENT {
+            let result = DefSubclassProc(hwnd, msg, wp, lp);
+            ui::with_view(|view| view.paint_drag_feedback(wp as HDC));
+            return result;
+        }
         if matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
             if route_wheel(msg, wp) {
                 return 0;
@@ -3784,19 +3792,50 @@ impl App {
             if !self.sidebar_visible || PtInRect(&bounds, point) == 0 {
                 return None;
             }
-            if let Some((target, y, handle)) = self.hit_tree() {
+            ScreenToClient(self.tree, &mut point);
+            self.drag_target_at_tree_point(point)
+        }
+    }
+
+    unsafe fn drag_target_at_tree_point(&self, point: POINT) -> Option<DropTarget> {
+        unsafe {
+            let mut bounds = RECT::default();
+            GetClientRect(self.tree_host, &mut bounds);
+            if PtInRect(&bounds, point) == 0 {
+                return None;
+            }
+            let mut hit = TVHITTESTINFO {
+                pt: point,
+                ..Default::default()
+            };
+            SendMessageW(self.tree, TVM_HITTEST, 0, &mut hit as *mut _ as isize);
+            if let Some(&target) = self.handles.get(&hit.hItem) {
                 let mut row = RECT::default();
-                *(&mut row as *mut RECT as *mut HTREEITEM) = handle;
-                SendMessageW(self.tree, TVM_GETITEMRECT, 1, &mut row as *mut _ as isize);
-                let height = (row.bottom - row.top).max(1);
-                let zone = if y < row.top + height / 4 {
-                    DropZone::Before
-                } else if y >= row.bottom - height / 4 {
-                    DropZone::After
-                } else {
-                    DropZone::Inside
-                };
-                DropTarget::resolve_many(&self.book, &self.drag_sources, Some(target), zone)
+                std::ptr::write_unaligned(&mut row as *mut RECT as *mut HTREEITEM, hit.hItem);
+                if SendMessageW(self.tree, TVM_GETITEMRECT, 0, &mut row as *mut _ as isize) == 0 {
+                    return None;
+                }
+                let next = SendMessageW(
+                    self.tree,
+                    TVM_GETNEXTITEM,
+                    TVGN_NEXTVISIBLE as usize,
+                    hit.hItem,
+                );
+                let previous = SendMessageW(
+                    self.tree,
+                    TVM_GETNEXTITEM,
+                    TVGN_PREVIOUSVISIBLE as usize,
+                    hit.hItem,
+                );
+                DropTarget::resolve_row(
+                    &self.book,
+                    &self.drag_sources,
+                    target,
+                    self.handles.get(&previous).copied(),
+                    self.handles.get(&next).copied(),
+                    point.y - row.top,
+                    row.bottom - row.top,
+                )
             } else {
                 DropTarget::resolve_many(&self.book, &self.drag_sources, None, DropZone::Root)
             }
@@ -7313,6 +7352,259 @@ mod interaction_tests {
     use windows_sys::Win32::System::StationsAndDesktops::*;
     use windows_sys::Win32::System::SystemServices::MK_LBUTTON;
 
+    unsafe fn verify_tree_drop_positions(folder: u64, last: u64, source: u64) {
+        unsafe {
+            with_app(|app| {
+                let original_theme = Rc::clone(&app.theme);
+                let original_expanded = app.expanded.clone();
+                app.expanded.insert(folder);
+                app.rebuild_tree(None);
+                app.dragging = Some(source);
+                app.drag_sources = Rc::new(vec![source]);
+                for dark in [false, true] {
+                    app.theme = Rc::new(Theme::new(
+                        original_theme.dpi,
+                        dark,
+                        "Consolas",
+                        app.settings.font_size,
+                    ));
+                    app.apply_theme(true, true, true);
+                    for (zone, anchor_id) in [
+                        (DropZone::InsideFirst, folder),
+                        (DropZone::InsideLast, last),
+                        (DropZone::AfterSubtree, last),
+                    ] {
+                        let handle = *app
+                            .handles
+                            .iter()
+                            .find(|&(_, &id)| id == anchor_id)
+                            .unwrap()
+                            .0;
+                        let mut row = RECT::default();
+                        std::ptr::write_unaligned(&mut row as *mut RECT as *mut HTREEITEM, handle);
+                        assert_ne!(
+                            SendMessageW(app.tree, TVM_GETITEMRECT, 0, &mut row as *mut _ as isize),
+                            0
+                        );
+                        let mut label = RECT::default();
+                        std::ptr::write_unaligned(
+                            &mut label as *mut RECT as *mut HTREEITEM,
+                            *app.handles.iter().find(|&(_, &id)| id == folder).unwrap().0,
+                        );
+                        assert_ne!(
+                            SendMessageW(
+                                app.tree,
+                                TVM_GETITEMRECT,
+                                1,
+                                &mut label as *mut _ as isize
+                            ),
+                            0
+                        );
+                        let y = if zone == DropZone::AfterSubtree {
+                            let next = SendMessageW(
+                                app.tree,
+                                TVM_GETNEXTITEM,
+                                TVGN_NEXTVISIBLE as usize,
+                                handle,
+                            );
+                            let mut next_row = RECT::default();
+                            std::ptr::write_unaligned(
+                                &mut next_row as *mut RECT as *mut HTREEITEM,
+                                next,
+                            );
+                            assert_ne!(
+                                SendMessageW(
+                                    app.tree,
+                                    TVM_GETITEMRECT,
+                                    0,
+                                    &mut next_row as *mut _ as isize
+                                ),
+                                0
+                            );
+                            next_row.top
+                        } else {
+                            row.bottom - 1
+                        };
+                        let target = app
+                            .drag_target_at_tree_point(POINT {
+                                x: label.left + app.theme.px(45),
+                                y,
+                            })
+                            .unwrap();
+                        assert_eq!(target.zone, zone);
+                        assert_eq!(target.anchor, Some(anchor_id));
+                        if zone != DropZone::AfterSubtree {
+                            let mut targets = Vec::new();
+                            let height = row.bottom - row.top;
+                            for y in row.top + height * 3 / 4..row.bottom + height / 4 {
+                                let gap_target = app
+                                    .drag_target_at_tree_point(POINT {
+                                        x: label.left + app.theme.px(45),
+                                        y,
+                                    })
+                                    .unwrap();
+                                if !targets.contains(&gap_target) {
+                                    targets.push(gap_target);
+                                }
+                            }
+                            if zone == DropZone::InsideFirst {
+                                assert_eq!(targets, vec![target]);
+                            } else {
+                                assert_eq!(targets.len(), 2);
+                                assert_eq!(targets[0], target);
+                                assert_eq!(targets[1].zone, DropZone::AfterSubtree);
+                            }
+                        }
+                        assert_eq!(
+                            target.parent,
+                            if zone == DropZone::AfterSubtree {
+                                0
+                            } else {
+                                folder
+                            }
+                        );
+                        app.drop_target = Some(target);
+                        app.publish_view();
+                        let screen = GetDC(app.hwnd);
+                        let dc = CreateCompatibleDC(screen);
+                        let bitmap = CreateCompatibleBitmap(screen, 1100, 760);
+                        let original = SelectObject(dc, bitmap);
+                        let x = label.left
+                            + if zone == DropZone::AfterSubtree {
+                                0
+                            } else {
+                                SendMessageW(app.tree, TVM_GETINDENT, 0, 0) as i32
+                            };
+                        let marker_y = row.bottom - app.theme.px(2);
+                        for message in [WM_PRINTCLIENT, WM_PRINT] {
+                            theme::fill(dc, theme::rect(0, 0, 1100, 760), app.theme.colors.sidebar);
+                            SendMessageW(app.tree, message, dc as usize, PRF_CLIENT as isize);
+                            assert_eq!(
+                                GetPixel(dc, x + app.theme.px(3), marker_y),
+                                app.theme.colors.blue
+                            );
+                            if zone != DropZone::AfterSubtree {
+                                assert_ne!(
+                                    GetPixel(dc, label.left + app.theme.px(2), marker_y),
+                                    app.theme.colors.blue
+                                );
+                            }
+                        }
+                        if zone != DropZone::InsideFirst {
+                            let mut tree_area = RECT::default();
+                            GetClientRect(app.tree, &mut tree_area);
+                            SetWindowPos(
+                                app.tree,
+                                null_mut(),
+                                0,
+                                0,
+                                tree_area.right,
+                                row.bottom - row.top,
+                                SWP_NOZORDER | SWP_NOACTIVATE,
+                            );
+                            SendMessageW(
+                                app.tree,
+                                TVM_SELECTITEM,
+                                TVGN_FIRSTVISIBLE as usize,
+                                handle,
+                            );
+                            std::ptr::write_unaligned(
+                                &mut row as *mut RECT as *mut HTREEITEM,
+                                handle,
+                            );
+                            assert_ne!(
+                                SendMessageW(
+                                    app.tree,
+                                    TVM_GETITEMRECT,
+                                    0,
+                                    &mut row as *mut _ as isize
+                                ),
+                                0
+                            );
+                            let folder_handle =
+                                *app.handles.iter().find(|&(_, &id)| id == folder).unwrap().0;
+                            let mut hidden = RECT::default();
+                            std::ptr::write_unaligned(
+                                &mut hidden as *mut RECT as *mut HTREEITEM,
+                                folder_handle,
+                            );
+                            assert_ne!(
+                                SendMessageW(
+                                    app.tree,
+                                    TVM_GETITEMRECT,
+                                    1,
+                                    &mut hidden as *mut _ as isize
+                                ),
+                                0
+                            );
+                            assert!(hidden.bottom <= 0);
+                            let marker_y = row.bottom - app.theme.px(2);
+                            SendMessageW(
+                                app.tree,
+                                WM_PRINTCLIENT,
+                                dc as usize,
+                                PRF_CLIENT as isize,
+                            );
+                            assert_eq!(
+                                GetPixel(dc, x + app.theme.px(3), marker_y),
+                                app.theme.colors.blue
+                            );
+                            SetWindowPos(
+                                app.tree,
+                                null_mut(),
+                                0,
+                                0,
+                                tree_area.right,
+                                tree_area.bottom,
+                                SWP_NOZORDER | SWP_NOACTIVATE,
+                            );
+                            SendMessageW(
+                                app.tree,
+                                TVM_SELECTITEM,
+                                TVGN_FIRSTVISIBLE as usize,
+                                folder_handle,
+                            );
+                        }
+                        SelectObject(dc, original);
+                        DeleteObject(bitmap);
+                        DeleteDC(dc);
+                        ReleaseDC(app.hwnd, screen);
+                    }
+                }
+                app.theme = original_theme;
+                let handle = *app.handles.iter().find(|&(_, &id)| id == source).unwrap().0;
+                let mut row = RECT::default();
+                std::ptr::write_unaligned(&mut row as *mut RECT as *mut HTREEITEM, handle);
+                assert_ne!(
+                    SendMessageW(app.tree, TVM_GETITEMRECT, 0, &mut row as *mut _ as isize),
+                    0
+                );
+                let height = row.bottom - row.top;
+                let target = app
+                    .drag_target_at_tree_point(POINT {
+                        x: app.theme.px(100),
+                        y: row.bottom - 1,
+                    })
+                    .unwrap();
+                for y in row.top + height * 3 / 4..row.bottom + height / 4 {
+                    assert_eq!(
+                        app.drag_target_at_tree_point(POINT {
+                            x: app.theme.px(100),
+                            y
+                        }),
+                        Some(target)
+                    );
+                }
+                app.expanded = original_expanded;
+                app.dragging = None;
+                app.drag_sources = Rc::new(Vec::new());
+                app.drop_target = None;
+                app.apply_theme(true, true, true);
+                app.rebuild_tree(None);
+            });
+        }
+    }
+
     thread_local! {
         static SPLITTER_EVENTS: RefCell<Vec<(usize, splitter::Event)>> = const {RefCell::new(Vec::new())};
     }
@@ -9724,6 +10016,7 @@ mod interaction_tests {
                 *cell.borrow_mut() = Some(App::new(hwnd, dir.clone(), book, Settings::default()))
             });
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            verify_tree_drop_positions(ids[0], child, ids[1]);
             verify_global_features(&ids, child, &dir);
             verify_regex_search(&ids, child, &dir);
             let mut tree = null_mut();

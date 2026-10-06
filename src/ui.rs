@@ -285,6 +285,9 @@ impl View {
                     DropZone::Before => format!("{title} 위에 놓기"),
                     DropZone::After => format!("{title} 아래에 놓기"),
                     DropZone::Inside => format!("{title}의 하위로 이동"),
+                    DropZone::InsideFirst => format!("{title} 안의 맨 위에 놓기"),
+                    DropZone::InsideLast => format!("{title} 안의 맨 아래에 놓기"),
+                    DropZone::AfterSubtree => format!("{title} 아래에 같은 레벨로 놓기"),
                     DropZone::Root => "최상위로 이동".to_owned(),
                 }
             }
@@ -301,13 +304,13 @@ impl View {
     }
 
     pub unsafe fn paint_drag_feedback(&self, dc: HDC) {
-        if !matches!(
-            self.drop_target,
-            Some(DropTarget {
-                zone: DropZone::Root,
-                ..
-            })
-        ) {
+        let Some(target) = self.drop_target else {
+            return;
+        };
+        if target.zone != DropZone::Root {
+            unsafe {
+                self.paint_insertion_marker(dc, target);
+            }
             return;
         }
         unsafe {
@@ -339,6 +342,71 @@ impl View {
             );
         }
     }
+    unsafe fn paint_insertion_marker(&self, dc: HDC, target: DropTarget) {
+        if target.zone == DropZone::Inside {
+            return;
+        }
+        unsafe {
+            let p = |n| self.theme.px(n);
+            let Some(anchor) = target.anchor.and_then(|id| {
+                self.handles
+                    .iter()
+                    .find(|&(_, &value)| value == id)
+                    .map(|(&handle, _)| handle)
+            }) else {
+                return;
+            };
+            let mut row = RECT::default();
+            std::ptr::write_unaligned(&mut row as *mut RECT as *mut HTREEITEM, anchor);
+            if SendMessageW(self.tree, TVM_GETITEMRECT, 0, &mut row as *mut _ as isize) == 0 {
+                return;
+            }
+            let Some(note) = target.note else {
+                return;
+            };
+            let mut label = RECT::default();
+            std::ptr::write_unaligned(&mut label as *mut RECT as *mut HTREEITEM, anchor);
+            if SendMessageW(self.tree, TVM_GETITEMRECT, 1, &mut label as *mut _ as isize) == 0 {
+                return;
+            }
+            let indent = SendMessageW(self.tree, TVM_GETINDENT, 0, 0) as i32;
+            // Derive the ancestor's indentation from the visible anchor. Its
+            // own row can be above the viewport in a long expanded folder.
+            let mut id = self.handles[&anchor];
+            while id != note {
+                let Some(parent) = self.book.get(id).map(|note| note.parent) else {
+                    return;
+                };
+                if parent == 0 {
+                    return;
+                }
+                label.left -= indent;
+                id = parent;
+            }
+            let inside = matches!(target.zone, DropZone::InsideFirst | DropZone::InsideLast);
+            let x = label.left + if inside { indent } else { 0 };
+            let y = match target.zone {
+                DropZone::Before => row.top + p(1),
+                _ => row.bottom - p(2),
+            };
+            let mut area = RECT::default();
+            GetClientRect(GetParent(self.tree), &mut area);
+            theme::line(
+                dc,
+                &[(x, y), (area.right - p(4), y)],
+                self.theme.colors.blue,
+                p(2),
+            );
+            theme::rounded(
+                dc,
+                rect(x - p(3), y - p(3), x + p(3), y + p(3)),
+                self.theme.colors.blue,
+                self.theme.colors.blue,
+                p(6),
+            );
+        }
+    }
+
     pub unsafe fn scroll_range(&self, kind: Kind) -> ScrollRange {
         unsafe {
             match kind {
@@ -1132,28 +1200,6 @@ impl View {
                         },
                     );
                 }
-            }
-            if let Some(target) = self.drop_target.filter(|target| target.note == Some(id))
-                && matches!(target.zone, DropZone::Before | DropZone::After)
-            {
-                let y = if target.zone == DropZone::Before {
-                    area.top + p(1)
-                } else {
-                    area.bottom - p(2)
-                };
-                theme::line(
-                    dc,
-                    &[(x, y), (area.right - p(4), y)],
-                    self.theme.colors.blue,
-                    p(2),
-                );
-                theme::rounded(
-                    dc,
-                    rect(x - p(3), y - p(3), x + p(3), y + p(3)),
-                    self.theme.colors.blue,
-                    self.theme.colors.blue,
-                    p(6),
-                );
             }
         }
     }
