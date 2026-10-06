@@ -9,6 +9,9 @@ pub const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
 pub const EM_SETCHARFORMAT: u32 = WM_USER + 68;
 pub const EM_SETTARGETDEVICE: u32 = WM_USER + 72;
 pub const EM_SETSCROLLPOS: u32 = WM_USER + 222;
+pub const EM_SETZOOM: u32 = WM_USER + 225;
+#[cfg(test)]
+pub const EM_GETZOOM: u32 = WM_USER + 224;
 pub const EM_SETEVENTMASK: u32 = WM_USER + 69;
 pub const EM_REDO: u32 = WM_USER + 84;
 pub const EM_STOPGROUPTYPING: u32 = WM_USER + 88;
@@ -68,6 +71,43 @@ pub unsafe fn format(edit: HWND) -> (String, u32) {
 pub struct CharRange {
     pub start: i32,
     pub end: i32,
+}
+
+#[repr(C)]
+struct TextLength {
+    flags: u32,
+    codepage: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct CharacterCount {
+    pub total: usize,
+    pub selected: usize,
+}
+
+impl std::fmt::Display for CharacterCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.selected > 0 {
+            write!(f, "{}/{}자", self.selected, self.total)
+        } else {
+            write!(f, "{}자", self.total)
+        }
+    }
+}
+
+pub unsafe fn character_count(edit: HWND) -> CharacterCount {
+    let request = TextLength {
+        flags: 2 | 8,
+        codepage: 1200,
+    }; // GTL_PRECISE | GTL_NUMCHARS, UTF-16
+    // No GTL_USECRLF: paragraph breaks count once, matching RichEdit selection offsets.
+    let total = unsafe { SendMessageW(edit, WM_USER + 95, &request as *const _ as usize, 0) }.max(0)
+        as usize;
+    let range = unsafe { selection(edit) };
+    CharacterCount {
+        total,
+        selected: range.end.saturating_sub(range.start).max(0) as usize,
+    }
 }
 #[repr(C)]
 struct FindText {

@@ -8,7 +8,7 @@ use crate::settings::{self, Panel, Settings, ThemeMode};
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme};
 use crate::tooltip::Tooltip;
-use crate::{editing, settings_controls, startup, ui};
+use crate::{datetime, editing, settings_controls, startup, ui};
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -35,6 +35,7 @@ const ID_TREE: usize = 105;
 const ID_TABS: usize = 106;
 const ID_TAB_ADD: usize = 107;
 const ID_TAB_NAME: usize = 125;
+const ID_SETTINGS_SIZE: usize = 126;
 const ID_SETTINGS: usize = 120;
 const ID_SETTINGS_THEME: usize = 121;
 const ID_SETTINGS_FONT: usize = 122;
@@ -181,6 +182,8 @@ struct App {
     settings_panel: Option<Panel>,
     settings_visible: bool,
     settings: Settings,
+    zoom: u32,
+    zoom_wheel: scrollbar::WheelDelta,
     status: HWND,
     theme: Rc<Theme>,
     view_book: Rc<Notebook>,
@@ -812,6 +815,14 @@ unsafe extern "system" fn control_subclass(
             }
         }
         if reference == 2 && matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
+            if msg == WM_MOUSEWHEEL && wp & MK_CONTROL as usize != 0 {
+                with_app(|app| {
+                    if hwnd == app.edit {
+                        app.wheel_zoom((wp >> 16) as u16 as i16 as i32);
+                    }
+                });
+                return 0;
+            }
             if !route_wheel(msg, wp) {
                 ui::with_view(|v| {
                     SendMessageW(
@@ -1191,9 +1202,16 @@ impl App {
             settings_panel: None,
             settings_visible: false,
             theme: Rc::new(unsafe {
-                Theme::new(GetDpiForWindow(hwnd), settings.dark(), &settings.font)
+                Theme::new(
+                    GetDpiForWindow(hwnd),
+                    settings.dark(),
+                    &settings.font,
+                    settings.font_size,
+                )
             }),
             settings,
+            zoom: 100,
+            zoom_wheel: scrollbar::WheelDelta::default(),
             status,
             view_book: Rc::new(book.clone()),
             view_handles: Rc::new(HashMap::new()),
@@ -1381,6 +1399,9 @@ impl App {
             }
             if font {
                 SendMessageW(editor, WM_SETFONT, self.theme.editor as usize, 0);
+                if self.zoom != 100 {
+                    SendMessageW(editor, editing::EM_SETZOOM, self.zoom as usize / 10, 10);
+                }
             }
             // WM_SETFONT resets RichEdit's default foreground color as well.
             if colors || font {
@@ -1448,14 +1469,16 @@ impl App {
                 for control in [
                     panel.theme,
                     panel.font,
+                    panel.size,
                     panel.wrap,
                     panel.close,
                     panel.theme_label,
                     panel.font_label,
+                    panel.size_label,
                 ] {
                     SendMessageW(control, WM_SETFONT, self.theme.ui as usize, 0);
                 }
-                for control in [panel.theme, panel.font] {
+                for control in [panel.theme, panel.font, panel.size] {
                     settings_controls::style_dropdown(control, &self.theme);
                 }
                 SetWindowTextW(
@@ -1510,8 +1533,10 @@ impl App {
                 };
                 let theme = combo("앱 테마", ID_SETTINGS_THEME);
                 let font = combo("본문 글꼴", ID_SETTINGS_FONT);
+                let size = combo("본문 글자 크기", ID_SETTINGS_SIZE);
                 settings_controls::attach_dropdown(theme);
                 settings_controls::attach_dropdown(font);
+                settings_controls::attach_dropdown(size);
                 let wrap = child(
                     host,
                     wide("BUTTON").as_ptr(),
@@ -1530,6 +1555,7 @@ impl App {
                 );
                 let theme_label = child(host, wide("STATIC").as_ptr(), "앱 테마", common, 0, 0);
                 let font_label = child(host, wide("STATIC").as_ptr(), "본문 글꼴", common, 0, 0);
+                let size_label = child(host, wide("STATIC").as_ptr(), "글자 크기", common, 0, 0);
                 for control in [wrap, close] {
                     SetWindowSubclass(control, Some(control_subclass), 1, 1);
                 }
@@ -1565,14 +1591,31 @@ impl App {
                 );
                 settings_controls::confirm_selection(theme);
                 settings_controls::confirm_selection(font);
+                for value in 8..=72 {
+                    SendMessageW(
+                        size,
+                        CB_ADDSTRING,
+                        0,
+                        wide(&format!("{value} px")).as_ptr() as isize,
+                    );
+                }
+                SendMessageW(
+                    size,
+                    CB_SETCURSEL,
+                    (self.settings.font_size - 8) as usize,
+                    0,
+                );
+                settings_controls::confirm_selection(size);
                 self.settings_panel = Some(Panel {
                     host,
                     theme,
                     font,
+                    size,
                     wrap,
                     close,
                     theme_label,
                     font_label,
+                    size_label,
                 });
                 // Styling can synchronously request owner drawing.
                 self.publish_view();
@@ -1625,8 +1668,10 @@ impl App {
                 (panel.close, width - p(66), p(12), p(48), p(28)),
                 (panel.theme_label, p(20), p(52), width - p(40), p(22)),
                 (panel.theme, p(20), p(76), width - p(40), p(230)),
-                (panel.font_label, p(20), p(130), width - p(40), p(22)),
-                (panel.font, p(20), p(154), width - p(40), p(280)),
+                (panel.font_label, p(20), p(130), width - p(148), p(22)),
+                (panel.font, p(20), p(154), width - p(148), p(280)),
+                (panel.size_label, width - p(116), p(130), p(96), p(22)),
+                (panel.size, width - p(116), p(154), p(96), p(280)),
                 (panel.wrap, p(20), p(218), width - p(40), p(40)),
             ] {
                 SetWindowPos(
@@ -1688,17 +1733,20 @@ impl App {
                     next.font = String::from_utf16_lossy(&text[..len as usize]);
                 }
                 ID_SETTINGS_WRAP => next.wrap = !next.wrap,
+                ID_SETTINGS_SIZE => {
+                    let index = SendMessageW(panel.size, CB_GETCURSEL, 0, 0);
+                    if !(0..=64).contains(&index) {
+                        return;
+                    }
+                    next.font_size = index as u32 + 8;
+                }
                 _ => return,
             }
         }
         if next == self.settings {
             unsafe {
-                if id == ID_SETTINGS_THEME || id == ID_SETTINGS_FONT {
-                    settings_controls::confirm_selection(if id == ID_SETTINGS_THEME {
-                        panel.theme
-                    } else {
-                        panel.font
-                    });
+                if let Some(control) = panel.dropdown(id) {
+                    settings_controls::confirm_selection(control);
                 }
             }
             return;
@@ -1724,31 +1772,39 @@ impl App {
                 SendMessageW(panel.font, CB_SETCURSEL, index as usize, 0);
                 settings_controls::confirm_selection(panel.theme);
                 settings_controls::confirm_selection(panel.font);
+                SendMessageW(
+                    panel.size,
+                    CB_SETCURSEL,
+                    (self.settings.font_size - 8) as usize,
+                    0,
+                );
+                settings_controls::confirm_selection(panel.size);
             }
             report(self.hwnd, "설정을 저장하지 못했습니다.", error);
             return;
         }
         unsafe {
-            if id == ID_SETTINGS_THEME || id == ID_SETTINGS_FONT {
-                settings_controls::confirm_selection(if id == ID_SETTINGS_THEME {
-                    panel.theme
-                } else {
-                    panel.font
-                });
+            if let Some(control) = panel.dropdown(id) {
+                settings_controls::confirm_selection(control);
             }
             self.apply_settings(next);
         }
     }
 
     unsafe fn apply_settings(&mut self, next: Settings) {
-        let font = next.font != self.settings.font;
+        let font = next.font != self.settings.font || next.font_size != self.settings.font_size;
         let wrap = next.wrap != self.settings.wrap;
         let dark = next.dark();
         let colors = dark != self.theme.dark;
         self.settings = next;
         unsafe {
             if font || colors {
-                let theme = Rc::new(Theme::new(self.theme.dpi, dark, &self.settings.font));
+                let theme = Rc::new(Theme::new(
+                    self.theme.dpi,
+                    dark,
+                    &self.settings.font,
+                    self.settings.font_size,
+                ));
                 let old = std::mem::replace(&mut self.theme, theme);
                 self.publish_view();
                 self.apply_theme(font, colors, wrap);
@@ -1808,6 +1864,7 @@ impl App {
             settings_panel: self.settings_panel,
             settings_visible: self.settings_visible,
             word_wrap: self.settings.wrap,
+            zoom: self.zoom,
             status: self.status,
             theme: Rc::clone(&self.theme),
             book: Rc::clone(&self.view_book),
@@ -2485,6 +2542,71 @@ impl App {
         }
     }
 
+    unsafe fn set_zoom(&mut self, zoom: u32) {
+        let zoom = zoom.clamp(10, 500) / 10 * 10;
+        if self.zoom == zoom {
+            return;
+        }
+        self.zoom = zoom;
+        unsafe {
+            for editor in self
+                .open
+                .iter()
+                .map(|tab| tab.editor)
+                .chain([self.empty_edit])
+            {
+                if editor.is_null() {
+                    continue;
+                }
+                let modified = SendMessageW(editor, EM_GETMODIFY, 0, 0);
+                SendMessageW(editor, editing::EM_SETZOOM, zoom as usize / 10, 10);
+                scrollbar::layout_body(editor);
+                SendMessageW(editor, EM_SETMODIFY, modified as usize, 0);
+            }
+            self.publish_view();
+            self.layout();
+            InvalidateRect(self.status, null(), 0);
+        }
+    }
+
+    unsafe fn wheel_zoom(&mut self, delta: i32) {
+        let ticks = self.zoom_wheel.take(delta);
+        if ticks != 0 {
+            unsafe {
+                self.set_zoom((self.zoom as i32 + ticks * 10).clamp(10, 500) as u32);
+            }
+        }
+    }
+
+    unsafe fn insert_timestamp(&mut self, target: HWND, include_time: bool) {
+        let text = match datetime::current(include_time) {
+            Ok(text) => text,
+            Err(error) => {
+                report(self.hwnd, "현재 날짜를 입력하지 못했습니다.", error);
+                return;
+            }
+        };
+        unsafe {
+            SetFocus(target);
+            if target == self.edit {
+                SendMessageW(target, editing::EM_STOPGROUPTYPING, 0, 0);
+            }
+            SendMessageW(target, EM_REPLACESEL, 1, wide(&text).as_ptr() as isize);
+            if target != self.edit {
+                // Title edits keep their normal Enter/Tab/focus-loss commit and Esc cancel.
+                return;
+            }
+            SendMessageW(target, editing::EM_STOPGROUPTYPING, 0, 0);
+            // EN_CHANGE can reenter while App is borrowed; mark and save explicitly.
+            if let Some(index) = self.active {
+                self.open[index].dirty = true;
+            }
+            self.last_match = None;
+            SetTimer(self.hwnd, AUTOSAVE_TIMER, 650, None);
+            self.set_status("저장 중…");
+        }
+    }
+
     unsafe fn selected_id(&self) -> Option<u64> {
         let handle = unsafe { SendMessageW(self.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0) };
         self.handles.get(&handle).copied()
@@ -2692,6 +2814,10 @@ impl App {
         unsafe {
             self.apply_editor_settings(editor, true, true, true);
             SetWindowTextW(editor, wide(&text).as_ptr());
+            // Loading text resets RichEdit's zoom. Apply the shared ratio afterwards.
+            if self.zoom != 100 {
+                SendMessageW(editor, editing::EM_SETZOOM, self.zoom as usize / 10, 10);
+            }
             SendMessageW(editor, EM_EMPTYUNDOBUFFER, 0, 0);
         }
         self.loading = false;
@@ -3695,12 +3821,10 @@ impl App {
             ID_SETTINGS_CLOSE => unsafe {
                 self.show_settings(false);
             },
-            ID_SETTINGS_THEME | ID_SETTINGS_FONT => unsafe {
+            ID_SETTINGS_THEME | ID_SETTINGS_FONT | ID_SETTINGS_SIZE => unsafe {
                 if let Some(panel) = self.settings_panel {
-                    let control = if id == ID_SETTINGS_THEME {
-                        panel.theme
-                    } else {
-                        panel.font
+                    let Some(control) = panel.dropdown(id) else {
+                        return;
                     };
                     if code == CBN_SELENDOK as usize
                         || (code == CBN_SELCHANGE as usize
@@ -4043,6 +4167,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     hi(wp) as u32,
                     app.settings.dark(),
                     &app.settings.font,
+                    app.settings.font_size,
                 ));
                 let old = std::mem::replace(&mut app.theme, theme);
                 app.publish_view();
@@ -4319,6 +4444,7 @@ fn shortcut(msg: &MSG) -> bool {
             let dropped = app.settings_panel.is_some_and(|panel| {
                 SendMessageW(panel.theme, CB_GETDROPPEDSTATE, 0, 0) != 0
                     || SendMessageW(panel.font, CB_GETDROPPEDSTATE, 0, 0) != 0
+                    || SendMessageW(panel.size, CB_GETDROPPEDSTATE, 0, 0) != 0
             });
             if !dropped {
                 app.show_settings(false);
@@ -4326,16 +4452,16 @@ fn shortcut(msg: &MSG) -> bool {
             }
         } else if app.settings_visible && !ctrl && key == VK_TAB as u32 {
             if let Some(panel) = app.settings_panel {
-                let controls = [panel.theme, panel.font, panel.wrap, panel.close];
+                let controls = [panel.theme, panel.font, panel.size, panel.wrap, panel.close];
                 let current = controls
                     .iter()
                     .position(|&control| control == msg.hwnd)
                     .unwrap_or(0);
                 SetFocus(
                     controls[if shift {
-                        (current + 3) % 4
+                        (current + controls.len() - 1) % controls.len()
                     } else {
-                        (current + 1) % 4
+                        (current + 1) % controls.len()
                     }],
                 );
                 handled = true;
@@ -4491,11 +4617,35 @@ fn shortcut(msg: &MSG) -> bool {
             };
             app.activate(index);
             handled = true;
-        } else if key == VK_F6 as u32 {
-            SetFocus(if GetFocus() == app.edit && app.sidebar_visible {
-                app.tree
+        } else if !ctrl && !shift && matches!(key as u16, VK_F5 | VK_F6) && !app.settings_visible {
+            let title_input = !msg.hwnd.is_null()
+                && ((msg.hwnd == app.tab_name_edit && app.tab_rename.is_some())
+                    || msg.hwnd == SendMessageW(app.tree, TVM_GETEDITCONTROL, 0, 0) as HWND);
+            let target = if title_input {
+                Some(msg.hwnd)
+            } else if app.active.is_some() && [app.edit, app.tree, app.tabs].contains(&msg.hwnd) {
+                Some(app.edit)
             } else {
-                app.edit
+                None
+            };
+            if let Some(target) = target {
+                app.insert_timestamp(target, key == VK_F5 as u32);
+                handled = true;
+            }
+        } else if ctrl
+            && app.active.is_some()
+            && !app.settings_visible
+            && [app.edit, app.tree, app.tabs].contains(&msg.hwnd)
+            && matches!(
+                key as u16,
+                VK_OEM_PLUS | VK_ADD | VK_OEM_MINUS | VK_SUBTRACT | 0x30 | VK_NUMPAD0
+            )
+        {
+            app.zoom_wheel = scrollbar::WheelDelta::default();
+            app.set_zoom(match key as u16 {
+                VK_OEM_PLUS | VK_ADD => (app.zoom + 10).min(500),
+                VK_OEM_MINUS | VK_SUBTRACT => app.zoom.saturating_sub(10).max(10),
+                _ => 100,
             });
             handled = true;
         } else if key == VK_F2 as u32 {
@@ -4668,6 +4818,12 @@ pub(crate) unsafe fn scroll_to(kind: Kind, position: i32) {
     }
 }
 
+pub(crate) unsafe fn zoom_wheel(delta: i32) {
+    with_app(|app| unsafe {
+        app.wheel_zoom(delta);
+    });
+}
+
 #[cfg(test)]
 mod settings_tests {
     use super::*;
@@ -4790,8 +4946,10 @@ mod settings_tests {
                             panel.wrap,
                             panel.theme,
                             panel.font,
+                            panel.size,
                             panel.theme_label,
                             panel.font_label,
+                            panel.size_label,
                         ] {
                             let mut area = RECT::default();
                             GetClientRect(control, &mut area);
@@ -5636,6 +5794,277 @@ mod interaction_tests {
         }
     }
 
+    unsafe fn verify_edit_features() {
+        unsafe {
+            let mut editor = null_mut();
+            let mut hwnd = null_mut();
+            let mut original = String::new();
+            let mut original_settings = Settings::default();
+            with_app(|app| {
+                editor = app.edit;
+                hwnd = app.hwnd;
+                original = window_text(editor);
+                original_settings = app.settings.clone();
+            });
+            let sample = "abcdefghijklmnopqrstuvwxyz\r\nX";
+            SetWindowTextW(editor, wide(sample).as_ptr());
+            editing::select(editor, editing::CharRange { start: 0, end: 4 });
+            assert_eq!(
+                editing::character_count(editor),
+                editing::CharacterCount {
+                    total: 28,
+                    selected: 4
+                }
+            );
+            assert_eq!(editing::character_count(editor).to_string(), "4/28자");
+            editing::select(editor, editing::CharRange { start: 26, end: 27 });
+            assert_eq!(editing::character_count(editor).selected, 1); // One paragraph break.
+            editing::select(editor, editing::CharRange { start: 28, end: 28 });
+            assert_eq!(editing::character_count(editor).to_string(), "28자");
+            SetWindowTextW(editor, wide("가🙂\nB").as_ptr());
+            editing::select(editor, editing::CharRange { start: 0, end: -1 });
+            assert_eq!(
+                editing::character_count(editor),
+                editing::CharacterCount {
+                    total: 5,
+                    selected: 5
+                }
+            );
+
+            for (key, include_time) in [(VK_F5, true), (VK_F6, false)] {
+                SetWindowTextW(editor, wide(sample).as_ptr());
+                editing::select(editor, editing::CharRange { start: 0, end: 4 });
+                let before = datetime::current(include_time).unwrap();
+                assert!(shortcut(&MSG {
+                    hwnd: editor,
+                    message: WM_KEYDOWN,
+                    wParam: key as usize,
+                    ..Default::default()
+                }));
+                let after = datetime::current(include_time).unwrap();
+                let inserted = window_text(editor);
+                assert!(
+                    inserted == format!("{before}{}", &sample[4..])
+                        || inserted == format!("{after}{}", &sample[4..])
+                );
+                with_app(|app| {
+                    assert_eq!(app.edit, editor);
+                    assert!(app.open[app.active.unwrap()].dirty);
+                    assert_eq!(GetFocus(), editor);
+                });
+                SendMessageW(editor, WM_UNDO, 0, 0);
+                assert_eq!(window_text(editor), sample); // Each insertion is one undo step.
+            }
+
+            SendMessageW(
+                editor,
+                EM_REPLACESEL,
+                1,
+                wide("글자 크기 검증 ").as_ptr() as isize,
+            );
+            let edited = window_text(editor);
+            let selection = editing::selection(editor);
+            assert_ne!(SendMessageW(editor, EM_CANUNDO, 0, 0), 0);
+            with_app(|app| {
+                app.show_settings(true);
+                let panel = app.settings_panel.unwrap();
+                assert_eq!(SendMessageW(panel.size, CB_GETCOUNT, 0, 0), 65);
+                SendMessageW(panel.size, CB_SETCURSEL, 24 - 8, 0);
+                app.command(ID_SETTINGS_SIZE, CBN_SELENDOK as usize);
+                assert_eq!(app.settings.font_size, 24);
+                assert_eq!(Settings::load(&app.data_dir).unwrap().font_size, 24);
+                let mut font = LOGFONTW::default();
+                GetObjectW(
+                    app.theme.editor,
+                    std::mem::size_of::<LOGFONTW>() as i32,
+                    &mut font as *mut _ as *mut _,
+                );
+                assert_eq!(font.lfHeight, -app.theme.px(24));
+                // Temporary exploration/cancellation does not change the saved size.
+                SendMessageW(panel.size, CB_SETCURSEL, 48 - 8, 0);
+                app.command(ID_SETTINGS_SIZE, CBN_SELENDCANCEL as usize);
+                assert_eq!(app.settings.font_size, 24);
+                assert_eq!(SendMessageW(panel.size, CB_GETCURSEL, 0, 0), 24 - 8);
+                app.show_settings(false);
+            });
+            assert_eq!(window_text(editor), edited);
+            assert_eq!(editing::selection(editor), selection);
+
+            let mut keys = [0u8; 256];
+            GetKeyboardState(keys.as_mut_ptr());
+            let mut ctrl_keys = keys;
+            ctrl_keys[VK_CONTROL as usize] = 0x80;
+            SetKeyboardState(ctrl_keys.as_ptr()); // Private test thread's input queue only.
+            for (key, expected) in [
+                (VK_OEM_PLUS, 110),
+                (VK_OEM_MINUS, 100),
+                (VK_ADD, 110),
+                (VK_SUBTRACT, 100),
+                (VK_OEM_PLUS, 110),
+                (VK_NUMPAD0, 100),
+            ] {
+                assert!(shortcut(&MSG {
+                    hwnd: editor,
+                    message: WM_KEYDOWN,
+                    wParam: key as usize,
+                    ..Default::default()
+                }));
+                with_app(|app| assert_eq!(app.zoom, expected));
+            }
+            SetKeyboardState(keys.as_ptr());
+            let wheel = |delta: i16| MK_CONTROL as usize | ((delta as u16 as usize) << 16);
+            for _ in 0..3 {
+                SendMessageW(editor, WM_MOUSEWHEEL, wheel(30), 0);
+            }
+            with_app(|app| assert_eq!(app.zoom, 100));
+            SendMessageW(editor, WM_MOUSEWHEEL, wheel(30), 0);
+            with_app(|app| assert_eq!(app.zoom, 110));
+            SendMessageW(editor, WM_MOUSEWHEEL, wheel(-120), 0);
+            let mut tracks = [null_mut(); 2];
+            with_app(|app| tracks = app.editor_scroll);
+            SendMessageW(tracks[0], WM_MOUSEWHEEL, wheel(120), 0);
+            with_app(|app| assert_eq!(app.zoom, 110));
+            SendMessageW(tracks[1], WM_MOUSEWHEEL, wheel(-120), 0);
+            with_app(|app| {
+                assert_eq!(app.zoom, 100);
+                for zoom in [10, 500, 150] {
+                    app.set_zoom(zoom);
+                    for tab in &app.open {
+                        let mut numerator = 0u32;
+                        let mut denominator = 0u32;
+                        assert_ne!(
+                            SendMessageW(
+                                tab.editor,
+                                editing::EM_GETZOOM,
+                                &mut numerator as *mut _ as usize,
+                                &mut denominator as *mut _ as isize
+                            ),
+                            0
+                        );
+                        assert_eq!(numerator * 100 / denominator, zoom);
+                    }
+                }
+                let mut next = app.settings.clone();
+                next.font_size = 30;
+                app.apply_settings(next);
+                assert_eq!(app.zoom, 150);
+                let lazy = app.book.children(app.book.notes[0].id)[0];
+                app.open.push(OpenTab {
+                    id: lazy,
+                    text: String::new(),
+                    dirty: false,
+                    editor: null_mut(),
+                });
+                let index = app.open.len() - 1;
+                assert!(app.load_editor(index));
+                let mut numerator = 0u32;
+                let mut denominator = 0u32;
+                SendMessageW(
+                    app.open[index].editor,
+                    editing::EM_GETZOOM,
+                    &mut numerator as *mut _ as usize,
+                    &mut denominator as *mut _ as isize,
+                );
+                assert_eq!(numerator * 100 / denominator, 150);
+                let lazy = app.open.pop().unwrap();
+                DestroyWindow(lazy.editor);
+                assert_eq!(window_text(editor), edited);
+                assert_eq!(editing::selection(editor), selection);
+                assert_ne!(SendMessageW(editor, EM_CANUNDO, 0, 0), 0);
+                assert!(app.open[app.active.unwrap()].dirty);
+                assert_eq!(app.settings.font_size, 30); // Zoom does not rewrite the configured size.
+                app.set_zoom(100);
+                app.apply_settings(original_settings);
+                app.settings.save(&app.data_dir).unwrap();
+                app.loading = true;
+                SetWindowTextW(editor, wide(&original).as_ptr());
+                SendMessageW(editor, EM_EMPTYUNDOBUFFER, 0, 0);
+                SendMessageW(editor, EM_SETMODIFY, 0, 0);
+                app.loading = false;
+                app.open[app.active.unwrap()].dirty = false;
+                KillTimer(hwnd, AUTOSAVE_TIMER);
+                app.layout();
+            });
+        }
+    }
+
+    unsafe fn verify_title_timestamps(title_edit: HWND, body: HWND) {
+        unsafe {
+            let original_title = window_text(title_edit);
+            let original_body = window_text(body);
+            let body_selection = editing::selection(body);
+            let body_modified = SendMessageW(body, EM_GETMODIFY, 0, 0);
+            let body_undo = SendMessageW(body, EM_CANUNDO, 0, 0);
+            let mut dirty = false;
+            let mut saved_titles = Vec::new();
+            with_app(|app| {
+                let active = app.active.unwrap();
+                dirty = app.open[active].dirty;
+                app.open[active].dirty = false; // Title insertion must not mark the body dirty.
+                saved_titles = app
+                    .book
+                    .notes
+                    .iter()
+                    .map(|note| note.title.clone())
+                    .collect();
+            });
+            let mut original_start = 0u32;
+            let mut original_end = 0u32;
+            SendMessageW(
+                title_edit,
+                EM_GETSEL,
+                &mut original_start as *mut _ as usize,
+                &mut original_end as *mut _ as isize,
+            );
+            for (key, include_time) in [(VK_F5, true), (VK_F6, false)] {
+                for replace in [false, true] {
+                    SetWindowTextW(title_edit, wide("가나다 끝").as_ptr());
+                    SendMessageW(title_edit, EM_SETSEL, if replace { 0 } else { 3 }, 3);
+                    let before = datetime::current(include_time).unwrap();
+                    assert!(shortcut(&MSG {
+                        hwnd: title_edit,
+                        message: WM_KEYDOWN,
+                        wParam: key as usize,
+                        ..Default::default()
+                    }));
+                    let after = datetime::current(include_time).unwrap();
+                    let prefix = if replace { "" } else { "가나다" };
+                    let inserted = window_text(title_edit);
+                    assert!(
+                        inserted == format!("{prefix}{before} 끝")
+                            || inserted == format!("{prefix}{after} 끝")
+                    );
+                    assert_eq!(GetFocus(), title_edit);
+                    assert_eq!(window_text(body), original_body);
+                    assert_eq!(editing::selection(body), body_selection);
+                    assert_eq!(SendMessageW(body, EM_GETMODIFY, 0, 0), body_modified);
+                    assert_eq!(SendMessageW(body, EM_CANUNDO, 0, 0), body_undo);
+                    with_app(|app| {
+                        assert!(!app.open[app.active.unwrap()].dirty);
+                        assert_eq!(
+                            app.book
+                                .notes
+                                .iter()
+                                .map(|note| note.title.clone())
+                                .collect::<Vec<_>>(),
+                            saved_titles
+                        ); // The title stays uncommitted while typing.
+                    });
+                    SendMessageW(title_edit, WM_UNDO, 0, 0);
+                    assert_eq!(window_text(title_edit), "가나다 끝");
+                }
+            }
+            SetWindowTextW(title_edit, wide(&original_title).as_ptr());
+            SendMessageW(
+                title_edit,
+                EM_SETSEL,
+                original_start as usize,
+                original_end as isize,
+            );
+            with_app(|app| app.open[app.active.unwrap()].dirty = dirty);
+        }
+    }
+
     unsafe fn verify_rename() {
         unsafe {
             let mut editor = null_mut();
@@ -5747,6 +6176,7 @@ mod interaction_tests {
                     DeleteDC(dc);
                     ReleaseDC(hwnd, screen);
                 });
+                verify_title_timestamps(name_edit, editor);
                 SetWindowTextW(name_edit, wide("  변경한 탭 이름 한글😀  ").as_ptr());
                 SendMessageW(name_edit, EM_SETSEL, 2, 4);
                 assert!(shortcut(&MSG {
@@ -5915,6 +6345,7 @@ mod interaction_tests {
             let tree_edit = SendMessageW(tree, TVM_GETEDITCONTROL, 0, 0) as HWND;
             assert!(!tree_edit.is_null());
             with_app(|app| assert!(app.tab_rename.is_none()));
+            verify_title_timestamps(tree_edit, editor);
             SetWindowTextW(tree_edit, wide("사이드바에서 수정").as_ptr());
             assert!(shortcut(&MSG {
                 hwnd: tree_edit,
@@ -6066,6 +6497,7 @@ mod interaction_tests {
                 }
                 tabs = app.tabs;
             });
+            verify_edit_features();
             verify_rename();
             click_tree(tree, ids[0], 0, true);
             with_app(|app| {
@@ -6125,7 +6557,12 @@ mod interaction_tests {
             // Custom rows use the same selection set in both palettes.
             for dark in [false, true] {
                 with_app(|app| {
-                    app.theme = Rc::new(Theme::new(app.theme.dpi, dark, "Consolas"));
+                    app.theme = Rc::new(Theme::new(
+                        app.theme.dpi,
+                        dark,
+                        "Consolas",
+                        app.settings.font_size,
+                    ));
                     app.apply_theme(true, true, true);
                     app.publish_view();
                     let screen = GetDC(hwnd);

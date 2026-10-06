@@ -871,7 +871,7 @@ mod tests {
             let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut pixels, null_mut(), 0);
             assert!(!dc.is_null() && !bitmap.is_null() && !pixels.is_null());
             let original_bitmap = SelectObject(dc, bitmap);
-            let theme = Theme::new(96, false, "Consolas");
+            let theme = Theme::new(96, false, "Consolas", 18);
             SendMessageW(combo, CB_SETCURSEL, 1, 0); // Native transient hover/preview.
             assert_eq!(confirmed_selection(combo), 0);
             let state = list_state(combo_info.hwndList);
@@ -931,7 +931,7 @@ mod tests {
             confirm_selection(combo);
             (*state).mouse_navigation = false;
             for (column, dark) in [(0, false), (1, true)] {
-                let theme = Theme::new(96, dark, "Consolas");
+                let theme = Theme::new(96, dark, "Consolas", 18);
                 style_dropdown(combo, &theme);
                 assert_eq!(
                     SendMessageW(combo, CB_GETITEMHEIGHT, usize::MAX, 0),

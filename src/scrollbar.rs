@@ -99,9 +99,9 @@ enum Gesture {
     Page(i32),
 }
 #[derive(Default)]
-struct WheelDelta(i32);
+pub struct WheelDelta(i32);
 impl WheelDelta {
-    fn take(&mut self, delta: i32) -> i32 {
+    pub fn take(&mut self, delta: i32) -> i32 {
         self.0 += delta;
         let ticks = self.0 / WHEEL_DELTA as i32;
         self.0 %= WHEEL_DELTA as i32;
@@ -330,6 +330,13 @@ unsafe extern "system" fn procedure(
                 return 0;
             }
             WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+                if msg == WM_MOUSEWHEEL
+                    && wp & windows_sys::Win32::System::SystemServices::MK_CONTROL as usize != 0
+                    && matches!(kind, Kind::EditorVertical | Kind::EditorHorizontal)
+                {
+                    crate::app::zoom_wheel((wp >> 16) as u16 as i16 as i32);
+                    return 0;
+                }
                 let delta =
                     (wp >> 16) as u16 as i16 as i32 * if msg == WM_MOUSEWHEEL { -1 } else { 1 };
                 let ticks = (*state).wheel.take(delta);

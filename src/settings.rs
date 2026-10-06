@@ -17,6 +17,7 @@ pub enum ThemeMode {
 pub struct Settings {
     pub theme: ThemeMode,
     pub font: String,
+    pub font_size: u32,
     pub wrap: bool,
 }
 
@@ -25,6 +26,7 @@ impl Default for Settings {
         Self {
             theme: ThemeMode::System,
             font: "Consolas".into(),
+            font_size: 18,
             wrap: true,
         }
     }
@@ -49,6 +51,11 @@ impl Settings {
                 ("theme", "dark") => settings.theme = ThemeMode::Dark,
                 ("theme", "system") => settings.theme = ThemeMode::System,
                 ("font", font) if valid_font(font) => settings.font = font.into(),
+                ("font_size", size) => {
+                    if let Ok(size @ 8..=72) = size.parse::<u32>() {
+                        settings.font_size = size;
+                    }
+                }
                 ("wrap", "1") => settings.wrap = true,
                 ("wrap", "0") => settings.wrap = false,
                 _ => {}
@@ -74,8 +81,8 @@ impl Settings {
         replace_file(
             &dir.join("settings.tsv"),
             format!(
-                "EDOTSETTINGS1\ntheme\t{mode}\nfont\t{}\nwrap\t{}\n",
-                self.font, self.wrap as u8
+                "EDOTSETTINGS1\ntheme\t{mode}\nfont\t{}\nfont_size\t{}\nwrap\t{}\n",
+                self.font, self.font_size, self.wrap as u8
             )
             .as_bytes(),
         )
@@ -156,10 +163,22 @@ pub struct Panel {
     pub host: HWND,
     pub theme: HWND,
     pub font: HWND,
+    pub size: HWND,
     pub wrap: HWND,
     pub close: HWND,
     pub theme_label: HWND,
     pub font_label: HWND,
+    pub size_label: HWND,
+}
+
+impl Panel {
+    pub fn dropdown(self, id: usize) -> Option<HWND> {
+        [self.theme, self.font, self.size]
+            .into_iter()
+            .find(|&control| unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(control) as usize == id
+            })
+    }
 }
 
 #[cfg(test)]
@@ -174,6 +193,7 @@ mod tests {
         let mut settings = Settings {
             theme: ThemeMode::Dark,
             font: "맑은 고딕".into(),
+            font_size: 24,
             wrap: false,
         };
         settings.save(&dir).unwrap();
@@ -196,5 +216,19 @@ mod tests {
         assert!(!valid_font("bad\tfont"));
         assert!(!valid_font("\0"));
         assert!(!valid_font(" "));
+        assert_eq!(
+            Settings::parse("EDOTSETTINGS1\nfont\tArial\n")
+                .unwrap()
+                .font_size,
+            18
+        );
+        for size in ["7", "73", "0", "-1", "bad", "4294967296"] {
+            assert_eq!(
+                Settings::parse(&format!("EDOTSETTINGS1\nfont_size\t{size}\n"))
+                    .unwrap()
+                    .font_size,
+                18
+            );
+        }
     }
 }

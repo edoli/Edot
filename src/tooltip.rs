@@ -345,7 +345,7 @@ mod tests {
             assert!(!dc.is_null() && !bitmap.is_null());
             let original = SelectObject(dc, bitmap);
             for (column, dark) in [false, true].into_iter().enumerate() {
-                let theme = Theme::new(144, dark, "Consolas");
+                let theme = Theme::new(144, dark, "Consolas", 18);
                 tooltip.style(&theme);
                 assert_eq!(
                     SendMessageW(tooltip.hwnd, WM_GETFONT, 0, 0),

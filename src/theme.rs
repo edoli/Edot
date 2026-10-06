@@ -71,7 +71,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    pub unsafe fn new(dpi: u32, dark: bool, editor_font: &str) -> Self {
+    pub unsafe fn new(dpi: u32, dark: bool, editor_font: &str, editor_size: u32) -> Self {
         let dpi = dpi.max(96);
         let colors = Colors::new(dark);
         let font = |name: &str, size: i32, weight: i32| {
@@ -101,7 +101,7 @@ impl Theme {
             colors,
             ui: font("Segoe UI", 15, 400),
             tab: font("Segoe UI", 13, 400),
-            editor: font(editor_font, 18, 400),
+            editor: font(editor_font, editor_size.clamp(8, 72) as i32, 400),
             small: font("Segoe UI", 13, 400),
             heading: font("Segoe UI", 21, 600),
             white_brush: unsafe { CreateSolidBrush(colors.white) },

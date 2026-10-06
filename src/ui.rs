@@ -36,6 +36,7 @@ pub struct View {
     pub settings_panel: Option<crate::settings::Panel>,
     pub settings_visible: bool,
     pub word_wrap: bool,
+    pub zoom: u32,
     pub status: HWND,
     pub theme: Rc<Theme>,
     pub book: Rc<Notebook>,
@@ -750,7 +751,7 @@ impl View {
             let dc = draw.hDC;
             let area = draw.rcItem;
             if let Some(panel) = self.settings_panel {
-                if draw.hwndItem == panel.theme || draw.hwndItem == panel.font {
+                if [panel.theme, panel.font, panel.size].contains(&draw.hwndItem) {
                     settings_controls::paint_item(draw, &self.theme);
                     return;
                 }
@@ -803,7 +804,7 @@ impl View {
                         theme::text(
                             dc,
                             &self.status_text,
-                            rect(p(190), 0, area.right - p(420), area.bottom),
+                            rect(p(190), 0, area.right - p(490), area.bottom),
                             self.theme.small,
                             self.theme.colors.muted,
                             DT_LEFT,
@@ -814,10 +815,11 @@ impl View {
                     let line = SendMessageW(self.edit, EM_LINEFROMCHAR, start as usize, 0);
                     let line_start = SendMessageW(self.edit, EM_LINEINDEX, line as usize, 0);
                     let info = format!(
-                        "Ln {}, Col {}   │   {}자   │   UTF-8   │   Plain Text",
+                        "Ln {}, Col {}   │   {}   │   {}%   │   UTF-8   │   Plain Text",
                         line + 1,
                         start as isize - line_start + 1,
-                        GetWindowTextLengthW(self.edit).max(0)
+                        crate::editing::character_count(self.edit),
+                        self.zoom
                     );
                     theme::text(
                         dc,
