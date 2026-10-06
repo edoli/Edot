@@ -30,7 +30,7 @@ pub struct View {
     pub edit: HWND,
     pub editor_scroll: [HWND; 2],
     pub toggle: HWND,
-    pub add: HWND,
+    pub sidebar_tabs: [HWND; 2],
     pub tab_add: HWND,
     pub settings_button: HWND,
     pub settings_panel: Option<crate::settings::Panel>,
@@ -53,6 +53,17 @@ pub struct View {
     pub visible: Rc<Vec<isize>>,
     pub find_visible: bool,
     pub replace_visible: bool,
+    pub find_global: bool,
+    pub global_panel: Option<crate::global_search::Panel>,
+    pub global_replace: bool,
+    pub global_case: bool,
+    pub global_message: String,
+    pub global_results: HWND,
+    pub global_scroll: HWND,
+    pub global_rows: Rc<Vec<crate::global_search::ResultRow>>,
+    pub global_offset: usize,
+    pub global_hover: Option<usize>,
+    pub global_selected: Option<u64>,
     pub resizing: bool,
     pub tree_hover: Option<isize>,
     pub dragging: Option<u64>,
@@ -263,6 +274,16 @@ impl View {
     pub unsafe fn scroll_range(&self, kind: Kind) -> ScrollRange {
         unsafe {
             match kind {
+                Kind::Search => {
+                    let mut area = RECT::default();
+                    GetClientRect(self.global_results, &mut area);
+                    ScrollRange {
+                        min: 0,
+                        max: self.global_rows.len() as i32 - 1,
+                        page: (area.bottom / self.theme.px(60)).max(1) as u32,
+                        position: self.global_offset as i32,
+                    }
+                }
                 Kind::EditorVertical | Kind::EditorHorizontal => {
                     scrollbar::body_range(self.edit, kind.horizontal())
                 }
@@ -374,6 +395,53 @@ impl View {
         }
     }
 
+    pub unsafe fn paint_search_host(&self, hwnd: HWND, dc: HDC) {
+        unsafe {
+            if let Some(panel) = self.global_panel.filter(|panel| panel.host == hwnd) {
+                let p = |n| self.theme.px(n);
+                let mut area = RECT::default();
+                GetClientRect(hwnd, &mut area);
+                theme::fill(dc, area, self.theme.colors.sidebar);
+                for (field, y) in [(panel.find, 36), (panel.replace, 82)] {
+                    if field == panel.replace && !self.global_replace {
+                        continue;
+                    }
+                    theme::rounded(
+                        dc,
+                        rect(p(12), p(y), area.right - p(12), p(y + 36)),
+                        self.theme.colors.white,
+                        if GetFocus() == field {
+                            self.theme.colors.blue
+                        } else {
+                            self.theme.colors.border
+                        },
+                        p(7),
+                    );
+                }
+                let y = p(crate::global_search::message_y(
+                    self.global_replace,
+                    area.right < p(230),
+                ));
+                theme::text(
+                    dc,
+                    &self.global_message,
+                    rect(p(12), y, area.right - p(12), y + p(38)),
+                    self.theme.small,
+                    self.theme.colors.muted,
+                    DT_LEFT | DT_WORDBREAK,
+                );
+                let bottom = y + p(45);
+                theme::fill(
+                    dc,
+                    rect(0, bottom, area.right, bottom + 1),
+                    self.theme.colors.border,
+                );
+            } else {
+                self.paint_search(dc);
+            }
+        }
+    }
+
     pub unsafe fn paint_search(&self, dc: HDC) {
         unsafe {
             let p = |n| self.theme.px(n);
@@ -436,6 +504,72 @@ impl View {
                 self.theme.colors.muted,
                 DT_LEFT,
             );
+        }
+    }
+
+    pub unsafe fn paint_global_results(&self, dc: HDC) {
+        unsafe {
+            let p = |n| self.theme.px(n);
+            let mut area = RECT::default();
+            GetClientRect(self.global_results, &mut area);
+            theme::fill(dc, area, self.theme.colors.sidebar);
+            let height = p(60);
+            for (index, row) in self.global_rows.iter().enumerate().skip(self.global_offset) {
+                let top = (index - self.global_offset) as i32 * height;
+                if top >= area.bottom {
+                    break;
+                }
+                let selected = self.global_selected == Some(row.id);
+                if selected || self.global_hover == Some(index) {
+                    theme::rounded(
+                        dc,
+                        rect(p(4), top + p(2), area.right - p(4), top + height - p(2)),
+                        if selected {
+                            self.theme.colors.selected
+                        } else {
+                            self.theme.colors.hover
+                        },
+                        if selected && GetFocus() == self.global_results {
+                            self.theme.colors.blue
+                        } else if selected {
+                            self.theme.colors.selected
+                        } else {
+                            self.theme.colors.hover
+                        },
+                        p(7),
+                    );
+                }
+                let title = self
+                    .book
+                    .get(row.id)
+                    .map_or("삭제된 메모", |note| note.title.as_str());
+                theme::text(
+                    dc,
+                    &format!("{title}  ·  {}곳", row.count),
+                    rect(p(12), top + p(5), area.right - p(8), top + p(29)),
+                    self.theme.ui,
+                    self.theme.colors.ink,
+                    DT_LEFT,
+                );
+                theme::text(
+                    dc,
+                    &format!("{}행  {}", row.line, row.preview),
+                    rect(p(12), top + p(30), area.right - p(8), top + p(53)),
+                    self.theme.small,
+                    self.theme.colors.muted,
+                    DT_LEFT,
+                );
+            }
+            if self.global_rows.is_empty() {
+                theme::text(
+                    dc,
+                    "메모 본문에서 검색합니다",
+                    rect(p(12), p(12), area.right - p(12), p(40)),
+                    self.theme.small,
+                    self.theme.colors.muted,
+                    DT_LEFT,
+                );
+            }
         }
     }
 
@@ -852,12 +986,29 @@ impl View {
             let hovered = PtInRect(&area, mouse) != 0;
             let pressed = draw.itemState & ODS_SELECTED != 0;
             let focused = draw.itemState & ODS_FOCUS != 0;
-            if let Some(index) = self
-                .search_buttons
-                .iter()
-                .position(|&button| button == draw.hwndItem)
-            {
-                let checked = index == 0 && self.find_case_sensitive;
+            let global_button = self.global_panel.and_then(|panel| {
+                panel
+                    .buttons
+                    .iter()
+                    .position(|&button| button == draw.hwndItem)
+            });
+            if let Some(index) = global_button.or_else(|| {
+                self.search_buttons
+                    .iter()
+                    .position(|&button| button == draw.hwndItem)
+            }) {
+                let base = if global_button.is_some() {
+                    self.theme.colors.sidebar
+                } else {
+                    self.theme.colors.white
+                };
+                let checked = (index == 0
+                    && if global_button.is_some() {
+                        self.global_case
+                    } else {
+                        self.find_case_sensitive
+                    })
+                    || (index == 6 && self.global_replace);
                 let primary = index == 5;
                 let color = if primary {
                     if hovered || pressed {
@@ -870,9 +1021,9 @@ impl View {
                 } else if hovered {
                     self.theme.colors.hover
                 } else {
-                    self.theme.colors.white
+                    base
                 };
-                theme::fill(dc, area, self.theme.colors.white);
+                theme::fill(dc, area, base);
                 theme::rounded(
                     dc,
                     rect(1, 1, area.right - 1, area.bottom - 1),
@@ -902,6 +1053,22 @@ impl View {
                             p(1),
                         );
                     }
+                    6 => {
+                        let points = if self.global_replace {
+                            [
+                                (cx - p(3), cy - p(2)),
+                                (cx, cy + p(2)),
+                                (cx + p(3), cy - p(2)),
+                            ]
+                        } else {
+                            [
+                                (cx - p(2), cy - p(3)),
+                                (cx + p(2), cy),
+                                (cx - p(2), cy + p(3)),
+                            ]
+                        };
+                        theme::line(dc, &points, self.theme.colors.ink, p(1));
+                    }
                     3 => theme::close(dc, cx - p(4), cy - p(4), p(8), self.theme.colors.muted),
                     _ => theme::text(
                         dc,
@@ -929,7 +1096,7 @@ impl View {
                 .is_some_and(|panel| draw.hwndItem == panel.close)
             {
                 self.theme.colors.white
-            } else if (draw.hwndItem != self.toggle && draw.hwndItem != self.add)
+            } else if (draw.hwndItem != self.toggle && !self.sidebar_tabs.contains(&draw.hwndItem))
                 || !self.sidebar_visible
             {
                 self.theme.colors.bar
@@ -942,15 +1109,11 @@ impl View {
                     self.theme.colors.selected
                 } else if hovered {
                     self.theme.colors.hover
-                } else if draw.hwndItem == self.add {
-                    self.theme.colors.white
                 } else {
                     base
                 };
             let border = if focused {
                 self.theme.colors.blue
-            } else if draw.hwndItem == self.add {
-                self.theme.colors.border
             } else {
                 color
             };
@@ -961,21 +1124,37 @@ impl View {
                 border,
                 p(6),
             );
-            if draw.hwndItem == self.add {
-                theme::plus(
-                    dc,
-                    p(12),
-                    (area.bottom - p(12)) / 2,
-                    p(12),
-                    self.theme.colors.ink,
-                );
+            if let Some(index) = self
+                .sidebar_tabs
+                .iter()
+                .position(|&tab| tab == draw.hwndItem)
+            {
+                let selected = (index == 1) == self.find_global;
+                if selected {
+                    theme::fill(
+                        dc,
+                        rect(p(3), area.bottom - p(3), area.right - p(3), area.bottom),
+                        self.theme.colors.blue,
+                    );
+                }
+                let label = if area.right < p(70) {
+                    if index == 0 { "메모" } else { "검색" }
+                } else if index == 0 {
+                    "메모 목록"
+                } else {
+                    "전체 검색"
+                };
                 theme::text(
                     dc,
-                    "새 메모",
-                    rect(p(34), 0, area.right - p(8), area.bottom),
-                    self.theme.ui,
-                    self.theme.colors.ink,
-                    DT_LEFT,
+                    label,
+                    area,
+                    self.theme.small,
+                    if selected {
+                        self.theme.colors.blue
+                    } else {
+                        self.theme.colors.muted
+                    },
+                    DT_CENTER,
                 );
             } else if draw.hwndItem == self.settings_button {
                 theme::gear(

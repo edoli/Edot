@@ -1,14 +1,12 @@
 use crate::drag::{DropTarget, DropZone};
 use crate::model::{Notebook, replace_file};
-#[cfg(test)]
-use crate::scrollbar::ScrollRange;
-use crate::scrollbar::{self, Kind};
+use crate::scrollbar::{self, Kind, ScrollRange};
 use crate::selection::Selection;
 use crate::settings::{self, Panel, Settings, ThemeMode};
 use crate::tabs::TabLayout;
 use crate::theme::{self, Theme};
 use crate::tooltip::Tooltip;
-use crate::{datetime, editing, settings_controls, startup, ui};
+use crate::{datetime, editing, global_search, settings_controls, startup, ui};
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -30,6 +28,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const ID_TOGGLE: usize = 101;
 const ID_ADD: usize = 102;
+const ID_SIDEBAR_NOTES: usize = 131;
+const ID_SIDEBAR_SEARCH: usize = 132;
+const ID_GLOBAL_FIND: usize = 140;
+const ID_GLOBAL_PREV: usize = 141;
+const ID_GLOBAL_NEXT: usize = 142;
+const ID_GLOBAL_CLOSE: usize = 143;
+const ID_GLOBAL_CASE: usize = 144;
+const ID_GLOBAL_REPLACE: usize = 145;
+const ID_GLOBAL_ONE: usize = 146;
+const ID_GLOBAL_ALL: usize = 147;
+const ID_GLOBAL_DISCLOSURE: usize = 148;
 const ID_EDIT: usize = 104;
 const ID_TREE: usize = 105;
 const ID_TABS: usize = 106;
@@ -71,6 +80,7 @@ const MENU_TAB_CLOSE_RIGHT: usize = 403;
 const AUTOSAVE_TIMER: usize = 1;
 const DRAG_SCROLL_TIMER: usize = 2;
 const TAB_DRAG_SCROLL_TIMER: usize = 3;
+const GLOBAL_SEARCH_TIMER: usize = 4;
 const POSITION_RENAME: u32 = WM_APP + 1;
 const REFRESH_UI: u32 = WM_APP + 2;
 const FINISH_TAB_RENAME: u32 = WM_APP + 3;
@@ -176,7 +186,7 @@ struct App {
     tab_scroll: HWND,
     editor_scroll: [HWND; 2],
     toggle: HWND,
-    add: HWND,
+    sidebar_tabs: [HWND; 2],
     tab_add: HWND,
     settings_button: HWND,
     settings_panel: Option<Panel>,
@@ -207,6 +217,22 @@ struct App {
     replace_all: HWND,
     find_visible: bool,
     replace_visible: bool,
+    find_global: bool,
+    global_panel: Option<global_search::Panel>,
+    global_replace: bool,
+    global_message: String,
+    global_results: HWND,
+    global_scroll: HWND,
+    global_rows: Rc<Vec<global_search::ResultRow>>,
+    global_offset: Cell<usize>,
+    global_hover: Cell<Option<usize>>,
+    global_selected: Option<u64>,
+    global_job: Option<global_search::Job>,
+    global_pending: Option<bool>,
+    global_query: String,
+    global_case: bool,
+    global_ready: bool,
+    global_scanner: Option<global_search::Scanner>,
     find_case_sensitive: bool,
     find_message: String,
     last_query: String,
@@ -504,11 +530,123 @@ unsafe extern "system" fn search_host_proc(
             }
             WM_ERASEBKGND => return 1,
             WM_PAINT => {
-                ui::paint_window(hwnd, |dc| ui::with_view(|view| view.paint_search(dc)));
+                ui::paint_window(hwnd, |dc| {
+                    ui::with_view(|view| view.paint_search_host(hwnd, dc))
+                });
+                return 0;
+            }
+            WM_PRINT => return DefWindowProcW(hwnd, msg, wp, lp),
+            WM_PRINTCLIENT => {
+                let saved = SaveDC(wp as HDC);
+                ui::with_view(|view| view.paint_search_host(hwnd, wp as HDC));
+                RestoreDC(wp as HDC, saved);
                 return 0;
             }
             WM_NCDESTROY => {
                 RemoveWindowSubclass(hwnd, Some(search_host_proc), id);
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+unsafe extern "system" fn global_results_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    _: usize,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_ERASEBKGND => return 1,
+            WM_PAINT => {
+                ui::paint_window(hwnd, |dc| {
+                    ui::with_view(|view| view.paint_global_results(dc))
+                });
+                return 0;
+            }
+            WM_PRINT => return DefWindowProcW(hwnd, msg, wp, lp),
+            WM_PRINTCLIENT => {
+                let saved = SaveDC(wp as HDC);
+                ui::with_view(|view| view.paint_global_results(wp as HDC));
+                RestoreDC(wp as HDC, saved);
+                return 0;
+            }
+            WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+                ui::with_view(|view| {
+                    SendMessageW(view.global_scroll, msg, wp, lp);
+                });
+                return 0;
+            }
+            WM_LBUTTONDOWN => {
+                with_app(|app| {
+                    let index =
+                        app.global_offset.get() + (point_y(lp).max(0) / app.theme.px(60)) as usize;
+                    app.open_global_result(index);
+                    SetFocus(hwnd);
+                });
+                return 0;
+            }
+            WM_MOUSEMOVE | WM_MOUSELEAVE => {
+                with_app(|app| {
+                    let index =
+                        app.global_offset.get() + (point_y(lp).max(0) / app.theme.px(60)) as usize;
+                    let hover =
+                        (msg == WM_MOUSEMOVE && index < app.global_rows.len()).then_some(index);
+                    if app.global_hover.replace(hover) != hover {
+                        app.publish_view();
+                        InvalidateRect(hwnd, null(), 0);
+                    }
+                });
+                if msg == WM_MOUSEMOVE {
+                    let mut track = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    TrackMouseEvent(&mut track);
+                }
+                return 0;
+            }
+            WM_KEYDOWN if matches!(wp as u16, VK_UP | VK_DOWN | VK_RETURN) => {
+                with_app(|app| {
+                    if app.global_rows.is_empty() {
+                        return;
+                    }
+                    let current = app
+                        .global_selected
+                        .and_then(|id| app.global_rows.iter().position(|row| row.id == id));
+                    let index = match (current, wp as u16) {
+                        (Some(index), VK_UP) => index.saturating_sub(1),
+                        (Some(index), VK_DOWN) => (index + 1).min(app.global_rows.len() - 1),
+                        (Some(index), _) => index,
+                        (None, _) => 0,
+                    };
+                    let mut range = ScrollRange::default();
+                    ui::with_view(|view| range = view.scroll_range(Kind::Search));
+                    let offset = if index < app.global_offset.get() {
+                        index
+                    } else if index >= app.global_offset.get() + range.page as usize {
+                        index + 1 - range.page as usize
+                    } else {
+                        app.global_offset.get()
+                    };
+                    app.set_scroll(Kind::Search, offset as i32);
+                    app.open_global_result(index);
+                    SetFocus(hwnd);
+                });
+                return 0;
+            }
+            WM_GETDLGCODE => return DLGC_WANTARROWS as isize,
+            WM_SETFOCUS | WM_KILLFOCUS => {
+                InvalidateRect(hwnd, null(), 0);
+            }
+            WM_NCDESTROY => {
+                RemoveWindowSubclass(hwnd, Some(global_results_proc), id);
             }
             _ => {}
         }
@@ -594,7 +732,21 @@ unsafe fn route_wheel(msg: u32, wp: usize) -> bool {
             for (pane, scrollbar, visible) in [
                 (view.tabs, view.tab_scroll, true),
                 (view.tab_scroll, view.tab_scroll, view.tab_layout.overflow),
-                (GetParent(view.tree), view.tree_scroll, view.sidebar_visible),
+                (
+                    GetParent(view.tree),
+                    view.tree_scroll,
+                    view.sidebar_visible && !view.find_global,
+                ),
+                (
+                    view.global_results,
+                    view.global_scroll,
+                    view.sidebar_visible && view.find_global,
+                ),
+                (
+                    view.global_scroll,
+                    view.global_scroll,
+                    view.sidebar_visible && view.find_global,
+                ),
             ] {
                 GetWindowRect(pane, &mut bounds);
                 if visible && PtInRect(&bounds, point) != 0 {
@@ -910,7 +1062,9 @@ unsafe extern "system" fn control_subclass(
                 GetClientRect(hwnd, &mut area);
                 theme::text(
                     dc,
-                    if hwnd == view.find_input {
+                    if hwnd == view.find_input
+                        || view.global_panel.is_some_and(|panel| hwnd == panel.find)
+                    {
                         "찾을 내용"
                     } else {
                         "바꿀 내용"
@@ -949,16 +1103,20 @@ impl App {
                 ID_TOGGLE,
             )
         };
-        let add = unsafe {
+        let sidebar_tabs = [
+            ("메모 목록", ID_SIDEBAR_NOTES),
+            ("전체 검색", ID_SIDEBAR_SEARCH),
+        ]
+        .map(|(label, id)| unsafe {
             child(
                 hwnd,
-                wide("BUTTON").as_ptr(),
-                "새 메모",
+                windows_sys::w!("BUTTON"),
+                label,
                 common | WS_TABSTOP | BS_OWNERDRAW as u32,
                 0,
-                ID_ADD,
+                id,
             )
-        };
+        });
         let tree_host = unsafe {
             child(
                 hwnd,
@@ -1097,7 +1255,13 @@ impl App {
         unsafe {
             SetWindowSubclass(tree, Some(tree_subclass), 1, 0);
             EnableWindow(edit, 0);
-            for button in [toggle, add, tab_add, settings_button] {
+            for button in [
+                toggle,
+                sidebar_tabs[0],
+                sidebar_tabs[1],
+                tab_add,
+                settings_button,
+            ] {
                 SetWindowSubclass(button, Some(control_subclass), 1, 1);
             }
             SetWindowSubclass(edit, Some(control_subclass), 1, 2);
@@ -1196,7 +1360,7 @@ impl App {
             tab_scroll,
             editor_scroll,
             toggle,
-            add,
+            sidebar_tabs,
             tab_add,
             settings_button,
             settings_panel: None,
@@ -1234,6 +1398,22 @@ impl App {
             replace_all,
             find_visible: false,
             replace_visible: false,
+            find_global: false,
+            global_panel: None,
+            global_replace: false,
+            global_message: String::new(),
+            global_results: null_mut(),
+            global_scroll: null_mut(),
+            global_rows: Rc::new(Vec::new()),
+            global_offset: Cell::new(0),
+            global_hover: Cell::new(None),
+            global_selected: None,
+            global_job: None,
+            global_pending: None,
+            global_query: String::new(),
+            global_case: false,
+            global_ready: false,
+            global_scanner: None,
             find_case_sensitive: false,
             find_message: "Enter로 다음 결과를 찾습니다".into(),
             last_query: String::new(),
@@ -1334,7 +1514,8 @@ impl App {
         unsafe {
             for item in [
                 self.toggle,
-                self.add,
+                self.sidebar_tabs[0],
+                self.sidebar_tabs[1],
                 self.tab_add,
                 self.settings_button,
                 self.tree,
@@ -1366,6 +1547,7 @@ impl App {
             for field in [self.find_input, self.replace_input] {
                 SendMessageW(field, WM_SETFONT, self.theme.ui as usize, 0);
             }
+            self.style_global_panel();
             self.tooltip.style(&self.theme);
             SendMessageW(
                 self.tree,
@@ -1858,7 +2040,7 @@ impl App {
             edit: self.edit,
             editor_scroll: self.editor_scroll,
             toggle: self.toggle,
-            add: self.add,
+            sidebar_tabs: self.sidebar_tabs,
             tab_add: self.tab_add,
             settings_button: self.settings_button,
             settings_panel: self.settings_panel,
@@ -1881,6 +2063,17 @@ impl App {
             visible: Rc::clone(&self.visible),
             find_visible: self.find_visible,
             replace_visible: self.replace_visible,
+            find_global: self.find_global,
+            global_panel: self.global_panel,
+            global_replace: self.global_replace,
+            global_case: self.global_case,
+            global_message: self.global_message.clone(),
+            global_results: self.global_results,
+            global_scroll: self.global_scroll,
+            global_rows: Rc::clone(&self.global_rows),
+            global_offset: self.global_offset.get(),
+            global_hover: self.global_hover.get(),
+            global_selected: self.global_selected,
             resizing: self.resizing,
             tree_hover: self.tree_hover,
             dragging: self.dragging,
@@ -1907,11 +2100,24 @@ impl App {
         });
     }
     fn sync_tree_view(&mut self) {
+        let search_changed = self.global_panel.is_some()
+            && (self.view_book.notes.len() != self.book.notes.len()
+                || self
+                    .view_book
+                    .notes
+                    .iter()
+                    .zip(&self.book.notes)
+                    .any(|(old, new)| old.id != new.id));
         self.view_book = Rc::new(self.book.clone());
         self.view_parents = Rc::new(self.book.notes.iter().map(|n| n.parent).collect());
         self.view_handles = Rc::new(self.handles.clone());
         self.refresh_tree_visibility();
         self.publish_view();
+        if search_changed {
+            unsafe {
+                self.refresh_global_search();
+            }
+        }
     }
     fn refresh_tree_visibility(&mut self) -> bool {
         let mut visible = Vec::new();
@@ -1976,25 +2182,32 @@ impl App {
                     p(28),
                 ),
                 (
-                    self.add,
-                    p(12),
-                    p(10),
-                    p(134).min(left - p(60)).max(0),
-                    p(34),
+                    self.sidebar_tabs[0],
+                    p(8),
+                    p(4),
+                    (left - p(54)).max(0) / 2,
+                    p(36),
+                ),
+                (
+                    self.sidebar_tabs[1],
+                    p(8) + (left - p(54)).max(0) / 2,
+                    p(4),
+                    ((left - p(54)).max(0) + 1) / 2,
+                    p(36),
                 ),
                 (
                     self.tree_host,
                     p(8),
-                    p(62),
+                    p(52),
                     (left - p(22)).max(0),
-                    (h - p(70)).max(0),
+                    (h - p(60)).max(0),
                 ),
                 (
                     self.tree_scroll,
                     left - p(12),
-                    p(62),
+                    p(52),
                     p(12),
-                    (h - p(70)).max(0),
+                    (h - p(60)).max(0),
                 ),
                 (self.tabs, tabs_x, 0, tabs.viewport, p(36)),
                 (self.tab_scroll, tabs_x, p(36), tabs.viewport, p(12)),
@@ -2072,7 +2285,7 @@ impl App {
             // clipping host so its native scrollbar can stay functional.
             let tree_width =
                 (left - p(22)).max(0) + GetSystemMetricsForDpi(SM_CXVSCROLL, self.theme.dpi);
-            let tree_height = (h - p(70)).max(0);
+            let tree_height = (h - p(60)).max(0);
             let mut tree_area = RECT::default();
             GetWindowRect(self.tree, &mut tree_area);
             if tree_area.right - tree_area.left != tree_width
@@ -2088,13 +2301,14 @@ impl App {
                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS,
                 );
             }
-            let visible_rows = ((h - p(70)) / p(29).max(1)).max(1) as usize;
+            let visible_rows = ((h - p(60)) / p(29).max(1)).max(1) as usize;
             for (hwnd, show) in [
-                (self.add, self.sidebar_visible),
-                (self.tree_host, self.sidebar_visible),
+                (self.sidebar_tabs[0], self.sidebar_visible),
+                (self.sidebar_tabs[1], self.sidebar_visible),
+                (self.tree_host, self.sidebar_visible && !self.find_global),
                 (
                     self.tree_scroll,
-                    self.sidebar_visible && self.visible.len() > visible_rows,
+                    self.sidebar_visible && !self.find_global && self.visible.len() > visible_rows,
                 ),
                 (self.tab_scroll, tabs.overflow),
                 (self.editor_clip, self.active.is_some()),
@@ -2106,6 +2320,7 @@ impl App {
                 }
             }
             self.layout_search();
+            self.layout_global();
             self.layout_tab_rename();
             ui::with_view(|view| view.refresh_editor_scroll());
             self.layout_settings();
@@ -2144,7 +2359,8 @@ impl App {
                 0
             };
             let width = p(480).min((client.right - left - p(24)).max(0));
-            let height = p(if self.replace_visible { 210 } else { 122 });
+            let base_height = p(if self.replace_visible { 210 } else { 122 });
+            let height = base_height;
             SetWindowPos(
                 self.search_host,
                 HWND_TOP,
@@ -2204,14 +2420,7 @@ impl App {
                     },
                 );
             }
-            ShowWindow(
-                self.search_host,
-                if self.find_visible && self.active.is_some() {
-                    SW_SHOWNA
-                } else {
-                    SW_HIDE
-                },
-            );
+            ShowWindow(self.search_host, SW_SHOWNA);
             RedrawWindow(
                 self.search_host,
                 null(),
@@ -2508,10 +2717,20 @@ impl App {
             InvalidateRect(self.tree_scroll, null(), 0);
         }
     }
-    unsafe fn set_scroll(&self, kind: Kind, target: i32) {
+    unsafe fn set_scroll(&mut self, kind: Kind, target: i32) {
         unsafe {
             self.tooltip.dismiss();
             match kind {
+                Kind::Search => {
+                    let mut range = ScrollRange::default();
+                    ui::with_view(|view| range = view.scroll_range(kind));
+                    self.global_offset
+                        .set(target.clamp(0, range.extent() as i32) as usize);
+                    self.global_hover.set(None);
+                    self.publish_view();
+                    InvalidateRect(self.global_results, null(), 0);
+                    InvalidateRect(self.global_scroll, null(), 0);
+                }
                 Kind::Dropdown { list, .. } => scrollbar::set_list_position(list, target),
                 Kind::EditorVertical | Kind::EditorHorizontal => {
                     scrollbar::set_body_position(self.edit, kind.horizontal(), target);
@@ -2606,6 +2825,7 @@ impl App {
             self.last_match = None;
             SetTimer(self.hwnd, AUTOSAVE_TIMER, 650, None);
             self.set_status("저장 중…");
+            self.refresh_global_search();
         }
     }
 
@@ -2723,7 +2943,7 @@ impl App {
                 report(self.hwnd, "메모 이름을 저장하지 못했습니다.", error);
                 return false;
             }
-            if self.selection.ids.len() <= 1 {
+            if !self.find_global && self.selection.ids.len() <= 1 {
                 self.selection.single(self.open[index].id);
                 self.refresh_selection();
             }
@@ -2742,17 +2962,19 @@ impl App {
             self.publish_view();
             self.layout();
             ShowWindow(self.edit, SW_SHOWNA);
-            if let Some((&handle, _)) = self
-                .handles
-                .iter()
-                .find(|&(_, &id)| id == self.open[index].id)
-            {
-                SendMessageW(self.tree, TVM_SELECTITEM, TVGN_CARET as usize, handle);
-            }
-            // Selecting a tab can expand its ancestors synchronously, while
-            // application state is borrowed and expansion notifications defer.
-            if self.refresh_tree_visibility() {
-                self.layout();
+            if !self.find_global {
+                if let Some((&handle, _)) = self
+                    .handles
+                    .iter()
+                    .find(|&(_, &id)| id == self.open[index].id)
+                {
+                    SendMessageW(self.tree, TVM_SELECTITEM, TVGN_CARET as usize, handle);
+                }
+                // Selecting a tab can expand its ancestors synchronously, while
+                // application state is borrowed and expansion notifications defer.
+                if self.refresh_tree_visibility() {
+                    self.layout();
+                }
             }
             InvalidateRect(self.tree_scroll, null(), 0);
             SetFocus(self.edit);
@@ -2924,6 +3146,9 @@ impl App {
         }
         self.expanded.insert(parent);
         unsafe {
+            if self.sidebar_visible && self.find_global {
+                self.show_note_list();
+            }
             self.rebuild_tree(Some(id));
             self.open_note(id);
             self.rename_selected();
@@ -2960,6 +3185,9 @@ impl App {
             if let Err(error) = self.finish_tab_rename(true, false) {
                 report(self.hwnd, "메모 이름을 저장하지 못했습니다.", error);
                 return;
+            }
+            if self.find_global {
+                self.show_note_list();
             }
             self.tooltip.hide();
             self.rename_selected();
@@ -3612,7 +3840,762 @@ impl App {
         }
     }
 
+    unsafe fn style_global_panel(&self) {
+        if let Some(panel) = self.global_panel {
+            unsafe {
+                for button in panel.buttons {
+                    SendMessageW(button, WM_SETFONT, self.theme.small as usize, 0);
+                }
+                for field in [panel.find, panel.replace] {
+                    SendMessageW(field, WM_SETFONT, self.theme.ui as usize, 0);
+                }
+            }
+        }
+    }
+
+    unsafe fn layout_global(&self) {
+        let Some(panel) = self.global_panel else {
+            return;
+        };
+        unsafe {
+            let p = |n| self.theme.px(n);
+            let mut client = RECT::default();
+            GetClientRect(self.hwnd, &mut client);
+            let width = self.sidebar_edge(client.right);
+            let height = (client.bottom - p(52)).max(0);
+            let first_show =
+                self.sidebar_visible && self.find_global && IsWindowVisible(panel.host) == 0;
+            let narrow = width < p(230);
+            let header = p(global_search::message_y(self.global_replace, narrow) + 46);
+            SetWindowPos(
+                panel.host,
+                null_mut(),
+                0,
+                p(52),
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS,
+            );
+            let [case, prev, next, close, one, all, disclosure] = panel.buttons;
+            for (hwnd, x, y, w, h) in [
+                (disclosure, p(10), p(4), p(24), p(26)),
+                (case, width - p(112), p(4), p(24), p(26)),
+                (prev, width - p(86), p(4), p(24), p(26)),
+                (next, width - p(60), p(4), p(24), p(26)),
+                (close, width - p(34), p(4), p(24), p(26)),
+                (panel.find, p(18), p(42), width - p(36), p(24)),
+                (panel.replace, p(18), p(88), width - p(36), p(24)),
+                (
+                    one,
+                    p(12),
+                    p(128),
+                    if narrow { width - p(24) } else { p(80) },
+                    p(30),
+                ),
+                (
+                    all,
+                    if narrow { p(12) } else { width - p(118) },
+                    p(if narrow { 162 } else { 128 }),
+                    if narrow { width - p(24) } else { p(106) },
+                    p(30),
+                ),
+                (
+                    self.global_results,
+                    0,
+                    header,
+                    width - p(12),
+                    height - header,
+                ),
+                (
+                    self.global_scroll,
+                    width - p(12),
+                    header,
+                    p(12),
+                    height - header,
+                ),
+            ] {
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    x.max(0),
+                    y,
+                    w.max(0),
+                    h.max(0),
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS,
+                );
+            }
+            for hwnd in [panel.replace, one, all] {
+                ShowWindow(
+                    hwnd,
+                    if self.global_replace {
+                        SW_SHOWNA
+                    } else {
+                        SW_HIDE
+                    },
+                );
+            }
+            let page = ((height - header).max(0) / p(60).max(1)).max(1) as usize;
+            let offset = self
+                .global_offset
+                .get()
+                .min(self.global_rows.len().saturating_sub(page));
+            if self.global_offset.replace(offset) != offset {
+                self.global_hover.set(None);
+            }
+            self.publish_view();
+            ShowWindow(self.global_results, SW_SHOWNA);
+            ShowWindow(
+                self.global_scroll,
+                if self.global_rows.len() > page {
+                    SW_SHOWNA
+                } else {
+                    SW_HIDE
+                },
+            );
+            ShowWindow(
+                panel.host,
+                if self.sidebar_visible && self.find_global {
+                    SW_SHOWNA
+                } else {
+                    SW_HIDE
+                },
+            );
+            RedrawWindow(
+                panel.host,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE
+                    | RDW_ALLCHILDREN
+                    | RDW_NOERASE
+                    | if first_show { RDW_UPDATENOW } else { 0 },
+            );
+        }
+    }
+
+    unsafe fn global_message(&mut self, message: &str) {
+        self.global_message = message.to_owned();
+        self.publish_view();
+        if let Some(panel) = self.global_panel {
+            unsafe {
+                InvalidateRect(panel.host, null(), 0);
+            }
+        }
+    }
+
+    unsafe fn refresh_global_search(&mut self) {
+        self.global_ready = false;
+        if self.sidebar_visible && self.find_global {
+            unsafe {
+                self.queue_global_search();
+            }
+        }
+    }
+
+    unsafe fn show_global_search(&mut self, replace: Option<bool>) {
+        unsafe {
+            if let Err(error) = self.ensure_global_search() {
+                report(self.hwnd, "전체 검색을 열지 못했습니다.", error);
+                return;
+            }
+            if self.settings_visible {
+                self.show_settings(false);
+            }
+            if let Err(error) = self.finish_tab_rename(true, false) {
+                report(self.hwnd, "메모 이름을 저장하지 못했습니다.", error);
+                return;
+            }
+            SendMessageW(self.tree, TVM_ENDEDITLABELNOW, 0, 0);
+            if let Some(replace) = replace {
+                self.global_replace = replace;
+                self.find_visible = false;
+            }
+            self.sidebar_visible = true;
+            self.find_global = true;
+            self.publish_view();
+            self.layout();
+            if !self.global_ready {
+                self.queue_global_search();
+            }
+            let input = self.global_panel.unwrap().find;
+            SetFocus(input);
+            SendMessageW(input, EM_SETSEL, 0, -1);
+        }
+    }
+
+    unsafe fn show_note_list(&mut self) {
+        unsafe {
+            self.cancel_global_search();
+            self.find_global = false;
+            self.publish_view();
+            self.layout();
+            SetFocus(self.tree);
+        }
+    }
+
+    unsafe fn toggle_sidebar(&mut self) {
+        unsafe {
+            self.sidebar_visible = !self.sidebar_visible;
+            if !self.sidebar_visible {
+                self.cancel_global_search();
+                if IsChild(self.tree_host, GetFocus()) != 0
+                    || self
+                        .global_panel
+                        .is_some_and(|p| IsChild(p.host, GetFocus()) != 0)
+                {
+                    SetFocus(if self.active.is_some() {
+                        self.edit
+                    } else {
+                        self.tabs
+                    });
+                }
+            } else if self.find_global && !self.global_ready {
+                self.queue_global_search();
+            }
+            self.layout();
+        }
+    }
+
+    unsafe fn replace_global_one(&mut self) {
+        unsafe {
+            let Some(panel) = self.global_panel else {
+                return;
+            };
+            let query = window_text(panel.find);
+            let range = editing::selection(self.edit);
+            if self.active.is_some()
+                && !query.is_empty()
+                && range.end > range.start
+                && editing::find(
+                    self.edit,
+                    &query,
+                    range.start,
+                    range.end,
+                    false,
+                    self.global_case,
+                ) == Some(range)
+            {
+                SendMessageW(self.edit, editing::EM_STOPGROUPTYPING, 0, 0);
+                SendMessageW(
+                    self.edit,
+                    EM_REPLACESEL,
+                    1,
+                    wide(&window_text(panel.replace)).as_ptr() as isize,
+                );
+                self.capture_edit();
+                self.queue_global_search();
+                self.global_pending = Some(false);
+            } else {
+                self.find_global_next(false);
+            }
+        }
+    }
+
+    unsafe fn ensure_global_search(&mut self) -> std::io::Result<()> {
+        if self.global_scanner.is_none() {
+            self.global_scanner = Some(global_search::Scanner::new()?);
+        }
+        unsafe {
+            if self.global_panel.is_none() {
+                let host = child(
+                    self.hwnd,
+                    windows_sys::w!("STATIC"),
+                    "",
+                    WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                    0,
+                    149,
+                );
+                if host.is_null() {
+                    return Err(std::io::Error::last_os_error());
+                }
+                SetWindowSubclass(host, Some(search_host_proc), 1, 0);
+                let find = child(
+                    host,
+                    windows_sys::w!("EDIT"),
+                    "",
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+                    0,
+                    ID_GLOBAL_FIND,
+                );
+                let replace = child(
+                    host,
+                    windows_sys::w!("EDIT"),
+                    "",
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+                    0,
+                    ID_GLOBAL_REPLACE,
+                );
+                let buttons = [
+                    ("대소문자 구분", ID_GLOBAL_CASE),
+                    ("이전 결과", ID_GLOBAL_PREV),
+                    ("다음 결과", ID_GLOBAL_NEXT),
+                    ("메모 목록으로 돌아가기", ID_GLOBAL_CLOSE),
+                    ("바꾸기", ID_GLOBAL_ONE),
+                    ("모두 바꾸기", ID_GLOBAL_ALL),
+                    ("바꾸기 표시 / 숨기기", ID_GLOBAL_DISCLOSURE),
+                ]
+                .map(|(label, id)| {
+                    child(
+                        host,
+                        windows_sys::w!("BUTTON"),
+                        label,
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+                        0,
+                        id,
+                    )
+                });
+                if find.is_null() || replace.is_null() || buttons.iter().any(|h| h.is_null()) {
+                    let error = std::io::Error::last_os_error();
+                    DestroyWindow(host);
+                    return Err(error);
+                }
+                for field in [find, replace] {
+                    SetWindowSubclass(field, Some(control_subclass), 1, 3);
+                }
+                for button in buttons {
+                    SetWindowSubclass(button, Some(control_subclass), 1, 1);
+                }
+                self.global_panel = Some(global_search::Panel {
+                    host,
+                    find,
+                    replace,
+                    buttons,
+                });
+                self.publish_view();
+                self.style_global_panel();
+            }
+            if self.global_results.is_null() {
+                self.global_results = child(
+                    self.global_panel.unwrap().host,
+                    windows_sys::w!("STATIC"),
+                    "",
+                    WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS,
+                    0,
+                    127,
+                );
+                self.global_scroll = child(
+                    self.global_panel.unwrap().host,
+                    windows_sys::w!("STATIC"),
+                    "",
+                    WS_CHILD | WS_CLIPSIBLINGS,
+                    0,
+                    128,
+                );
+                if self.global_results.is_null() || self.global_scroll.is_null() {
+                    let error = std::io::Error::last_os_error();
+                    if !self.global_results.is_null() {
+                        DestroyWindow(self.global_results);
+                    }
+                    if !self.global_scroll.is_null() {
+                        DestroyWindow(self.global_scroll);
+                    }
+                    self.global_results = null_mut();
+                    self.global_scroll = null_mut();
+                    return Err(error);
+                }
+                SetWindowSubclass(self.global_results, Some(global_results_proc), 1, 0);
+                scrollbar::attach(self.global_scroll, Kind::Search);
+            }
+        }
+        Ok(())
+    }
+
+    unsafe fn cancel_global_search(&mut self) {
+        self.global_job = None;
+        self.global_pending = None;
+        if let Some(scanner) = self.global_scanner.as_mut() {
+            scanner.clear();
+        }
+        unsafe {
+            KillTimer(self.hwnd, GLOBAL_SEARCH_TIMER);
+        }
+    }
+
+    unsafe fn queue_global_search(&mut self) {
+        unsafe {
+            self.cancel_global_search();
+            self.global_rows = Rc::new(Vec::new());
+            self.global_offset.set(0);
+            self.global_hover.set(None);
+            self.global_selected = None;
+            self.global_ready = false;
+            self.global_query = window_text(self.global_panel.unwrap().find);
+            self.global_message(if self.global_query.is_empty() {
+                "검색어를 입력하세요"
+            } else {
+                "전체 메모 검색 중…"
+            });
+            self.layout_global();
+            if !self.global_query.is_empty() && self.sidebar_visible && self.find_global {
+                SetTimer(self.hwnd, GLOBAL_SEARCH_TIMER, 180, None);
+            }
+        }
+    }
+
+    unsafe fn search_text(&self, id: u64) -> std::io::Result<String> {
+        if let Some(tab) = self
+            .open
+            .iter()
+            .find(|tab| tab.id == id && !tab.editor.is_null())
+        {
+            Ok(unsafe { window_text(tab.editor) })
+        } else {
+            fs::read_to_string(self.book.file(&self.data_dir, id))
+        }
+    }
+
+    unsafe fn step_global_search(&mut self) {
+        unsafe {
+            if !self.sidebar_visible || !self.find_global || self.global_query.is_empty() {
+                self.cancel_global_search();
+                return;
+            }
+            if self.global_job.is_none() {
+                self.global_job = Some(global_search::Job {
+                    query: self.global_query.clone(),
+                    case: self.global_case,
+                    ids: self.book.notes.iter().map(|note| note.id).collect(),
+                    next: 0,
+                    rows: Vec::new(),
+                    errors: 0,
+                });
+                SetTimer(self.hwnd, GLOBAL_SEARCH_TIMER, 15, None);
+            }
+            let mut job = self.global_job.take().unwrap();
+            let started = std::time::Instant::now();
+            while let Some(&id) = job.ids.get(job.next) {
+                if self.book.get(id).is_some() {
+                    match self.search_text(id) {
+                        Ok(text) => {
+                            if let Some(row) = self
+                                .global_scanner
+                                .as_mut()
+                                .unwrap()
+                                .scan(id, &text, &job.query, job.case)
+                            {
+                                job.rows.push(row);
+                            }
+                        }
+                        Err(_) => job.errors += 1,
+                    }
+                }
+                job.next += 1;
+                if started.elapsed() >= std::time::Duration::from_millis(8) {
+                    break;
+                }
+            }
+            if job.next < job.ids.len() {
+                self.global_message(&format!(
+                    "전체 메모 검색 중… {}/{}",
+                    job.next,
+                    job.ids.len()
+                ));
+                self.global_job = Some(job);
+            } else {
+                KillTimer(self.hwnd, GLOBAL_SEARCH_TIMER);
+                let count: usize = job.rows.iter().map(|row| row.count).sum();
+                let message = format!(
+                    "{}개 메모, {}곳 일치{}",
+                    job.rows.len(),
+                    count,
+                    if job.errors == 0 {
+                        String::new()
+                    } else {
+                        format!(" · {}개 읽기 실패", job.errors)
+                    }
+                );
+                self.global_rows = Rc::new(job.rows);
+                self.global_scanner.as_mut().unwrap().clear();
+                self.global_ready = true;
+                self.global_message(&message);
+                self.layout_global();
+                if let Some(backwards) = self.global_pending.take() {
+                    self.find_global_next(backwards);
+                }
+            }
+        }
+    }
+
+    unsafe fn select_global_match(&mut self, id: u64, range: editing::CharRange) {
+        unsafe {
+            self.global_selected = Some(id);
+            if let Some(index) = self.global_rows.iter().position(|row| row.id == id) {
+                let mut scroll = ScrollRange::default();
+                ui::with_view(|view| scroll = view.scroll_range(Kind::Search));
+                let offset = self.global_offset.get();
+                if index < offset {
+                    self.set_scroll(Kind::Search, index as i32);
+                } else if index >= offset + scroll.page as usize {
+                    self.set_scroll(Kind::Search, (index + 1 - scroll.page as usize) as i32);
+                }
+            }
+            editing::select(self.edit, range);
+            SendMessageW(self.edit, EM_SCROLLCARET, 0, 0);
+            self.publish_view();
+            InvalidateRect(self.global_results, null(), 0);
+            self.set_status("전체 검색 결과 선택됨");
+        }
+    }
+
+    unsafe fn open_global_result(&mut self, index: usize) {
+        if !self.global_ready {
+            return;
+        }
+        let Some(row) = self.global_rows.get(index) else {
+            return;
+        };
+        let id = row.id;
+        if self.book.get(id).is_none() {
+            return;
+        }
+        unsafe {
+            self.open_search_note(id);
+            if self.active.is_some_and(|index| self.open[index].id == id) {
+                if let Some(range) = editing::find(
+                    self.edit,
+                    &self.global_query,
+                    0,
+                    -1,
+                    false,
+                    self.global_case,
+                ) {
+                    self.select_global_match(id, range);
+                } else {
+                    self.queue_global_search();
+                }
+            }
+        }
+    }
+
+    unsafe fn open_search_note(&mut self, id: u64) {
+        unsafe {
+            let focus = GetFocus();
+            self.open_note(id);
+            if self
+                .global_panel
+                .is_some_and(|panel| IsChild(panel.host, focus) != 0)
+            {
+                SetFocus(focus);
+            }
+        }
+    }
+
+    unsafe fn find_global_next(&mut self, backwards: bool) {
+        unsafe {
+            if self.global_query.is_empty() {
+                self.global_message("검색어를 입력하세요");
+                return;
+            }
+            if !self.global_ready {
+                self.global_pending = Some(backwards);
+                return;
+            }
+            if self.global_rows.is_empty() {
+                self.global_message("일치하는 텍스트가 없습니다");
+                return;
+            }
+            let current_id = self.active.map(|index| self.open[index].id);
+            let current =
+                current_id.and_then(|id| self.global_rows.iter().position(|row| row.id == id));
+            if let Some(index) = current {
+                let selection = editing::selection(self.edit);
+                if let Some(range) = editing::find(
+                    self.edit,
+                    &self.global_query,
+                    if backwards {
+                        selection.start
+                    } else {
+                        selection.end
+                    },
+                    if backwards { 0 } else { -1 },
+                    backwards,
+                    self.global_case,
+                ) {
+                    self.select_global_match(self.global_rows[index].id, range);
+                    return;
+                }
+            }
+            let count = self.global_rows.len();
+            for step in 1..=count {
+                let index = match current {
+                    Some(index) if backwards => (index + count - step) % count,
+                    Some(index) => (index + step) % count,
+                    None if backwards => count - step,
+                    None => step - 1,
+                };
+                let id = self.global_rows[index].id;
+                if self.book.get(id).is_none() {
+                    continue;
+                }
+                self.open_search_note(id);
+                if self.active.is_none_or(|index| self.open[index].id != id) {
+                    continue;
+                }
+                if let Some(range) = editing::find(
+                    self.edit,
+                    &self.global_query,
+                    if backwards {
+                        editing::character_count(self.edit).total as i32
+                    } else {
+                        0
+                    },
+                    if backwards { 0 } else { -1 },
+                    backwards,
+                    self.global_case,
+                ) {
+                    self.select_global_match(id, range);
+                    return;
+                }
+            }
+            self.queue_global_search();
+        }
+    }
+
+    unsafe fn prepare_global_replacements(
+        &mut self,
+    ) -> std::io::Result<Vec<global_search::Change>> {
+        unsafe {
+            self.ensure_global_search()?;
+            let query = window_text(self.global_panel.unwrap().find);
+            if query.is_empty() {
+                return Ok(Vec::new());
+            }
+            let replacement = window_text(self.global_panel.unwrap().replace);
+            let mut changes = Vec::new();
+            for note in &self.book.notes {
+                let path = self.book.file(&self.data_dir, note.id);
+                let before_disk = fs::read(&path)
+                    .map_err(|error| std::io::Error::other(format!("{}: {error}", note.title)))?;
+                let text = if let Some(tab) = self
+                    .open
+                    .iter()
+                    .find(|tab| tab.id == note.id && !tab.editor.is_null())
+                {
+                    window_text(tab.editor)
+                } else {
+                    String::from_utf8(before_disk.clone()).map_err(|error| {
+                        std::io::Error::other(format!("{}: {error}", note.title))
+                    })?
+                };
+                let ranges =
+                    self.global_scanner
+                        .as_mut()
+                        .unwrap()
+                        .ranges(&text, &query, self.global_case);
+                if ranges.is_empty() {
+                    continue;
+                }
+                let after = global_search::replace(&text, &ranges, &replacement);
+                if after == text {
+                    continue;
+                }
+                changes.push(global_search::Change {
+                    id: note.id,
+                    path,
+                    before_disk,
+                    after,
+                    count: ranges.len(),
+                });
+            }
+            self.global_scanner.as_mut().unwrap().clear();
+            Ok(changes)
+        }
+    }
+
+    unsafe fn apply_global_replacements(
+        &mut self,
+        changes: &[global_search::Change],
+    ) -> std::io::Result<()> {
+        global_search::commit(changes)?;
+        unsafe {
+            self.loading = true;
+            for change in changes {
+                if let Some(tab) = self.open.iter_mut().find(|tab| tab.id == change.id) {
+                    if !tab.editor.is_null() {
+                        let selection = editing::selection(tab.editor);
+                        SendMessageW(tab.editor, editing::EM_STOPGROUPTYPING, 0, 0);
+                        SendMessageW(tab.editor, WM_SETREDRAW, 0, 0);
+                        editing::select(tab.editor, editing::CharRange { start: 0, end: -1 });
+                        SendMessageW(
+                            tab.editor,
+                            EM_REPLACESEL,
+                            1,
+                            wide(&change.after).as_ptr() as isize,
+                        );
+                        SendMessageW(tab.editor, editing::EM_STOPGROUPTYPING, 0, 0);
+                        let length = editing::character_count(tab.editor).total as i32;
+                        editing::select(
+                            tab.editor,
+                            editing::CharRange {
+                                start: selection.start.min(length),
+                                end: selection.end.min(length),
+                            },
+                        );
+                        SendMessageW(tab.editor, EM_SETMODIFY, 0, 0);
+                        SendMessageW(tab.editor, WM_SETREDRAW, 1, 0);
+                        InvalidateRect(tab.editor, null(), 0);
+                        tab.text = window_text(tab.editor);
+                    }
+                    tab.dirty = false;
+                }
+            }
+            self.loading = false;
+            self.last_match = None;
+            self.publish_view();
+            scrollbar::layout_body(self.edit);
+            InvalidateRect(self.status, null(), 0);
+        }
+        Ok(())
+    }
+
+    unsafe fn replace_global_all(&mut self) {
+        unsafe {
+            let changes = match self.prepare_global_replacements() {
+                Ok(changes) => changes,
+                Err(error) => {
+                    report(self.hwnd, "전체 바꾸기를 준비하지 못했습니다.", error);
+                    return;
+                }
+            };
+            let count: usize = changes.iter().map(|change| change.count).sum();
+            if changes.is_empty() {
+                self.global_message("바꿀 내용이 없습니다");
+                return;
+            }
+            let message = wide(&format!(
+                "{}개 메모에서 {}곳을 바꾸고 저장합니다. 계속하시겠습니까?",
+                changes.len(),
+                count
+            ));
+            if MessageBoxW(
+                self.hwnd,
+                message.as_ptr(),
+                windows_sys::w!("전체 메모 바꾸기"),
+                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+            ) != IDYES
+            {
+                return;
+            }
+            if let Err(error) = self.apply_global_replacements(&changes) {
+                report(self.hwnd, "전체 바꾸기를 저장하지 못했습니다.", error);
+                return;
+            }
+            self.set_status(&format!("{}개 메모, {}곳 바꿈", changes.len(), count));
+            self.queue_global_search();
+        }
+    }
+
     unsafe fn show_find(&mut self, replace: bool) {
+        unsafe {
+            self.show_find_scoped(replace, false);
+        }
+    }
+    unsafe fn show_find_scoped(&mut self, replace: bool, global: bool) {
+        if global {
+            unsafe {
+                self.show_global_search(Some(replace));
+            }
+            return;
+        }
         if self.settings_visible {
             unsafe {
                 self.show_settings(false);
@@ -3722,6 +4705,7 @@ impl App {
                     wide(&replacement).as_ptr() as isize,
                 );
                 self.capture_edit();
+                self.refresh_global_search();
             }
             self.find_next(false, false);
         }
@@ -3763,6 +4747,7 @@ impl App {
             SendMessageW(self.edit, WM_SETREDRAW, 1, 0);
             InvalidateRect(self.edit, null(), 0);
             self.capture_edit();
+            self.refresh_global_search();
             self.set_status(&format!("{}개 바꿈", ranges.len()));
             self.search_message(&format!("{}개 바꿨습니다", ranges.len()));
         }
@@ -3817,6 +4802,39 @@ impl App {
 
     unsafe fn command(&mut self, id: usize, code: usize) {
         match id {
+            ID_SIDEBAR_NOTES | ID_GLOBAL_CLOSE => unsafe {
+                self.show_note_list();
+            },
+            ID_SIDEBAR_SEARCH => unsafe {
+                self.show_global_search(None);
+            },
+            ID_GLOBAL_FIND if code == EN_CHANGE as usize => unsafe {
+                self.queue_global_search();
+            },
+            ID_GLOBAL_PREV | ID_GLOBAL_NEXT => unsafe {
+                self.find_global_next(id == ID_GLOBAL_PREV);
+            },
+            ID_GLOBAL_CASE => unsafe {
+                self.global_case = !self.global_case;
+                self.queue_global_search();
+            },
+            ID_GLOBAL_DISCLOSURE => unsafe {
+                self.global_replace = !self.global_replace;
+                if !self.global_replace
+                    && let Some(panel) = self.global_panel
+                    && [panel.replace, panel.buttons[4], panel.buttons[5]].contains(&GetFocus())
+                {
+                    SetFocus(panel.find);
+                }
+                self.publish_view();
+                self.layout_global();
+            },
+            ID_GLOBAL_ONE => unsafe {
+                self.replace_global_one();
+            },
+            ID_GLOBAL_ALL => unsafe {
+                self.replace_global_all();
+            },
             ID_SETTINGS => unsafe {
                 self.show_settings(!self.settings_visible);
             },
@@ -3900,12 +4918,9 @@ impl App {
             MENU_REPLACE => unsafe {
                 self.show_find(true);
             },
-            ID_TOGGLE => {
-                self.sidebar_visible = !self.sidebar_visible;
-                unsafe {
-                    self.layout();
-                }
-            }
+            ID_TOGGLE => unsafe {
+                self.toggle_sidebar();
+            },
             ID_ADD | ID_TAB_ADD => {
                 let parent = unsafe { self.selected_id() }
                     .and_then(|id| self.book.get(id))
@@ -3952,6 +4967,7 @@ impl App {
                 self.last_match = None;
                 SetTimer(self.hwnd, AUTOSAVE_TIMER, 650, None);
                 self.set_status("저장 중…");
+                self.refresh_global_search();
             },
             _ => {}
         }
@@ -4261,6 +5277,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             });
             0
         }
+        WM_TIMER if wp == GLOBAL_SEARCH_TIMER => {
+            with_app(|app| unsafe {
+                app.step_global_search();
+            });
+            0
+        }
         WM_TIMER if wp == TAB_DRAG_SCROLL_TIMER => {
             with_app(|app| unsafe {
                 if app.tab_drag.is_some_and(|drag| drag.moving) {
@@ -4478,6 +5500,58 @@ fn shortcut(msg: &MSG) -> bool {
             handled = true;
         } else if !ctrl
             && key == VK_TAB as u32
+            && app.sidebar_visible
+            && app.find_global
+            && app
+                .global_panel
+                .is_some_and(|panel| IsChild(panel.host, msg.hwnd) != 0)
+        {
+            let panel = app.global_panel.unwrap();
+            let mut controls = vec![panel.find];
+            if app.global_replace {
+                controls.push(panel.replace);
+            }
+            controls.extend([
+                panel.buttons[6],
+                panel.buttons[0],
+                panel.buttons[1],
+                panel.buttons[2],
+            ]);
+            if app.global_replace {
+                controls.extend([panel.buttons[4], panel.buttons[5]]);
+            }
+            controls.extend([app.global_results, panel.buttons[3]]);
+            let current = controls.iter().position(|&h| h == msg.hwnd).unwrap_or(0);
+            SetFocus(
+                controls[if shift {
+                    (current + controls.len() - 1) % controls.len()
+                } else {
+                    (current + 1) % controls.len()
+                }],
+            );
+            handled = true;
+        } else if key == VK_RETURN as u32
+            && app.sidebar_visible
+            && app.find_global
+            && app
+                .global_panel
+                .is_some_and(|panel| IsChild(panel.host, msg.hwnd) != 0)
+            && msg.hwnd != app.global_results
+        {
+            let panel = app.global_panel.unwrap();
+            if msg.hwnd == panel.find {
+                app.find_global_next(shift);
+            } else if msg.hwnd == panel.replace {
+                app.replace_global_one();
+            } else {
+                app.command(GetDlgCtrlID(msg.hwnd) as usize, BN_CLICKED as usize);
+            }
+            handled = true;
+        } else if key == VK_RETURN as u32 && app.sidebar_tabs.contains(&msg.hwnd) {
+            app.command(GetDlgCtrlID(msg.hwnd) as usize, BN_CLICKED as usize);
+            handled = true;
+        } else if !ctrl
+            && key == VK_TAB as u32
             && app.find_visible
             && IsChild(app.search_host, msg.hwnd) != 0
         {
@@ -4506,6 +5580,7 @@ fn shortcut(msg: &MSG) -> bool {
             && IsChild(app.search_host, msg.hwnd) != 0
             && msg.hwnd != app.find_input
             && msg.hwnd != app.replace_input
+            && msg.hwnd != app.global_results
         {
             app.command(GetDlgCtrlID(msg.hwnd) as usize, BN_CLICKED as usize);
             handled = true;
@@ -4518,6 +5593,7 @@ fn shortcut(msg: &MSG) -> bool {
                     app.editor_scroll[1],
                     app.tree_scroll,
                     app.tab_scroll,
+                    app.global_scroll,
                 ]
                 .contains(&GetCapture()))
         {
@@ -4535,6 +5611,9 @@ fn shortcut(msg: &MSG) -> bool {
                 handled = true;
             } else if msg.hwnd == app.find_input
                 || msg.hwnd == app.replace_input
+                || app
+                    .global_panel
+                    .is_some_and(|panel| msg.hwnd == panel.find || msg.hwnd == panel.replace)
                 || msg.hwnd == app.tab_name_edit
                 || msg.hwnd == SendMessageW(app.tree, TVM_GETEDITCONTROL, 0, 0) as HWND
             {
@@ -4542,13 +5621,21 @@ fn shortcut(msg: &MSG) -> bool {
                 handled = true;
             }
         } else if ctrl && key == b'F' as u32 {
-            app.show_find(false);
+            app.show_find_scoped(false, shift);
             handled = true;
         } else if ctrl && key == b'H' as u32 {
-            app.show_find(true);
+            app.show_find_scoped(true, shift);
             handled = true;
         } else if key == VK_F3 as u32 {
-            if window_text(app.find_input).is_empty() {
+            if app.sidebar_visible
+                && app.find_global
+                && (!app.find_visible
+                    || app
+                        .global_panel
+                        .is_some_and(|panel| IsChild(panel.host, msg.hwnd) != 0))
+            {
+                app.find_global_next(shift);
+            } else if window_text(app.find_input).is_empty() {
                 app.show_find(false);
             } else {
                 app.find_next(shift, false);
@@ -4562,6 +5649,16 @@ fn shortcut(msg: &MSG) -> bool {
                 || IsChild(app.search_host, msg.hwnd) != 0)
         {
             app.hide_find();
+            handled = true;
+        } else if key == VK_ESCAPE as u32
+            && app.sidebar_visible
+            && app.find_global
+            && (msg.hwnd == app.edit
+                || app
+                    .global_panel
+                    .is_some_and(|panel| IsChild(panel.host, msg.hwnd) != 0))
+        {
+            app.show_note_list();
             handled = true;
         } else if key == VK_RETURN as u32
             && (msg.hwnd == app.find_input || msg.hwnd == app.replace_input)
@@ -4594,8 +5691,7 @@ fn shortcut(msg: &MSG) -> bool {
             app.close_active();
             handled = true;
         } else if ctrl && key == b'B' as u32 {
-            app.sidebar_visible = !app.sidebar_visible;
-            app.layout();
+            app.toggle_sidebar();
             handled = true;
         } else if !app.open.is_empty()
             && ((ctrl && (key == VK_TAB as u32 || key == VK_PRIOR as u32 || key == VK_NEXT as u32))
@@ -5796,6 +6892,627 @@ mod interaction_tests {
         }
     }
 
+    unsafe fn finish_global_job() {
+        with_app(|app| unsafe {
+            for _ in 0..=app.book.notes.len() {
+                app.step_global_search();
+                if app.global_ready {
+                    break;
+                }
+            }
+            assert!(app.global_ready);
+            assert!(app.global_job.is_none());
+        });
+    }
+
+    unsafe extern "system" fn global_frame_observer(
+        hwnd: HWND,
+        msg: u32,
+        wp: WPARAM,
+        lp: LPARAM,
+        id: usize,
+        reference: usize,
+    ) -> LRESULT {
+        unsafe {
+            if msg == WM_SHOWWINDOW && wp != 0 {
+                let mut ready = false;
+                ui::with_view(|view| {
+                    if let Some(panel) = view.global_panel {
+                        ready = panel.host == hwnd && view.sidebar_visible && view.find_global;
+                        for control in [panel.find, panel.replace].into_iter().chain(panel.buttons)
+                        {
+                            let mut area = RECT::default();
+                            GetClientRect(control, &mut area);
+                            ready &= area.right > 0 && area.bottom > 0;
+                        }
+                        ready &= IsWindowVisible(GetParent(view.tree)) == 0;
+                        let mut body = RECT::default();
+                        let mut sidebar = RECT::default();
+                        GetWindowRect(GetParent(GetParent(view.edit)), &mut body);
+                        GetWindowRect(hwnd, &mut sidebar);
+                        ready &= body.left >= sidebar.right;
+                    }
+                });
+                (*(reference as *const RefCell<Vec<bool>>))
+                    .borrow_mut()
+                    .push(ready);
+            }
+            if msg == WM_NCDESTROY {
+                RemoveWindowSubclass(hwnd, Some(global_frame_observer), id);
+            }
+            DefSubclassProc(hwnd, msg, wp, lp)
+        }
+    }
+
+    unsafe fn verify_search_surfaces(app: &App) {
+        unsafe {
+            let panel = app.global_panel.unwrap();
+            let screen = GetDC(app.hwnd);
+            for control in [
+                panel.host,
+                app.sidebar_tabs[0],
+                app.sidebar_tabs[1],
+                panel.buttons[0],
+                app.global_results,
+                app.global_scroll,
+            ] {
+                let mut area = RECT::default();
+                GetClientRect(control, &mut area);
+                if area.right == 0 || area.bottom == 0 {
+                    continue;
+                }
+                let dc = CreateCompatibleDC(screen);
+                let bitmap = CreateCompatibleBitmap(screen, area.right, area.bottom);
+                let old = SelectObject(dc, bitmap);
+                for message in [WM_PRINTCLIENT, WM_PRINT] {
+                    theme::fill(dc, area, theme::rgb(255, 0, 255));
+                    SendMessageW(
+                        control,
+                        message,
+                        dc as usize,
+                        (PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN) as isize,
+                    );
+                    assert_eq!(GetPixel(dc, 0, 0), app.theme.colors.sidebar);
+                }
+                let brush = SendMessageW(
+                    panel.host,
+                    WM_CTLCOLOREDIT,
+                    dc as usize,
+                    panel.find as isize,
+                );
+                assert_eq!(brush, app.theme.white_brush as isize);
+                assert_eq!(GetBkColor(dc), app.theme.colors.white);
+                assert_eq!(GetTextColor(dc), app.theme.colors.ink);
+                SelectObject(dc, old);
+                DeleteObject(bitmap);
+                DeleteDC(dc);
+            }
+            ReleaseDC(app.hwnd, screen);
+        }
+    }
+
+    unsafe fn verify_sidebar_modes(ids: &[u64]) {
+        with_app(|app| unsafe {
+            app.ensure_global_search().unwrap();
+            let frames = RefCell::new(Vec::<bool>::new());
+            let panel = app.global_panel.unwrap();
+            SetWindowSubclass(
+                panel.host,
+                Some(global_frame_observer),
+                89,
+                &frames as *const _ as usize,
+            );
+            assert!(GetDlgItem(app.hwnd, ID_ADD as i32).is_null());
+            assert_eq!(window_text(app.sidebar_tabs[0]), "메모 목록");
+            assert_eq!(window_text(app.sidebar_tabs[1]), "전체 검색");
+            let mut original = RECT::default();
+            GetWindowRect(app.hwnd, &mut original);
+            let original_width = app.sidebar_width;
+            let root = *app.handles.iter().find(|(_, id)| **id == ids[0]).unwrap().0;
+            SendMessageW(app.tree, TVM_EXPAND, TVE_COLLAPSE as usize, root);
+            SendMessageW(app.tree, TVM_SELECTITEM, TVGN_CARET as usize, root);
+            app.expanded.remove(&ids[0]);
+            app.selection.single(ids[0]);
+            app.selection.click(ids[3], &[], true, false);
+            // Native-only extra rows make the tree scroll without creating memo files.
+            let mut extras = Vec::new();
+            let mut label = wide("스크롤 검증");
+            for _ in 0..20 {
+                let mut insert = TVINSERTSTRUCTW {
+                    hParent: TVI_ROOT,
+                    hInsertAfter: TVI_LAST,
+                    ..Default::default()
+                };
+                insert.Anonymous.item = TVITEMW {
+                    mask: TVIF_TEXT,
+                    pszText: label.as_mut_ptr(),
+                    ..Default::default()
+                };
+                extras.push(SendMessageW(
+                    app.tree,
+                    TVM_INSERTITEMW,
+                    0,
+                    &insert as *const _ as isize,
+                ));
+            }
+            app.refresh_tree_visibility();
+            app.sidebar_visible = true;
+            SetWindowPos(
+                app.hwnd,
+                null_mut(),
+                0,
+                0,
+                app.theme.px(1100),
+                app.theme.px(150),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            app.layout();
+            app.scroll_tree(i32::MAX);
+            let scroll = SendMessageW(app.tree, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE as usize, 0);
+            let mut tree_area = RECT::default();
+            GetClientRect(app.tree, &mut tree_area);
+            assert_ne!(
+                scroll,
+                root,
+                "rows {} page {} height {}",
+                app.visible.len(),
+                SendMessageW(app.tree, TVM_GETVISIBLECOUNT, 0, 0),
+                tree_area.bottom
+            );
+            let visible = Rc::clone(&app.visible);
+            for _ in 0..3 {
+                app.command(ID_SIDEBAR_SEARCH, 0);
+                let panel = app.global_panel.unwrap();
+                assert_ne!(IsWindowVisible(panel.host), 0);
+                assert_eq!(IsWindowVisible(app.tree_host), 0);
+                app.command(ID_SIDEBAR_NOTES, 0);
+                assert_eq!(
+                    SendMessageW(app.tree, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE as usize, 0),
+                    scroll
+                );
+                assert!(Rc::ptr_eq(&visible, &app.visible));
+                assert_eq!(IsWindowVisible(panel.host), 0);
+                assert_ne!(IsWindowVisible(app.tree_host), 0);
+                assert_eq!(app.selection.ids.as_ref(), &HashSet::from([ids[0], ids[3]]));
+                assert_eq!(
+                    SendMessageW(app.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0),
+                    root
+                );
+            }
+            for width in [150, 350] {
+                app.sidebar_width = width;
+                app.show_global_search(Some(true));
+                let panel = app.global_panel.unwrap();
+                let mut host = RECT::default();
+                GetClientRect(panel.host, &mut host);
+                for control in [
+                    panel.find,
+                    panel.replace,
+                    panel.buttons[4],
+                    panel.buttons[5],
+                ] {
+                    let mut bounds = RECT::default();
+                    GetWindowRect(control, &mut bounds);
+                    MapWindowPoints(null_mut(), panel.host, (&mut bounds as *mut RECT).cast(), 2);
+                    assert!(
+                        bounds.left >= 0
+                            && bounds.right <= host.right
+                            && bounds.right > bounds.left
+                    );
+                }
+                let mut one = RECT::default();
+                let mut all = RECT::default();
+                GetWindowRect(panel.buttons[4], &mut one);
+                GetWindowRect(panel.buttons[5], &mut all);
+                assert!(all.top >= one.bottom || all.left >= one.right);
+                SetFocus(panel.replace);
+                app.command(ID_GLOBAL_DISCLOSURE, 0);
+                assert!(!app.global_replace);
+                assert_eq!(GetFocus(), panel.find);
+                assert_eq!(IsWindowVisible(panel.replace), 0);
+            }
+            app.show_note_list();
+            for row in extras {
+                SendMessageW(app.tree, TVM_DELETEITEM, 0, row);
+            }
+            app.refresh_tree_visibility();
+            app.sidebar_width = original_width;
+            SetWindowPos(
+                app.hwnd,
+                null_mut(),
+                0,
+                0,
+                original.right - original.left,
+                original.bottom - original.top,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            app.toggle_sidebar(); // Ctrl+Shift+F must reopen a hidden sidebar.
+            RemoveWindowSubclass(panel.host, Some(global_frame_observer), 89);
+            assert!(!frames.borrow().is_empty());
+            assert!(frames.borrow().iter().all(|ready| *ready));
+        });
+    }
+
+    unsafe fn verify_global_features(ids: &[u64], child: u64, dir: &std::path::Path) {
+        unsafe {
+            verify_sidebar_modes(ids);
+            let all_ids: Vec<_> = ids.iter().copied().chain([child]).collect();
+            let originals: Vec<_> = all_ids
+                .iter()
+                .map(|id| fs::read(dir.join("notes").join(format!("{id}.txt"))).unwrap())
+                .collect();
+            let samples = [
+                "NEEDLE\r\nneedle",
+                "disk needle",
+                "needle\nkeep\r\nend\r",
+                "unrelated",
+                "🙂\r\nneedle 한글\nend\rtrailing\r\n",
+            ];
+            for (&id, text) in all_ids.iter().zip(samples) {
+                fs::write(dir.join("notes").join(format!("{id}.txt")), text).unwrap();
+            }
+            let mut hwnd = null_mut();
+            let mut input = null_mut();
+            let mut replacement = null_mut();
+            let mut results = null_mut();
+            let mut scroll = null_mut();
+            let mut body = null_mut();
+            let mut settings = Settings::default();
+            with_app(|app| {
+                hwnd = app.hwnd;
+                body = app.edit;
+                settings = app.settings.clone();
+            });
+            let mut keys = [0u8; 256];
+            GetKeyboardState(keys.as_mut_ptr());
+            let mut ctrl_shift = keys;
+            ctrl_shift[VK_CONTROL as usize] = 0x80;
+            ctrl_shift[VK_SHIFT as usize] = 0x80;
+            SetKeyboardState(ctrl_shift.as_ptr());
+            assert!(shortcut(&MSG {
+                hwnd: body,
+                message: WM_KEYDOWN,
+                wParam: b'F' as usize,
+                ..Default::default()
+            }));
+            with_app(|app| {
+                assert!(!app.find_visible && app.find_global && !app.global_replace);
+                assert!(app.sidebar_visible);
+                assert_eq!(IsWindowVisible(app.tree_host), 0);
+                assert_ne!(IsWindowVisible(app.global_panel.unwrap().host), 0);
+                assert!(app.active.is_none()); // Whole-notebook search also works with no open tabs.
+                input = app.global_panel.unwrap().find;
+                replacement = app.global_panel.unwrap().replace;
+                results = app.global_results;
+                scroll = app.global_scroll;
+                assert!(!results.is_null());
+            });
+            assert!(shortcut(&MSG {
+                hwnd: input,
+                message: WM_KEYDOWN,
+                wParam: b'H' as usize,
+                ..Default::default()
+            }));
+            SetKeyboardState(keys.as_ptr());
+            with_app(|app| assert!(app.find_global && app.global_replace));
+            SetWindowTextW(input, wide("needle").as_ptr());
+            finish_global_job();
+            with_app(|app| {
+                assert_eq!(app.global_rows.len(), 4);
+                assert_eq!(
+                    app.global_rows.iter().map(|row| row.count).sum::<usize>(),
+                    5
+                );
+                assert!(app.open.is_empty()); // Scanning does not load a tab for every file.
+                let row = app.global_rows.iter().find(|row| row.id == child).unwrap();
+                assert_eq!(row.line, 2);
+                assert_eq!(row.preview, "needle 한글");
+                app.open_note(ids[1]);
+                body = app.edit;
+                app.open.push(OpenTab {
+                    id: ids[2],
+                    text: String::new(),
+                    dirty: false,
+                    editor: null_mut(),
+                });
+            });
+            SetWindowTextW(body, wide("unsaved needle🙂 needle").as_ptr());
+            SetWindowTextW(input, wide("needle").as_ptr());
+            finish_global_job();
+            with_app(|app| {
+                assert_eq!(
+                    app.global_rows.iter().map(|row| row.count).sum::<usize>(),
+                    6
+                );
+                assert_eq!(
+                    app.global_rows
+                        .iter()
+                        .find(|row| row.id == ids[1])
+                        .unwrap()
+                        .count,
+                    2
+                );
+                assert!(app.open[app.active.unwrap()].dirty);
+                assert_eq!(app.open.len(), 2);
+            });
+            let click_y = with_app_result(|app| app.theme.px(60 * 3 + 10));
+            SendMessageW(results, WM_LBUTTONDOWN, 1, (click_y << 16) as isize);
+            with_app(|app| {
+                assert_eq!(app.open[app.active.unwrap()].id, child);
+                assert_eq!(app.selection.ids.as_ref(), &HashSet::from([ids[0], ids[3]]));
+                let caret = SendMessageW(app.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0);
+                assert_eq!(app.handles[&caret], ids[0]);
+                assert_eq!(
+                    SendMessageW(
+                        app.tree,
+                        TVM_GETITEMSTATE,
+                        caret as usize,
+                        TVIS_EXPANDED as isize
+                    ) & TVIS_EXPANDED as isize,
+                    0
+                );
+                assert_eq!(
+                    editing::selection(app.edit),
+                    editing::CharRange { start: 3, end: 9 }
+                );
+                assert_eq!(GetFocus(), results);
+                assert!(
+                    app.open
+                        .iter()
+                        .find(|tab| tab.id == ids[2])
+                        .unwrap()
+                        .editor
+                        .is_null()
+                );
+            });
+            SetFocus(input);
+            assert!(shortcut(&MSG {
+                hwnd: input,
+                message: WM_KEYDOWN,
+                wParam: VK_RETURN as usize,
+                ..Default::default()
+            }));
+            with_app(|app| {
+                assert_eq!(app.open[app.active.unwrap()].id, ids[0]);
+                assert_eq!(GetFocus(), input); // Repeated Enter keeps navigating, not typing in the body.
+                app.find_global_next(true);
+                assert_eq!(app.open[app.active.unwrap()].id, child);
+                assert_eq!(GetFocus(), input);
+                app.command(ID_GLOBAL_CASE, 0);
+            });
+            finish_global_job();
+            with_app(|app| {
+                assert_eq!(
+                    app.global_rows.iter().map(|row| row.count).sum::<usize>(),
+                    5
+                );
+                app.command(ID_GLOBAL_CASE, 0);
+            });
+            finish_global_job();
+            SetWindowTextW(input, wide("unmatched").as_ptr());
+            with_app(|app| {
+                app.step_global_search();
+                assert!(app.global_job.is_some() || app.global_ready);
+            });
+            SetWindowTextW(input, wide("needle").as_ptr());
+            finish_global_job();
+            with_app(|app| assert_eq!(app.global_rows.len(), 4));
+
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                with_app(|app| {
+                    let mut next = app.settings.clone();
+                    next.theme = mode;
+                    app.apply_settings(next);
+                    app.show_note_list();
+                    app.show_global_search(None);
+                    verify_search_surfaces(app);
+                    let mut area = RECT::default();
+                    GetClientRect(results, &mut area);
+                    let screen = GetDC(hwnd);
+                    let dc = CreateCompatibleDC(screen);
+                    let bitmap = CreateCompatibleBitmap(screen, area.right, area.bottom);
+                    let old = SelectObject(dc, bitmap);
+                    for message in [WM_PRINTCLIENT, WM_PRINT] {
+                        theme::fill(dc, area, theme::rgb(255, 0, 255));
+                        SendMessageW(
+                            results,
+                            message,
+                            dc as usize,
+                            (PRF_CLIENT | PRF_ERASEBKGND) as isize,
+                        );
+                        assert_eq!(GetPixel(dc, 0, area.bottom - 1), app.theme.colors.sidebar);
+                    }
+                    SelectObject(dc, old);
+                    DeleteObject(bitmap);
+                    DeleteDC(dc);
+                    ReleaseDC(hwnd, screen);
+                    SetWindowPos(
+                        hwnd,
+                        null_mut(),
+                        0,
+                        0,
+                        1100,
+                        400,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                    app.layout();
+                });
+                SendMessageW(
+                    scroll,
+                    WM_MOUSEWHEEL,
+                    ((-120i16 as u16 as u32) << 16) as usize,
+                    0,
+                );
+                with_app(|app| assert!(app.global_offset.get() > 0));
+                SendMessageW(scroll, WM_MOUSEWHEEL, (120u32 << 16) as usize, 0);
+                with_app(|app| assert_eq!(app.global_offset.get(), 0));
+            }
+            with_app(|app| {
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    1100,
+                    760,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                app.layout();
+                app.open_global_result(0);
+            });
+            SetFocus(results);
+            SendMessageW(results, WM_KEYDOWN, VK_DOWN as usize, 0);
+            with_app(|app| {
+                assert_eq!(app.open[app.active.unwrap()].id, ids[1]);
+                assert_eq!(GetFocus(), results);
+            });
+            SetWindowTextW(replacement, wide("zzz").as_ptr());
+            SetFocus(replacement);
+            assert!(shortcut(&MSG {
+                hwnd: replacement,
+                message: WM_KEYDOWN,
+                wParam: VK_RETURN as usize,
+                ..Default::default()
+            }));
+            finish_global_job();
+            assert_eq!(window_text(body), "unsaved zzz🙂 needle");
+            assert_eq!(GetFocus(), replacement);
+            with_app(|app| {
+                assert_eq!(
+                    app.global_rows.iter().map(|row| row.count).sum::<usize>(),
+                    5
+                )
+            });
+            SendMessageW(body, WM_UNDO, 0, 0);
+            assert_eq!(window_text(body), "unsaved needle🙂 needle");
+            finish_global_job();
+
+            fs::write(dir.join("notes").join(format!("{}.txt", ids[3])), [0xff]).unwrap();
+            with_app(|app| app.queue_global_search());
+            finish_global_job();
+            with_app(|app| {
+                assert!(app.global_message.contains("1개 읽기 실패"));
+                assert!(app.prepare_global_replacements().is_err());
+            });
+            fs::write(
+                dir.join("notes").join(format!("{}.txt", ids[3])),
+                samples[3],
+            )
+            .unwrap();
+            SetWindowTextW(replacement, wide("끝🙂").as_ptr());
+            with_app(|app| {
+                let changes = app.prepare_global_replacements().unwrap();
+                assert_eq!(changes.len(), 4);
+                assert_eq!(changes.iter().map(|change| change.count).sum::<usize>(), 6);
+                let blocker = app.book.file(dir, ids[2]).with_extension("tmp");
+                fs::create_dir(&blocker).unwrap();
+                assert!(app.apply_global_replacements(&changes).is_err());
+                for (&id, sample) in all_ids.iter().zip(samples) {
+                    assert_eq!(fs::read_to_string(app.book.file(dir, id)).unwrap(), sample);
+                }
+                assert_eq!(window_text(body), "unsaved needle🙂 needle");
+                assert!(app.open.iter().find(|tab| tab.id == ids[1]).unwrap().dirty);
+                fs::remove_dir(&blocker).unwrap();
+                app.apply_global_replacements(&changes).unwrap();
+                assert_eq!(window_text(body), "unsaved 끝🙂🙂 끝🙂");
+                assert_eq!(
+                    fs::read_to_string(app.book.file(dir, ids[1])).unwrap(),
+                    "unsaved 끝🙂🙂 끝🙂"
+                );
+                assert_eq!(
+                    fs::read_to_string(app.book.file(dir, ids[2])).unwrap(),
+                    "끝🙂\nkeep\r\nend\r"
+                );
+                assert!(
+                    app.open
+                        .iter()
+                        .find(|tab| tab.id == ids[2])
+                        .unwrap()
+                        .editor
+                        .is_null()
+                );
+                assert_eq!(
+                    fs::read_to_string(app.book.file(dir, ids[3])).unwrap(),
+                    "unrelated"
+                );
+            });
+            SendMessageW(body, WM_UNDO, 0, 0);
+            assert_eq!(window_text(body), "unsaved needle🙂 needle");
+            with_app(|app| assert!(app.open.iter().find(|tab| tab.id == ids[1]).unwrap().dirty));
+            let mut ctrl = keys;
+            ctrl[VK_CONTROL as usize] = 0x80;
+            ctrl[VK_SHIFT as usize] = 0;
+            SetKeyboardState(ctrl.as_ptr());
+            assert!(shortcut(&MSG {
+                hwnd: input,
+                message: WM_KEYDOWN,
+                wParam: b'F' as usize,
+                ..Default::default()
+            }));
+            with_app(|app| {
+                assert!(app.find_visible && app.find_global && !app.replace_visible);
+                assert_eq!(window_text(input), "needle");
+                assert_eq!(window_text(replacement), "끝🙂");
+                assert!(IsWindowVisible(app.global_panel.unwrap().host) != 0);
+                let mut local = RECT::default();
+                let mut global = RECT::default();
+                GetWindowRect(app.search_host, &mut local);
+                GetWindowRect(app.global_panel.unwrap().host, &mut global);
+                assert!(local.left >= global.right);
+            });
+            assert!(shortcut(&MSG {
+                hwnd: input,
+                message: WM_KEYDOWN,
+                wParam: b'H' as usize,
+                ..Default::default()
+            }));
+            SetKeyboardState(keys.as_ptr());
+            with_app(|app| {
+                assert!(app.replace_visible && app.find_global);
+                let local = app.find_input;
+                SetWindowTextW(local, wide("local-only").as_ptr());
+                app.find_case_sensitive = true;
+                app.publish_view();
+                assert!(!app.global_case);
+                app.hide_find();
+                app.command(ID_SIDEBAR_NOTES, 0);
+                app.command(ID_SIDEBAR_SEARCH, 0);
+                assert_eq!(window_text(local), "local-only");
+                assert!(app.find_case_sensitive);
+                assert_eq!(window_text(input), "needle");
+                assert!(!app.global_case);
+                app.find_case_sensitive = false;
+                app.show_note_list();
+                let root = app.handles.iter().find(|(_, id)| **id == ids[0]).unwrap().0;
+                SendMessageW(app.tree, TVM_EXPAND, TVE_EXPAND as usize, *root);
+                app.expanded.insert(ids[0]);
+                app.refresh_tree_visibility();
+                app.loading = true;
+                for tab in app.open.drain(..) {
+                    if !tab.editor.is_null() {
+                        DestroyWindow(tab.editor);
+                    }
+                }
+                app.active = None;
+                app.edit = app.empty_edit;
+                app.loading = false;
+                app.selection = Selection::default();
+                app.apply_settings(settings);
+                app.layout();
+                KillTimer(hwnd, AUTOSAVE_TIMER);
+            });
+            for (&id, bytes) in all_ids.iter().zip(originals) {
+                fs::write(dir.join("notes").join(format!("{id}.txt")), bytes).unwrap();
+            }
+        }
+    }
+
+    fn with_app_result<T>(f: impl FnOnce(&App) -> T) -> T {
+        let mut result = None;
+        with_app(|app| result = Some(f(app)));
+        result.unwrap()
+    }
+
     unsafe fn verify_edit_features() {
         unsafe {
             let mut editor = null_mut();
@@ -6479,6 +8196,7 @@ mod interaction_tests {
                 *cell.borrow_mut() = Some(App::new(hwnd, dir.clone(), book, Settings::default()))
             });
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            verify_global_features(&ids, child, &dir);
             let mut tree = null_mut();
             let mut tabs = null_mut();
             with_app(|app| {

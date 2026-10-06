@@ -86,6 +86,7 @@ pub enum Kind {
     EditorHorizontal,
     Tree,
     Tabs,
+    Search,
     Dropdown { list: HWND, combo: HWND },
 }
 impl Kind {
@@ -354,7 +355,7 @@ unsafe extern "system" fn procedure(
                         0,
                     );
                     let unit = match kind {
-                        Kind::Tree | Kind::Dropdown { .. } => 1,
+                        Kind::Tree | Kind::Search | Kind::Dropdown { .. } => 1,
                         Kind::Tabs => {
                             let mut pixels = 32;
                             ui::with_view(|v| pixels = v.theme.px(32));
@@ -396,7 +397,7 @@ unsafe fn paint(dc: HDC, view: &ui::View, kind: Kind, control: HWND) {
             dc,
             area,
             match kind {
-                Kind::Tree => view.theme.colors.sidebar,
+                Kind::Tree | Kind::Search => view.theme.colors.sidebar,
                 Kind::Tabs => view.theme.colors.bar,
                 _ => view.theme.colors.white,
             },

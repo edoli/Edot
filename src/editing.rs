@@ -150,6 +150,41 @@ pub unsafe fn find(
     (found >= 0).then_some(request.result)
 }
 
+pub unsafe fn each_match(
+    edit: HWND,
+    query: &str,
+    case: bool,
+    mut visit: impl FnMut(CharRange),
+) -> usize {
+    if query.is_empty() {
+        return 0;
+    }
+    let query: Vec<u16> = query.encode_utf16().chain(Some(0)).collect();
+    let mut request = FindText {
+        range: CharRange { start: 0, end: -1 },
+        text: query.as_ptr(),
+        result: CharRange::default(),
+    };
+    let mut count = 0;
+    loop {
+        let found = unsafe {
+            SendMessageW(
+                edit,
+                EM_FINDTEXTEXW,
+                1 | if case { 4 } else { 0 },
+                &mut request as *mut _ as isize,
+            )
+        };
+        if found < 0 || request.result.end <= request.range.start {
+            break;
+        }
+        visit(request.result);
+        count += 1;
+        request.range.start = request.result.end;
+    }
+    count
+}
+
 /// RichEdit search offsets count UTF-16 code units and one CR per paragraph.
 pub fn replace_ranges(text: &str, ranges: &[CharRange], replacement: &str) -> String {
     let mut units: Vec<u16> = text

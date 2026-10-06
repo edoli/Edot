@@ -4,6 +4,7 @@ mod app;
 mod datetime;
 mod drag;
 mod editing;
+mod global_search;
 mod model;
 mod scrollbar;
 mod selection;

@@ -172,6 +172,9 @@ pub unsafe fn rounded(dc: HDC, area: RECT, color: COLORREF, border: COLORREF, ra
 }
 
 pub unsafe fn text(dc: HDC, value: &str, mut area: RECT, font: HFONT, color: COLORREF, align: u32) {
+    if value.is_empty() {
+        return;
+    }
     let value: Vec<u16> = value.encode_utf16().collect();
     unsafe {
         let saved = SaveDC(dc);
@@ -183,7 +186,14 @@ pub unsafe fn text(dc: HDC, value: &str, mut area: RECT, font: HFONT, color: COL
             value.as_ptr(),
             value.len() as i32,
             &mut area,
-            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS | align,
+            DT_NOPREFIX
+                | DT_END_ELLIPSIS
+                | align
+                | if align & DT_WORDBREAK == 0 {
+                    DT_SINGLELINE | DT_VCENTER
+                } else {
+                    0
+                },
         );
         RestoreDC(dc, saved);
     }
