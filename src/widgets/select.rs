@@ -1,9 +1,13 @@
 use super::*;
+const OPTION_HEIGHT: f32 = 32.;
+const POPUP_WIDTH: f32 = 290.;
+const OPTIONS_MAX_HEIGHT: f32 = 230.;
+const PAGE_ROWS: usize = 7;
 pub enum SelectEvent {
     Confirm(Option<SharedString>),
 }
-pub struct SelectState<T> {
-    items: T,
+pub struct SelectState {
+    items: Vec<SharedString>,
     selected: Option<SharedString>,
     focus: FocusHandle,
     search: Entity<InputState>,
@@ -15,13 +19,13 @@ pub struct SelectState<T> {
     trigger_bounds: Rc<std::cell::Cell<Bounds<Pixels>>>,
     _subscription: Subscription,
 }
-impl EventEmitter<SelectEvent> for SelectState<Vec<SharedString>> {}
-impl Focusable for SelectState<Vec<SharedString>> {
+impl EventEmitter<SelectEvent> for SelectState {}
+impl Focusable for SelectState {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
 }
-impl SelectState<Vec<SharedString>> {
+impl SelectState {
     pub fn new(
         items: Vec<SharedString>,
         initial: Option<usize>,
@@ -96,7 +100,7 @@ impl SelectState<Vec<SharedString>> {
         // Explicit row metrics also work on the first frame, before GPUI has
         // initialized this scroll handle's viewport and overflow mode.
         self.scroll
-            .set_offset(point(px(0.), -px(self.cursor as f32 * 32.)));
+            .set_offset(point(px(0.), -px(self.cursor as f32 * OPTION_HEIGHT)));
     }
     fn dismiss(&mut self, w: &mut Window, cx: &mut Context<Self>) {
         self.open = false;
@@ -153,8 +157,8 @@ impl SelectState<Vec<SharedString>> {
                 self.cursor = match key {
                     "up" => self.cursor.saturating_sub(1),
                     "down" => (self.cursor + 1).min(last),
-                    "pageup" => self.cursor.saturating_sub(7),
-                    _ => (self.cursor + 7).min(last),
+                    "pageup" => self.cursor.saturating_sub(PAGE_ROWS),
+                    _ => (self.cursor + PAGE_ROWS).min(last),
                 };
                 self.scroll.scroll_to_item(self.cursor);
                 cx.notify();
@@ -174,7 +178,7 @@ impl SelectState<Vec<SharedString>> {
     }
 }
 
-impl Render for SelectState<Vec<SharedString>> {
+impl Render for SelectState {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut el = div()
             .id("select")
@@ -219,7 +223,7 @@ impl Render for SelectState<Vec<SharedString>> {
                 .id("select-popup")
                 .debug_selector(|| "select-popup".into())
                 .occlude()
-                .w(px(290.))
+                .w(px(POPUP_WIDTH))
                 .v_flex()
                 .gap_1()
                 .p_1()
@@ -242,7 +246,7 @@ impl Render for SelectState<Vec<SharedString>> {
                         .debug_selector(|| "select-options".into())
                         .v_flex()
                         .track_scroll(&self.scroll)
-                        .max_h(px(230.))
+                        .max_h(px(OPTIONS_MAX_HEIGHT))
                         .overflow_y_scroll()
                         .when(values.is_empty(), |list| {
                             list.child(
@@ -259,7 +263,7 @@ impl Render for SelectState<Vec<SharedString>> {
                                     row.debug_selector(|| "select-highlight".into())
                                 })
                                 .flex_shrink_0()
-                                .h(px(32.))
+                                .h(px(OPTION_HEIGHT))
                                 .child(
                                     Button::new(i)
                                         .label(format!("{v}{}", self.suffix))
@@ -285,12 +289,12 @@ impl Render for SelectState<Vec<SharedString>> {
 }
 #[derive(IntoElement)]
 pub struct Select {
-    state: Entity<SelectState<Vec<SharedString>>>,
+    state: Entity<SelectState>,
     style: StyleRefinement,
     label: SharedString,
 }
 impl Select {
-    pub fn new(state: &Entity<SelectState<Vec<SharedString>>>) -> Self {
+    pub fn new(state: &Entity<SelectState>) -> Self {
         Self {
             state: state.clone(),
             style: StyleRefinement::default(),
@@ -299,9 +303,6 @@ impl Select {
     }
     pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = label.into();
-        self
-    }
-    pub fn search_placeholder(self, _: &str) -> Self {
         self
     }
 }

@@ -1,3 +1,11 @@
+/// Which tabs a close operation removes, relative to the clicked tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseMode {
+    Current,
+    Others,
+    ToRight,
+}
+
 /// Tab coordinates use device pixels. Scroll only after the minimum width is reached.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TabLayout {

@@ -8,4 +8,5 @@ pub mod search;
 pub mod selection;
 pub mod session;
 pub mod settings;
+pub mod storage;
 pub mod tabs;

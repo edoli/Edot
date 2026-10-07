@@ -1,3 +1,4 @@
+use crate::storage::replace_file;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -396,12 +397,6 @@ impl Notebook {
         self.notes.retain(|n| !ids.contains(&n.id));
         ids
     }
-}
-
-pub fn replace_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)
 }
 
 fn encode_hex(bytes: &[u8]) -> String {

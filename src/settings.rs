@@ -1,6 +1,11 @@
-use crate::model::replace_file;
+use crate::storage::replace_file;
 use std::io;
 use std::path::Path;
+
+pub const DEFAULT_FONT: &str = "Consolas";
+pub const DEFAULT_FONT_SIZE: u32 = 18;
+pub const MIN_FONT_SIZE: u32 = 8;
+pub const MAX_FONT_SIZE: u32 = 72;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeMode {
@@ -22,8 +27,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemeMode::System,
-            font: "Consolas".into(),
-            font_size: 18,
+            font: DEFAULT_FONT.into(),
+            font_size: DEFAULT_FONT_SIZE,
             wrap: true,
         }
     }
@@ -49,7 +54,7 @@ impl Settings {
                 ("theme", "system") => settings.theme = ThemeMode::System,
                 ("font", font) if valid_font(font) => settings.font = font.into(),
                 ("font_size", size) => {
-                    if let Ok(size @ 8..=72) = size.parse::<u32>() {
+                    if let Ok(size @ MIN_FONT_SIZE..=MAX_FONT_SIZE) = size.parse::<u32>() {
                         settings.font_size = size;
                     }
                 }

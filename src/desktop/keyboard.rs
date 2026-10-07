@@ -53,7 +53,7 @@ impl Edot {
             self.save_all(cx);
         } else if ctrl && key == "w" {
             if let Some(id) = self.session.active {
-                self.close_tabs(id, 0, window, cx);
+                self.close_tabs(id, crate::tabs::CloseMode::Current, window, cx);
             }
         } else if ctrl && key == "b" {
             self.session.sidebar_visible = !self.session.sidebar_visible;
@@ -138,9 +138,9 @@ impl Edot {
             && matches!(key, "+" | "=" | "-" | "0" | "add" | "subtract")
         {
             self.zoom = match key {
-                "+" | "=" | "add" => (self.zoom + 10).min(500),
-                "-" | "subtract" => self.zoom.saturating_sub(10).max(10),
-                _ => 100,
+                "+" | "=" | "add" => (self.zoom + ZOOM_STEP).min(ZOOM_MAX),
+                "-" | "subtract" => self.zoom.saturating_sub(ZOOM_STEP).max(ZOOM_MIN),
+                _ => ZOOM_DEFAULT,
             };
         } else if key == "escape" {
             if cx.stop_active_drag(window) {
@@ -253,42 +253,47 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.result_rows.is_empty() {
+        if self.search_results.visible.is_empty() {
             return false;
         }
-        let index = self.result_cursor.unwrap_or(0);
+        let index = self.search_results.cursor.unwrap_or(0);
         let next = match key {
             "up" => index.saturating_sub(1),
-            "down" => (index + 1).min(self.result_rows.len() - 1),
+            "down" => (index + 1).min(self.search_results.visible.len() - 1),
             "home" => 0,
-            "end" => self.result_rows.len() - 1,
+            "end" => self.search_results.visible.len() - 1,
             "enter" | "space" => {
                 self.activate_result(index, window, cx);
                 return true;
             }
             "left" | "right" => {
-                let row = self.result_rows[index];
-                let id = self.rows[row.group].id;
+                let row = self.search_results.visible[index];
+                let id = self.search_results.groups[row.group].id;
                 if key == "left" {
-                    self.result_collapsed.insert(id);
+                    self.search_results.collapsed.insert(id);
                 } else {
-                    self.result_collapsed.remove(&id);
+                    self.search_results.collapsed.remove(&id);
                 }
                 self.rebuild_results();
-                self.result_cursor = self.result_rows.iter().position(|r| r.group == row.group);
+                self.search_results.cursor = self
+                    .search_results
+                    .visible
+                    .iter()
+                    .position(|r| r.group == row.group);
                 return true;
             }
             _ => return false,
         };
-        self.result_cursor = Some(next);
-        self.result_scroll
+        self.search_results.cursor = Some(next);
+        self.search_results
+            .scroll
             .scroll_to_item(next, ScrollStrategy::Nearest);
-        let row = self.result_rows[next];
+        let row = self.search_results.visible[next];
         if let Some(hit) = row.hit {
             self.open_match(
                 MatchKey {
-                    id: self.rows[row.group].id,
-                    range: self.rows[row.group].matches[hit].range,
+                    id: self.search_results.groups[row.group].id,
+                    range: self.search_results.groups[row.group].matches[hit].range,
                 },
                 window,
                 cx,

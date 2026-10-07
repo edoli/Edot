@@ -1,6 +1,10 @@
 //! The native application's session format, independent of the UI backend.
-use crate::model::{Notebook, replace_file};
+use crate::{model::Notebook, storage::replace_file};
 use std::{io, path::Path};
+
+pub const DEFAULT_SIDEBAR_WIDTH: i32 = 260;
+pub const MIN_SIDEBAR_WIDTH: i32 = 150;
+pub const MAX_SIDEBAR_WIDTH: i32 = 600;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
@@ -16,7 +20,7 @@ impl Default for Session {
             tabs: vec![],
             active: None,
             sidebar_visible: true,
-            sidebar_width: 260,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
         }
     }
 }
@@ -40,7 +44,10 @@ impl Session {
         }
         let mut session = Self {
             sidebar_visible: fields[0] == "1",
-            sidebar_width: fields[1].parse::<i32>().ok()?.clamp(150, 600),
+            sidebar_width: fields[1]
+                .parse::<i32>()
+                .ok()?
+                .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
             active: fields[2].parse::<u64>().ok().filter(|id| *id != 0),
             tabs: vec![],
         };

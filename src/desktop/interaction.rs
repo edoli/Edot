@@ -2,110 +2,6 @@ use super::*;
 use component::scroll::AutoScroll;
 
 impl Edot {
-    pub(super) fn show_keyboard_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use component::menu::PopupMenu;
-        let weak = cx.entity().downgrade();
-        let focus = window.focused(cx).unwrap_or_else(|| self.focus.clone());
-        let tree = self.tree_focus.is_focused(window);
-        let id = if tree {
-            self.caret
-        } else {
-            self.session.active
-        };
-        let Some(id) = id else {
-            return;
-        };
-        if tree && !self.selection.ids.contains(&id) {
-            self.selection.single(id);
-        }
-        let multiple = self.selection.ids.len() > 1;
-        let nested = self.book.get(id).is_some_and(|note| note.parent != 0);
-        let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
-            menu = menu.action_context(focus);
-            if tree {
-                if !multiple {
-                    let action = weak.clone();
-                    menu = menu.item(PopupMenuItem::new("하위 메모 추가").on_click(
-                        move |_, window, cx| {
-                            let _ = action
-                                .update(cx, |this, cx| this.create_note(Some(id), window, cx));
-                        },
-                    ));
-                    let action = weak.clone();
-                    menu = menu.item(PopupMenuItem::new("이름 바꾸기").shortcut("F2").on_click(
-                        move |_, window, cx| {
-                            let _ = action.update(cx, |this, cx| this.begin_rename(id, window, cx));
-                        },
-                    ));
-                    let action = weak.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new("한 단계 위로")
-                            .disabled(!nested)
-                            .on_click(move |_, _, cx| {
-                                let _ = action.update(cx, |this, cx| this.outdent(id, cx));
-                            }),
-                    );
-                }
-                let remove = weak.clone();
-                menu = menu.separator().item(
-                    PopupMenuItem::new("삭제")
-                        .shortcut("Delete")
-                        .destructive()
-                        .on_click(move |_, window, cx| {
-                            let _ = remove.update(cx, |this, cx| this.confirm_delete(window, cx));
-                        }),
-                );
-                if multiple {
-                    menu = menu.item(
-                        PopupMenuItem::new("선택한 항목과 함께 새 폴더 만들기").on_click(
-                            move |_, window, cx| {
-                                let _ = weak.update(cx, |this, cx| this.group_selected(window, cx));
-                            },
-                        ),
-                    );
-                }
-            } else {
-                menu = menu
-                    .menu("실행 취소", "Ctrl+Z", Box::new(component::input::Undo))
-                    .menu("다시 실행", "Ctrl+Y", Box::new(component::input::Redo))
-                    .separator()
-                    .menu("잘라내기", "Ctrl+X", Box::new(component::input::Cut))
-                    .menu("복사", "Ctrl+C", Box::new(component::input::Copy))
-                    .menu("붙여넣기", "Ctrl+V", Box::new(component::input::Paste))
-                    .menu("전체 선택", "Ctrl+A", Box::new(component::input::SelectAll));
-            }
-            menu
-        });
-        self.menu_subscription = Some(cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
-            this.keyboard_menu = None;
-            cx.notify();
-        }));
-        self.menu_position = if tree {
-            let index = self
-                .visible_tree()
-                .iter()
-                .position(|row| row.0 == id)
-                .unwrap_or(0);
-            let handle = &self.tree_scroll.0.borrow().base_handle;
-            point(
-                handle.bounds().left() + px(36.),
-                (handle.bounds().top() + handle.offset().y + px((index + 1) as f32 * 29.))
-                    .max(handle.bounds().top()),
-            )
-        } else {
-            point(
-                px(if self.session.sidebar_visible {
-                    self.session.sidebar_width + 30
-                } else {
-                    30
-                } as f32),
-                px(70.),
-            )
-        };
-        menu.read(cx).focus_handle(cx).focus(window, cx);
-        self.keyboard_menu = Some(menu);
-        cx.notify();
-    }
     pub(super) fn tree_drag_at(
         &mut self,
         position: Point<Pixels>,
@@ -117,10 +13,10 @@ impl Edot {
         self.resolve_tree_drag();
         let bounds = self.tree_bounds.get();
         let delta = if bounds.contains(&position) {
-            if position.y < bounds.top() + px(24.) {
-                Some(px(-2. * TREE_ROW_HEIGHT))
-            } else if position.y >= bounds.bottom() - px(24.) {
-                Some(px(2. * TREE_ROW_HEIGHT))
+            if position.y < bounds.top() + px(TREE_SCROLL_EDGE) {
+                Some(px(-TREE_SCROLL_ROWS * TREE_ROW_HEIGHT))
+            } else if position.y >= bounds.bottom() - px(TREE_SCROLL_EDGE) {
+                Some(px(TREE_SCROLL_ROWS * TREE_ROW_HEIGHT))
             } else {
                 None
             }
@@ -128,7 +24,7 @@ impl Edot {
             None
         };
         self.tree_auto
-            .set_interval(delta, Duration::from_millis(160), cx, |delta, this, cx| {
+            .set_interval(delta, TREE_SCROLL_INTERVAL, cx, |delta, this, cx| {
                 if !cx.has_active_drag() {
                     this.stop_drag();
                     cx.notify();

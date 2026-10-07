@@ -1,9 +1,8 @@
 use crate::editing::CharRange;
-use crate::model::replace_file;
+use crate::storage::replace_file;
 use std::{collections::HashSet, fs, io, ops::Range, path::PathBuf, sync::Arc};
 // Bound interactive result memory; replacement still considers every match.
 pub const MAX_RESULTS: usize = 20_000;
-pub const ROW_HEIGHT: i32 = 26;
 
 #[derive(Clone, Debug)]
 pub struct Match {

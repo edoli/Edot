@@ -1,0 +1,225 @@
+//! Open editor lifetime, persistence and tab operations.
+use super::*;
+
+pub(super) struct OpenTab {
+    pub(super) id: u64,
+    pub(super) editor: Option<Entity<TextareaState>>,
+    pub(super) saved: String,
+    pub(super) metrics: editing::TextMetrics,
+    pub(super) metrics_revision: u64,
+    pub(super) dirty: bool,
+    pub(super) _subscriptions: Vec<Subscription>,
+}
+
+impl Edot {
+    pub(super) fn active_editor(&self) -> Option<Entity<TextareaState>> {
+        self.open
+            .iter()
+            .find(|tab| Some(tab.id) == self.session.active)
+            .and_then(|tab| tab.editor.clone())
+    }
+    pub(super) fn text(&self, id: u64, cx: &App) -> io::Result<String> {
+        if let Some(editor) = self
+            .open
+            .iter()
+            .find(|tab| tab.id == id)
+            .and_then(|tab| tab.editor.as_ref())
+        {
+            return Ok(editor.read(cx).value().to_string());
+        }
+        fs::read_to_string(self.book.file(&self.dir, id))
+    }
+    pub(super) fn focus_editor(&self, window: &mut Window, cx: &mut App) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |state, cx| state.focus(window, cx));
+        } else {
+            self.tree_focus.focus(window, cx);
+        }
+    }
+    pub(super) fn open_note(
+        &mut self,
+        id: u64,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.book.get(id).is_none() || !self.finish_rename(true, false, window, cx) {
+            return false;
+        }
+        let existing = self.open.iter().position(|tab| tab.id == id);
+        if existing.is_none_or(|i| self.open[i].editor.is_none()) {
+            let text = match fs::read_to_string(self.book.file(&self.dir, id)) {
+                Ok(text) => text,
+                Err(error) => {
+                    self.fail("메모를 열지 못했습니다", error, cx);
+                    return false;
+                }
+            };
+            let editor = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .content_padding(Edges {
+                        left: px(16.),
+                        top: px(6.),
+                        right: px(4.),
+                        bottom: px(0.),
+                    })
+                    .soft_wrap(self.settings.wrap)
+                    .default_value(text.clone())
+            });
+            let subscription =
+                cx.subscribe_in(&editor, window, move |this, _, event, window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.changed(id, window, cx);
+                    }
+                    cx.notify();
+                });
+            let observe = cx.observe(&editor, |_, _, cx| cx.notify());
+            let tab = OpenTab {
+                id,
+                editor: Some(editor),
+                metrics: editing::TextMetrics::new(&text),
+                metrics_revision: 0,
+                saved: text,
+                dirty: false,
+                _subscriptions: vec![subscription, observe],
+            };
+            if let Some(index) = existing {
+                self.open[index] = tab;
+            } else {
+                self.open.push(tab);
+            }
+        }
+        self.session.active = Some(id);
+        self.local.last = None;
+        if focus {
+            self.focus_editor(window, cx);
+            if !self.search_mode {
+                self.caret = Some(id);
+                if self.selection.ids.len() <= 1 {
+                    self.selection.single(id);
+                }
+                let mut parent = self.book.get(id).unwrap().parent;
+                while parent != 0 {
+                    self.collapsed.remove(&parent);
+                    parent = self.book.get(parent).unwrap().parent;
+                }
+                self.reveal_tree(id);
+            }
+        }
+        if let Some(index) = self.open.iter().position(|tab| tab.id == id) {
+            self.tab_scroll.scroll_to_item(index);
+        }
+        self.status = if self.open.iter().any(|tab| tab.dirty) {
+            "저장 중…"
+        } else {
+            "저장됨"
+        }
+        .into();
+        cx.notify();
+        true
+    }
+    pub(super) fn changed(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.open.iter_mut().find(|tab| tab.id == id)
+            && let Some(editor) = &tab.editor
+        {
+            let text = editor.read(cx).value();
+            tab.dirty = text.as_ref() != tab.saved;
+            tab.metrics = editing::TextMetrics::new(&text);
+            tab.metrics_revision = editor.read(cx).revision;
+        }
+        self.status = "저장 중…".into();
+        self.autosave = Some(cx.spawn(async |this, cx| {
+            cx.background_executor().timer(AUTOSAVE_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                this.save_all(cx);
+            });
+        }));
+        if self.search_mode {
+            self.queue_note_search(id, window, cx);
+        }
+        cx.notify();
+    }
+    pub(super) fn save_all(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.startup_failed {
+            return false;
+        }
+        for tab in &mut self.open {
+            if !tab.dirty {
+                continue;
+            }
+            let Some(editor) = &tab.editor else {
+                continue;
+            };
+            let text = editor.read(cx).value().to_string();
+            if let Err(error) = replace_file(&self.book.file(&self.dir, tab.id), text.as_bytes()) {
+                self.fail(
+                    "메모를 저장하지 못했습니다. 수정 내용은 편집기에 남아 있습니다",
+                    error,
+                    cx,
+                );
+                return false;
+            }
+            tab.saved = text;
+            tab.dirty = false;
+        }
+        self.status = "저장됨".into();
+        cx.notify();
+        true
+    }
+    pub(super) fn save_session(&mut self) -> io::Result<()> {
+        self.session.tabs = self.open.iter().map(|tab| tab.id).collect();
+        self.session.save(&self.dir)
+    }
+    pub(super) fn close_tabs(
+        &mut self,
+        id: u64,
+        mode: CloseMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.finish_rename(true, false, window, cx) || !self.save_all(cx) {
+            return;
+        }
+        let Some(index) = self.open.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        let mut cursor = 0;
+        self.open.retain(|_| {
+            let keep = match mode {
+                CloseMode::Others => cursor == index,
+                CloseMode::ToRight => cursor <= index,
+                CloseMode::Current => cursor != index,
+            };
+            cursor += 1;
+            keep
+        });
+        if self
+            .session
+            .active
+            .is_some_and(|id| !self.open.iter().any(|tab| tab.id == id))
+        {
+            self.session.active = None;
+            if let Some(tab) = self.open.get(index.min(self.open.len().saturating_sub(1))) {
+                self.open_note(tab.id, true, window, cx);
+            }
+        }
+        cx.notify();
+    }
+    pub(super) fn reorder_tab(&mut self, id: u64, gap: usize, cx: &mut Context<Self>) {
+        let Some(index) = self.open.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        let item = self.open.remove(index);
+        let target = gap
+            .saturating_sub(usize::from(gap > index))
+            .min(self.open.len());
+        self.open.insert(target, item);
+        if let Err(error) = self.save_session() {
+            let item = self.open.remove(target);
+            self.open.insert(index, item);
+            self.fail("탭 순서를 저장하지 못했습니다", error, cx);
+        }
+        self.tab_drop = None;
+        cx.notify();
+    }
+}

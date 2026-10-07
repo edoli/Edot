@@ -6,7 +6,8 @@ mod startup;
 mod widgets;
 
 use edot::{
-    datetime, drag, editing, global_search, model, search, selection, session, settings, tabs,
+    datetime, drag, editing, global_search, model, search, selection, session, settings, storage,
+    tabs,
 };
 
 fn main() {
