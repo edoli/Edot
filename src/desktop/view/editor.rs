@@ -112,8 +112,10 @@ impl Edot {
                 .iter()
                 .find(|tab| Some(tab.id) == self.session.active)
                 .unwrap();
-            let selected =
-                editing::paragraph_units_iter(state.value()[state.selected_range()].chars());
+            let selected: i32 = state
+                .selected_ranges()
+                .map(|range| editing::paragraph_units_iter(state.value()[range].chars()))
+                .sum();
             // Input events are deferred; rendering can precede the cached metrics update.
             let current_metrics;
             let metrics = if tab.metrics_revision == state.revision {

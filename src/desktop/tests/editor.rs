@@ -1,6 +1,67 @@
 use super::*;
 
 #[gpui::test]
+fn control_d_selects_plain_text_words_at_unicode_and_line_boundaries(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, w, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| s.focus(w, cx));
+        editor
+    });
+    for (text, expected) in [
+        ("word", "word"),
+        ("hello_world", "hello_world"),
+        ("한국어", "한국어"),
+        ("e\u{301}cole", "e\u{301}cole"),
+        ("👩‍💻", "👩‍💻"),
+        ("-12.5px", "-12.5px"),
+        ("IMPLEMENTATION.md", "IMPLEMENTATION"),
+    ] {
+        for at in text.char_indices().map(|(i, _)| i).chain([text.len()]) {
+            if at > expected.len() {
+                continue;
+            }
+            f.update(cx, |_, w, cx| {
+                editor.update(cx, |s, cx| {
+                    s.set_value(text, w, cx);
+                    s.set_selected_range(at..at, cx);
+                });
+            });
+            f.press(cx, "ctrl-d");
+            f.update(cx, |_, _, cx| {
+                assert_eq!(
+                    editor.read(cx).selected_value(),
+                    expected,
+                    "{text:?} at {at}"
+                );
+                assert_eq!(editor.read(cx).value().as_ref(), text);
+            });
+        }
+    }
+    for (text, at, expected) in [
+        ("", 0, 0..0),
+        ("   ", 1, 1..1),
+        (";;;", 1, 1..1),
+        ("one\r\ntwo", 3, 0..3),
+        ("one\r\ntwo", 5, 5..8),
+        ("one\n", 4, 4..4),
+        ("a\u{3000}한글", 4, 4..10),
+        ("file.md", 6, 5..7),
+    ] {
+        f.update(cx, |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                s.set_value(text, w, cx);
+                s.set_selected_range(at..at, cx);
+            });
+        });
+        f.press(cx, "ctrl-d");
+        f.update(cx, |_, _, cx| {
+            assert_eq!(editor.read(cx).selected_range(), expected)
+        });
+    }
+}
+
+#[gpui::test]
 fn wrapped_word_selection_paints_only_its_visual_row(cx: &mut TestAppContext) {
     use crate::widgets::ActiveTheme;
     use gpui::EntityInputHandler;

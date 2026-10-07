@@ -62,6 +62,25 @@ impl EntityInputHandler for InputState {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.extra.is_empty() {
+            let ranges = self.input_ranges(r.as_ref().map(|r| self.range_from_utf16(r)));
+            let texts = vec![text.to_owned(); ranges.len()];
+            if self.composition.is_some() {
+                let changed = self
+                    .apply_multiple(ranges, &texts)
+                    .iter()
+                    .any(|c| c.before != c.after);
+                self.finish_composition();
+                if changed {
+                    self.changed(cx);
+                } else {
+                    self.moved(cx);
+                }
+            } else {
+                self.commit_multiple(ranges, texts, true, cx);
+            }
+            return;
+        }
         let r = r
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -94,7 +113,37 @@ impl EntityInputHandler for InputState {
         cx: &mut Context<Self>,
     ) {
         if self.composition.is_none() {
-            self.composition = Some((self.content.clone(), self.selection.clone(), self.reversed));
+            self.composition = Some(Composition {
+                before: self.content.clone(),
+                primary: Selection {
+                    range: self.selection.clone(),
+                    reversed: self.reversed,
+                    preferred_x: self.preferred_x,
+                    after_wrap: self.caret_after_wrap,
+                },
+                extra: self.extra.clone(),
+            });
+        }
+        if !self.extra.is_empty() {
+            let ranges = self.input_ranges(r.as_ref().map(|r| self.range_from_utf16(r)));
+            self.apply_multiple(ranges, &vec![text.to_owned(); self.extra.len() + 1]);
+            self.marked = Some(self.selection.end - text.len()..self.selection.end);
+            self.extra_marked = self
+                .extra
+                .iter()
+                .map(|s| s.range.end - text.len()..s.range.end)
+                .collect();
+            if let Some(r) = selection {
+                let start = self.marked.as_ref().unwrap().start;
+                self.selection =
+                    start + utf8_offset(text, r.start)..start + utf8_offset(text, r.end);
+                for (s, marked) in self.extra.iter_mut().zip(&self.extra_marked) {
+                    s.range = marked.start + utf8_offset(text, r.start)
+                        ..marked.start + utf8_offset(text, r.end);
+                }
+            }
+            self.changed(cx);
+            return;
         }
         let r = r
             .as_ref()

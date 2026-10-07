@@ -114,7 +114,12 @@ fn shortcut_table_scrolls_and_fits_small_windows_at_hidpi(cx: &mut TestAppContex
             assert!(panel.left() >= px(0.) && panel.right() <= viewport.width);
             assert!(panel.top() >= px(0.) && panel.bottom() <= viewport.height);
             assert!(rows.size.height > px(100.) && rows.bottom() < panel.bottom());
-            assert!(header.bottom() <= rows.top());
+            // Converting snapped physical coordinates back to f32 logical pixels
+            // can differ by a few millionths at fractional DPI.
+            assert!(
+                header.bottom() <= rows.top() + px(0.001),
+                "scale {scale}: header={header:?}, rows={rows:?}"
+            );
             f.press(cx, "pagedown");
             f.update(cx, |_, _, cx| {
                 assert!(help.read(cx).scroll.offset().y < px(0.))

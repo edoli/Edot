@@ -149,10 +149,12 @@ impl Fixture {
     }
 }
 
+mod column;
 mod documents;
 mod editor;
 mod layout;
 mod menus;
+mod multiselection;
 mod preferences;
 mod search;
 mod shortcuts;

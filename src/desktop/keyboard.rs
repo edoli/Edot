@@ -161,6 +161,13 @@ impl Edot {
                 cx.notify();
                 return;
             }
+            if let Some(editor) = self.active_editor()
+                && editor.read(cx).focus_handle(cx).is_focused(window)
+                && editor.update(cx, |s, cx| s.cancel_extra_selections(cx))
+            {
+                cx.stop_propagation();
+                return;
+            }
             if self.error.is_some() {
                 self.error = None;
             } else if self.settings_visible {

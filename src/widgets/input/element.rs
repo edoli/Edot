@@ -40,7 +40,9 @@ impl Element for EditorElement {
     ) -> Self::PrepaintState {
         self.0.update(cx, |s, _| s.layout(bounds, window));
         let state = self.0.read(cx);
-        let capture = state.scroll_drag.map(|_| {
+        let capture = (state.scroll_drag.is_some()
+            || state.selecting && state.column_anchor.is_some())
+        .then(|| {
             window.insert_hitbox(
                 Bounds::new(point(px(0.), px(0.)), window.viewport_size()),
                 HitboxBehavior::BlockMouse,
@@ -79,7 +81,12 @@ impl Element for EditorElement {
             window.set_cursor_style(CursorStyle::Arrow, hitbox);
         }
         if let Some(hitbox) = &bars.1 {
-            window.set_cursor_style(CursorStyle::Arrow, hitbox);
+            let cursor = if self.0.read(cx).scroll_drag.is_some() {
+                CursorStyle::Arrow
+            } else {
+                CursorStyle::IBeam
+            };
+            window.set_cursor_style(cursor, hitbox);
         }
         let entity = self.0.clone();
         let hitboxes = bars.0.clone();
@@ -106,7 +113,7 @@ impl Element for EditorElement {
                     s.scroll_hover = hover;
                     cx.notify();
                 }
-                if s.scroll_drag.is_some() {
+                if s.scroll_drag.is_some() || s.selecting && s.column_anchor.is_some() {
                     s.mouse_move(e, window, cx);
                     cx.stop_propagation();
                 }
@@ -116,7 +123,11 @@ impl Element for EditorElement {
         window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
                 entity.update(cx, |s, cx| {
-                    if s.scroll_drag.take().is_some() {
+                    let column = s.selecting && s.column_anchor.take().is_some();
+                    if column {
+                        s.selecting = false;
+                    }
+                    if s.scroll_drag.take().is_some() || column {
                         cx.notify();
                         cx.stop_propagation();
                     }

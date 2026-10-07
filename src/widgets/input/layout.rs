@@ -209,37 +209,39 @@ impl InputState {
                 continue;
             }
             let pos = origin + point(self.content_padding.left, l.top);
-            let start = self.selection.start.max(l.start);
-            let end = self.selection.end.min(l.end);
-            if !self.selection.is_empty()
-                && start <= end
-                && self.selection.end > l.start
-                && self.selection.start <= l.end
-            {
-                let a = l.position_after_wrap(start - l.start, self.line_height);
-                let b = l.position(end - l.start, self.line_height);
-                let mut y = a.y;
-                while y <= b.y {
-                    let x = if y == a.y { a.x } else { px(0.) };
-                    let right = if y == b.y && self.selection.end <= l.end {
-                        b.x
-                    } else {
-                        self.bounds.size.width - self.scroll.x - self.content_padding.left
-                    };
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            pos + point(x, y),
-                            size((right - x).max(px(2.)), self.line_height),
-                        ),
-                        selection_color,
-                    ));
-                    y += self.line_height;
+            for selection in self.selected_ranges() {
+                let start = selection.start.max(l.start);
+                let end = selection.end.min(l.end);
+                if !selection.is_empty()
+                    && start <= end
+                    && selection.end > l.start
+                    && selection.start <= l.end
+                {
+                    let a = l.position_after_wrap(start - l.start, self.line_height);
+                    let b = l.position(end - l.start, self.line_height);
+                    let mut y = a.y;
+                    while y <= b.y {
+                        let x = if y == a.y { a.x } else { px(0.) };
+                        let right = if y == b.y && selection.end <= l.end {
+                            b.x
+                        } else {
+                            self.bounds.size.width - self.scroll.x - self.content_padding.left
+                        };
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                pos + point(x, y),
+                                size((right - x).max(px(2.)), self.line_height),
+                            ),
+                            selection_color,
+                        ));
+                        y += self.line_height;
+                    }
                 }
             }
             let _ = l
                 .line
                 .paint(pos, self.line_height, TextAlign::Left, None, window, cx);
-            if let Some(marked) = &self.marked {
+            for marked in self.extra_marked.iter().chain(self.marked.iter()) {
                 let start = marked.start.max(l.start);
                 let end = marked.end.min(l.end);
                 if start < end {
@@ -266,6 +268,25 @@ impl InputState {
             }
         }
         if focused && self.blink {
+            for selection in &self.extra {
+                let at = if selection.reversed {
+                    selection.range.start
+                } else {
+                    selection.range.end
+                };
+                window.paint_quad(fill(
+                    Bounds::new(
+                        origin
+                            + self.position_with_wrap_side(
+                                at,
+                                selection.after_wrap
+                                    || selection.reversed && !selection.range.is_empty(),
+                            ),
+                        size(px(1.5), self.line_height),
+                    ),
+                    cx.theme().foreground,
+                ));
+            }
             window.paint_quad(fill(
                 Bounds::new(
                     origin + self.caret_position(),

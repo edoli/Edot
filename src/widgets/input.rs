@@ -20,6 +20,27 @@ struct Edit {
     after: String,
     selection: Range<usize>,
     reversed: bool,
+    after_wrap: bool,
+    extra: Vec<Selection>,
+    others: Vec<Replacement>,
+}
+#[derive(Clone)]
+struct Selection {
+    range: Range<usize>,
+    reversed: bool,
+    preferred_x: Option<Pixels>,
+    after_wrap: bool,
+}
+struct Composition {
+    before: SharedString,
+    primary: Selection,
+    extra: Vec<Selection>,
+}
+#[derive(Clone)]
+struct Replacement {
+    start: usize,
+    before: String,
+    after: String,
 }
 struct Paragraph {
     start: usize,
@@ -36,8 +57,12 @@ pub struct InputState {
     label: SharedString,
     selection: Range<usize>,
     reversed: bool,
+    caret_after_wrap: bool,
+    extra: Vec<Selection>,
+    occurrence_word: bool,
     marked: Option<Range<usize>>,
-    composition: Option<(SharedString, Range<usize>, bool)>,
+    composition: Option<Composition>,
+    extra_marked: Vec<Range<usize>>,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
     last_edit: Option<std::time::Instant>,
@@ -57,6 +82,7 @@ pub struct InputState {
     line_height: Pixels,
     content_size: Size<Pixels>,
     selecting: bool,
+    column_anchor: Option<Point<Pixels>>,
     reveal: bool,
     preferred_x: Option<Pixels>,
     blink: bool,
@@ -76,6 +102,7 @@ impl InputState {
         let focus = cx.focus_handle().tab_stop(true);
         let blur = cx.on_blur(&focus, window, |s, _, cx| {
             s.selecting = false;
+            s.column_anchor = None;
             s.focused = false;
             cx.emit(InputEvent::Blur);
             cx.notify();
@@ -110,8 +137,12 @@ impl InputState {
             label: "".into(),
             selection: 0..0,
             reversed: false,
+            caret_after_wrap: false,
+            extra: vec![],
+            occurrence_word: false,
             marked: None,
             composition: None,
+            extra_marked: vec![],
             undo: vec![],
             redo: vec![],
             last_edit: None,
@@ -131,6 +162,7 @@ impl InputState {
             line_height: px(24.),
             content_size: Size::default(),
             selecting: false,
+            column_anchor: None,
             reveal: false,
             preferred_x: None,
             blink: true,
@@ -165,6 +197,12 @@ impl InputState {
     pub fn selected_range(&self) -> Range<usize> {
         self.selection.clone()
     }
+    pub fn selected_ranges(&self) -> impl Iterator<Item = Range<usize>> + '_ {
+        self.extra
+            .iter()
+            .map(|s| s.range.clone())
+            .chain(std::iter::once(self.selection.clone()))
+    }
     pub fn cursor(&self) -> usize {
         if self.reversed {
             self.selection.start
@@ -195,6 +233,7 @@ impl InputState {
     ) {
         self.content = value.into();
         self.selection = 0..0;
+        self.clear_extra_selections();
         self.reversed = false;
         self.marked = None;
         self.composition = None;
@@ -212,12 +251,14 @@ impl InputState {
         n
     }
     pub fn set_selected_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.clear_extra_selections();
         self.last_edit = None;
         self.selection = self.boundary(range.start)..self.boundary(range.end.max(range.start));
         self.reversed = false;
         self.moved(cx);
     }
     pub fn select_all(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_extra_selections();
         self.last_edit = None;
         self.selection = 0..self.content.len();
         self.reversed = false;
@@ -230,6 +271,8 @@ impl InputState {
         self.commit(0..self.content.len(), text.as_ref(), false, cx);
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
+        self.column_anchor = None;
+        self.selecting = false;
         self.revision = self.revision.wrapping_add(1);
         self.layout_key = None;
         self.moved(cx);
@@ -242,9 +285,11 @@ impl InputState {
     }
 }
 
+mod column;
 mod element;
 mod history;
 mod ime;
 mod layout;
 mod navigation;
+mod selection;
 pub use element::{Input, Textarea};

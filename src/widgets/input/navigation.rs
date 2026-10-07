@@ -2,6 +2,27 @@
 use super::*;
 
 impl InputState {
+    /// Plain-text word boundaries, including VS Code's decimal-number rule.
+    pub(super) fn word_at_cursor(&self) -> Option<Range<usize>> {
+        self.word_at(self.cursor())
+    }
+    pub(super) fn word_at(&self, cursor: usize) -> Option<Range<usize>> {
+        static WORD: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+            regex_lite::Regex::new(
+                r#"-?[0-9]*\.[0-9][A-Za-z0-9_]*|[^`~!@#$%^&*()=+\[\]{}\\|;:'",.<>/?\-\s\x{0085}\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+"#,
+            )
+            .expect("valid plain-text word pattern")
+        });
+        let start = self.content[..cursor]
+            .rfind(['\r', '\n'])
+            .map_or(0, |i| i + 1);
+        let end = self.content[cursor..]
+            .find(['\r', '\n'])
+            .map_or(self.content.len(), |i| cursor + i);
+        WORD.find_iter(&self.content[start..end])
+            .find(|m| m.start() <= cursor - start && cursor - start <= m.end())
+            .map(|m| start + m.start()..start + m.end())
+    }
     pub(super) fn prev(&self, at: usize) -> usize {
         self.content[..at]
             .grapheme_indices(true)
@@ -40,7 +61,56 @@ impl InputState {
         };
         self.selection = at.min(anchor)..at.max(anchor);
         self.reversed = at < anchor;
+        self.caret_after_wrap = false;
         self.moved(cx);
+    }
+    fn navigation_destination(&mut self, key: &str, ctrl: bool, shift: bool) -> Option<usize> {
+        let cursor = self.cursor();
+        match key {
+            "left" => Some(if !shift && !self.selection.is_empty() {
+                self.selection.start
+            } else if ctrl {
+                self.word(cursor, true)
+            } else {
+                self.prev(cursor)
+            }),
+            "right" => Some(if !shift && !self.selection.is_empty() {
+                self.selection.end
+            } else if ctrl {
+                self.word(cursor, false)
+            } else {
+                self.next(cursor)
+            }),
+            "home" => Some(if ctrl {
+                0
+            } else {
+                self.visual_edge(cursor, false)
+            }),
+            "end" => Some(if ctrl {
+                self.content.len()
+            } else {
+                self.visual_edge(cursor, true)
+            }),
+            "up" | "down" | "pageup" | "pagedown" if self.multiline => {
+                let p = self.caret_position();
+                let x = self.preferred_x.unwrap_or(p.x);
+                self.preferred_x = Some(x);
+                let step = if key.starts_with("page") {
+                    self.bounds.size.height.max(self.line_height)
+                } else {
+                    self.line_height
+                };
+                Some(self.index_at(point(
+                    x,
+                    p.y + if key == "up" || key == "pageup" {
+                        -step
+                    } else {
+                        step
+                    },
+                )))
+            }
+            _ => None,
+        }
     }
     pub(super) fn key(
         &mut self,
@@ -57,57 +127,43 @@ impl InputState {
         let cursor = self.cursor();
         let mut dest = None;
         match key {
-            "left" => {
-                dest = Some(if !shift && !self.selection.is_empty() {
-                    self.selection.start
-                } else if ctrl {
-                    self.word(cursor, true)
-                } else {
-                    self.prev(cursor)
-                })
+            "d" if ctrl && !shift && self.multiline => {
+                self.select_next_occurrence(cx);
             }
-            "right" => {
-                dest = Some(if !shift && !self.selection.is_empty() {
-                    self.selection.end
-                } else if ctrl {
-                    self.word(cursor, false)
-                } else {
-                    self.next(cursor)
-                })
-            }
-            "home" => {
-                dest = Some(if ctrl {
-                    0
-                } else {
-                    self.visual_edge(cursor, false)
-                })
-            }
-            "end" => {
-                dest = Some(if ctrl {
-                    self.content.len()
-                } else {
-                    self.visual_edge(cursor, true)
-                })
+            "left" | "right" | "home" | "end" => {
+                dest = self.navigation_destination(key, ctrl, shift);
             }
             "up" | "down" | "pageup" | "pagedown" if self.multiline => {
-                let p = self.caret_position();
-                let x = self.preferred_x.unwrap_or(p.x);
-                self.preferred_x = Some(x);
-                let step = if key.starts_with("page") {
-                    self.bounds.size.height.max(self.line_height)
-                } else {
-                    self.line_height
-                };
-                dest = Some(self.index_at(point(
-                    x,
-                    p.y + if key == "up" || key == "pageup" {
-                        -step
-                    } else {
-                        step
-                    },
-                )));
+                dest = self.navigation_destination(key, ctrl, shift);
             }
             "backspace" | "delete" => {
+                if !self.extra.is_empty() {
+                    self.finish_composition();
+                    let ranges: Vec<_> = self
+                        .selected_ranges()
+                        .map(|range| {
+                            if !range.is_empty() {
+                                range
+                            } else if key == "backspace" {
+                                (if ctrl {
+                                    self.word(range.start, true)
+                                } else {
+                                    self.prev(range.start)
+                                })..range.start
+                            } else {
+                                range.start..if ctrl {
+                                    self.word(range.start, false)
+                                } else {
+                                    self.next(range.start)
+                                }
+                            }
+                        })
+                        .collect();
+                    let texts = vec![String::new(); ranges.len()];
+                    self.commit_multiple(ranges, texts, false, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 let range = if self.selection.is_empty() {
                     if key == "backspace" {
                         (if ctrl {
@@ -143,7 +199,38 @@ impl InputState {
             self.preferred_x = None;
         }
         if let Some(at) = dest {
+            // Reuse the same navigation rules for every additional caret.
+            let extra = std::mem::take(&mut self.extra);
+            let primary = self.selection.clone();
+            let reversed = self.reversed;
+            let preferred = self.preferred_x;
+            let mut moved = Vec::with_capacity(extra.len());
+            for selection in extra {
+                self.selection = selection.range;
+                self.reversed = selection.reversed;
+                self.caret_after_wrap = selection.after_wrap;
+                self.preferred_x = if matches!(key, "up" | "down" | "pageup" | "pagedown") {
+                    selection.preferred_x
+                } else {
+                    None
+                };
+                if let Some(at) = self.navigation_destination(key, ctrl, shift) {
+                    self.move_to(at, shift, cx);
+                }
+                moved.push(Selection {
+                    range: self.selection.clone(),
+                    reversed: self.reversed,
+                    preferred_x: self.preferred_x,
+                    after_wrap: self.caret_after_wrap,
+                });
+            }
+            self.selection = primary;
+            self.reversed = reversed;
+            self.preferred_x = preferred;
             self.move_to(at, shift, cx);
+            self.extra = moved;
+            self.deduplicate_selections();
+            self.occurrence_word = false;
         }
         cx.stop_propagation();
     }
@@ -155,7 +242,10 @@ impl InputState {
         self.position_with_wrap_side(at, false)
     }
     pub(super) fn caret_position(&self) -> Point<Pixels> {
-        self.position_with_wrap_side(self.cursor(), self.reversed && !self.selection.is_empty())
+        self.position_with_wrap_side(
+            self.cursor(),
+            self.caret_after_wrap || self.reversed && !self.selection.is_empty(),
+        )
     }
     pub(super) fn position_with_wrap_side(&self, at: usize, after_wrap: bool) -> Point<Pixels> {
         let i = self
@@ -291,7 +381,18 @@ impl InputState {
             cx.stop_propagation();
             return;
         }
+        if self.multiline
+            && e.modifiers.alt
+            && e.modifiers.shift
+            && !e.modifiers.control
+            && !e.modifiers.platform
+        {
+            self.begin_column_selection(e.position, cx);
+            cx.stop_propagation();
+            return;
+        }
         self.selecting = true;
+        self.clear_extra_selections();
         self.preferred_x = None;
         let at = self.mouse_index(e.position);
         if e.click_count >= 3 {
@@ -351,8 +452,20 @@ impl InputState {
             if e.position.y > self.bounds.bottom() {
                 self.scroll.y -= self.line_height;
             }
+            if self.column_anchor.is_some() && !self.wrap {
+                if e.position.x < self.bounds.left() {
+                    self.scroll.x += self.line_height;
+                }
+                if e.position.x > self.bounds.right() {
+                    self.scroll.x -= self.line_height;
+                }
+            }
             self.clamp_scroll();
-            self.move_to(self.mouse_index(e.position), true, cx);
+            if self.column_anchor.is_some() {
+                self.update_column_selection(e.position, cx);
+            } else {
+                self.move_to(self.mouse_index(e.position), true, cx);
+            }
         }
     }
 }
