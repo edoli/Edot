@@ -34,6 +34,15 @@ impl Edot {
                         let _ = weak.update(cx, |this, cx| this.outdent(id, cx));
                     }),
             );
+        } else {
+            let weak = view.clone();
+            menu = menu.item(
+                PopupMenuItem::new("선택한 항목과 함께 새 폴더 만들기").on_click(
+                    move |_, window, cx| {
+                        let _ = weak.update(cx, |this, cx| this.group_selected(window, cx));
+                    },
+                ),
+            );
         }
         let weak = view.clone();
         menu = menu.separator().item(
@@ -44,16 +53,6 @@ impl Edot {
                     let _ = weak.update(cx, |this, cx| this.confirm_delete(window, cx));
                 }),
         );
-        if multiple {
-            let weak = view.clone();
-            menu = menu.item(
-                PopupMenuItem::new("선택한 항목과 함께 새 폴더 만들기").on_click(
-                    move |_, window, cx| {
-                        let _ = weak.update(cx, |this, cx| this.group_selected(window, cx));
-                    },
-                ),
-            );
-        }
         menu
     }
 }
