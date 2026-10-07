@@ -386,15 +386,41 @@ impl InputState {
             self.changed(cx);
         }
     }
+    fn clipboard_range(&self) -> Range<usize> {
+        if !self.selection.is_empty() || !self.multiline {
+            return self.selection.clone();
+        }
+        // Logical line, including its original terminator (CRLF, CR or LF).
+        let cursor = self.cursor();
+        let start = self.content[..cursor]
+            .rfind(['\r', '\n'])
+            .map_or(0, |i| i + 1);
+        let end = self.content[cursor..]
+            .find(['\r', '\n'])
+            .map_or(self.content.len(), |i| {
+                let end = cursor + i;
+                end + if self.content[end..].starts_with("\r\n") {
+                    2
+                } else {
+                    1
+                }
+            });
+        start..end
+    }
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selection.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.selected_value().into()));
+        let range = self.clipboard_range();
+        if !range.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(self.content[range].into()));
         }
     }
-    fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        self.copy(&Copy, window, cx);
-        if !self.selection.is_empty() {
-            self.replace("", window, cx);
+    fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+        let range = self.clipboard_range();
+        if !range.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.content[range.clone()].into(),
+            ));
+            self.finish_composition();
+            self.commit(range, "", false, cx);
         }
     }
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {

@@ -30,6 +30,10 @@ mod view;
 
 const SIDEBAR_RESIZE_WIDTH: f32 = 6.;
 const TAB_MIN_WIDTH: i32 = 140;
+const TREE_ROW_HEIGHT: f32 = 29.;
+const TREE_INDENT: f32 = 22.;
+// Row padding + disclosure width + gap: align insertion lines with the note icon.
+const TREE_ICON_LEFT: f32 = 24.;
 
 struct OpenTab {
     id: u64,
@@ -121,6 +125,7 @@ pub struct Edot {
     startup_failed: bool,
     subscriptions: Vec<Subscription>,
     tree_scroll: UniformListScrollHandle,
+    tree_bounds: Rc<std::cell::Cell<Bounds<Pixels>>>,
     result_scroll: UniformListScrollHandle,
     tab_scroll: ScrollHandle,
     pressed: Option<u64>,
@@ -192,6 +197,7 @@ impl Edot {
             error,
             subscriptions: vec![],
             tree_scroll: UniformListScrollHandle::new(),
+            tree_bounds: Default::default(),
             result_scroll: UniformListScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
             pressed: None,
@@ -272,6 +278,14 @@ impl Edot {
             .push(cx.observe_window_appearance(window, |this, window, cx| {
                 if this.settings.theme == ThemeMode::System {
                     this.apply_theme(window, cx);
+                }
+            }));
+        this.subscriptions
+            .push(cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() && !this.dragging_notes.is_empty() {
+                    cx.stop_active_drag(window);
+                    this.stop_drag();
+                    cx.notify();
                 }
             }));
         let weak = cx.entity().downgrade();
@@ -794,6 +808,7 @@ impl Edot {
             theme.colors.popover_foreground = theme.colors.foreground;
             theme.colors.accent = rgb(if dark { 0x292e38 } else { 0xe8edf5 }).into();
             theme.colors.accent_foreground = theme.colors.foreground;
+            theme.colors.destructive = rgb(if dark { 0xff8589 } else { 0xc42b32 }).into();
             theme.colors.muted_foreground = rgb(if dark { 0xa5afbf } else { 0x657187 }).into();
             theme.colors.primary_foreground = rgb(if dark { 0x10151d } else { 0xffffff }).into();
             theme.colors.ring = theme.colors.primary;

@@ -37,6 +37,15 @@ impl Edot {
             self.show_keyboard_menu(window, cx);
         } else if title && matches!(key, "escape" | "enter" | "tab") {
             self.finish_rename(key != "escape", true, window, cx);
+        } else if event.keystroke.modifiers.alt
+            && !ctrl
+            && !shift
+            && !event.keystroke.modifiers.platform
+            && key == "z"
+        {
+            let mut next = self.settings.clone();
+            next.wrap = !next.wrap;
+            self.change_settings(next, window, cx);
         } else if ctrl && key == "n" {
             self.create_note(None, window, cx);
         } else if ctrl && key == "s" {

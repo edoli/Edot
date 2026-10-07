@@ -22,6 +22,15 @@ impl AutoScroll {
         cx: &mut Context<T>,
         callback: impl Fn(Pixels, &mut T, &mut Context<T>) + 'static,
     ) {
+        self.set_interval(delta, std::time::Duration::from_millis(16), cx, callback);
+    }
+    pub fn set_interval<T: 'static>(
+        &mut self,
+        delta: Option<Pixels>,
+        interval: std::time::Duration,
+        cx: &mut Context<T>,
+        callback: impl Fn(Pixels, &mut T, &mut Context<T>) + 'static,
+    ) {
         if self.delta == delta && self.task.is_some() {
             return;
         }
@@ -30,9 +39,7 @@ impl AutoScroll {
         if let Some(delta) = delta {
             self.task = Some(cx.spawn(async move |entity, cx| {
                 loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(16))
-                        .await;
+                    cx.background_executor().timer(interval).await;
                     if entity.update(cx, |s, cx| callback(delta, s, cx)).is_err() {
                         break;
                     }

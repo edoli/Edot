@@ -32,7 +32,7 @@ impl Edot {
                         },
                     ));
                     let action = weak.clone();
-                    menu = menu.item(PopupMenuItem::new("이름 바꾸기    F2").on_click(
+                    menu = menu.item(PopupMenuItem::new("이름 바꾸기").shortcut("F2").on_click(
                         move |_, window, cx| {
                             let _ = action.update(cx, |this, cx| this.begin_rename(id, window, cx));
                         },
@@ -47,11 +47,14 @@ impl Edot {
                     );
                 }
                 let remove = weak.clone();
-                menu = menu.separator().item(PopupMenuItem::new("삭제").on_click(
-                    move |_, window, cx| {
-                        let _ = remove.update(cx, |this, cx| this.confirm_delete(window, cx));
-                    },
-                ));
+                menu = menu.separator().item(
+                    PopupMenuItem::new("삭제")
+                        .shortcut("Delete")
+                        .destructive()
+                        .on_click(move |_, window, cx| {
+                            let _ = remove.update(cx, |this, cx| this.confirm_delete(window, cx));
+                        }),
+                );
                 if multiple {
                     menu = menu.item(
                         PopupMenuItem::new("선택한 항목과 함께 새 폴더 만들기").on_click(
@@ -63,13 +66,13 @@ impl Edot {
                 }
             } else {
                 menu = menu
-                    .menu("실행 취소", Box::new(component::input::Undo))
-                    .menu("다시 실행", Box::new(component::input::Redo))
+                    .menu("실행 취소", "Ctrl+Z", Box::new(component::input::Undo))
+                    .menu("다시 실행", "Ctrl+Y", Box::new(component::input::Redo))
                     .separator()
-                    .menu("잘라내기", Box::new(component::input::Cut))
-                    .menu("복사", Box::new(component::input::Copy))
-                    .menu("붙여넣기", Box::new(component::input::Paste))
-                    .menu("전체 선택", Box::new(component::input::SelectAll));
+                    .menu("잘라내기", "Ctrl+X", Box::new(component::input::Cut))
+                    .menu("복사", "Ctrl+C", Box::new(component::input::Copy))
+                    .menu("붙여넣기", "Ctrl+V", Box::new(component::input::Paste))
+                    .menu("전체 선택", "Ctrl+A", Box::new(component::input::SelectAll));
             }
             menu
         });
@@ -112,53 +115,118 @@ impl Edot {
         self.dragging_notes = ids.to_vec();
         self.tree_auto.last_drag_position = Some(position);
         self.resolve_tree_drag();
-        let bounds = self.tree_scroll.0.borrow().base_handle.bounds();
-        let delta = if position.x >= bounds.left() && position.x <= bounds.right() {
-            AutoScroll::compute_delta(position.y, bounds)
+        let bounds = self.tree_bounds.get();
+        let delta = if bounds.contains(&position) {
+            if position.y < bounds.top() + px(24.) {
+                Some(px(-2. * TREE_ROW_HEIGHT))
+            } else if position.y >= bounds.bottom() - px(24.) {
+                Some(px(2. * TREE_ROW_HEIGHT))
+            } else {
+                None
+            }
         } else {
             None
         };
-        self.tree_auto.set(delta, cx, |delta, this, cx| {
-            if !cx.has_active_drag() {
-                this.tree_auto.stop();
-                return;
-            }
-            let handle = this.tree_scroll.0.borrow().base_handle.clone();
-            let offset = handle.offset();
-            handle.set_offset(point(offset.x, offset.y - delta));
-            this.resolve_tree_drag();
-            cx.notify();
-        });
+        self.tree_auto
+            .set_interval(delta, Duration::from_millis(160), cx, |delta, this, cx| {
+                if !cx.has_active_drag() {
+                    this.stop_drag();
+                    cx.notify();
+                    return;
+                }
+                let handle = this.tree_scroll.0.borrow().base_handle.clone();
+                let offset = handle.offset();
+                handle.set_offset(point(
+                    offset.x,
+                    (offset.y - delta).clamp(-handle.max_offset().y, px(0.)),
+                ));
+                this.resolve_tree_drag();
+                cx.notify();
+            });
         cx.notify();
     }
     fn resolve_tree_drag(&mut self) {
         let Some(position) = self.tree_auto.last_drag_position else {
             return;
         };
+        self.drop_target = self.tree_drop_at(position, &self.dragging_notes);
+        self.pressed = None;
+    }
+    pub(super) fn tree_drop_at(&self, position: Point<Pixels>, ids: &[u64]) -> Option<DropTarget> {
+        if !self.session.sidebar_visible
+            || self.search_mode
+            || !self.tree_bounds.get().contains(&position)
+        {
+            return None;
+        }
         let handle = self.tree_scroll.0.borrow().base_handle.clone();
-        let bounds = handle.bounds();
-        let y = f32::from(
-            position.y.max(bounds.top()).min(bounds.bottom() - px(1.))
-                - bounds.top()
-                - handle.offset().y,
-        )
-        .max(0.);
+        let y = f32::from(position.y - handle.bounds().top() - handle.offset().y);
         let visible = self.visible_tree();
-        let index = (y / 29.) as usize;
-        self.drop_target = if let Some(&(id, _)) = visible.get(index) {
+        if y >= 0.
+            && let Some(&(id, _)) = visible.get((y / TREE_ROW_HEIGHT) as usize)
+        {
+            let index = (y / TREE_ROW_HEIGHT) as usize;
             DropTarget::resolve_row(
                 &self.book,
-                &self.dragging_notes,
+                ids,
                 id,
                 index.checked_sub(1).map(|i| visible[i].0),
                 visible.get(index + 1).map(|r| r.0),
-                y as i32 % 29,
-                29,
+                (y - index as f32 * TREE_ROW_HEIGHT) as i32,
+                TREE_ROW_HEIGHT as i32,
             )
         } else {
-            DropTarget::resolve_many(&self.book, &self.dragging_notes, None, DropZone::Root)
+            DropTarget::resolve_many(&self.book, ids, None, DropZone::Root)
+        }
+    }
+    pub(super) fn finish_tree_drag(
+        &mut self,
+        ids: &[u64],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Resolve again at release, so a stale hover target cannot move a note.
+        if let Some(target) = self.tree_drop_at(window.mouse_position(), ids) {
+            self.move_notes(ids, target, cx);
+        }
+        self.stop_drag();
+        cx.notify();
+    }
+    pub(super) fn tree_drag_description(&self) -> Option<String> {
+        let source = *self.dragging_notes.first()?;
+        let source = if self.dragging_notes.len() > 1 {
+            format!("{}개 항목", self.dragging_notes.len())
+        } else {
+            self.book.get(source)?.title.clone()
         };
-        self.pressed = None;
+        let action = self.drop_target.map_or_else(
+            || "이 위치에는 놓을 수 없습니다".into(),
+            |target| {
+                let title = target
+                    .note
+                    .and_then(|id| self.book.get(id))
+                    .map_or("", |n| n.title.as_str());
+                match target.zone {
+                    DropZone::Before => format!("{title} 위에 놓기"),
+                    DropZone::After => format!("{title} 아래에 놓기"),
+                    DropZone::Inside => format!("{title}의 하위로 이동"),
+                    DropZone::InsideFirst => format!("{title} 안의 맨 위에 놓기"),
+                    DropZone::InsideLast => format!("{title} 안의 맨 아래에 놓기"),
+                    DropZone::AfterSubtree => format!("{title} 아래에 같은 레벨로 놓기"),
+                    DropZone::Root => "최상위로 이동".into(),
+                }
+            },
+        );
+        Some(format!("{source} → {action}   ·   Esc: 취소"))
+    }
+    pub(super) fn insertion_indent(&self, target: DropTarget) -> Pixels {
+        let mut parent = target.parent;
+        let mut depth = 0;
+        while let Some(note) = self.book.get(parent) {
+            depth += 1;
+            parent = note.parent;
+        }
+        px(TREE_ICON_LEFT + depth as f32 * TREE_INDENT)
     }
     pub(super) fn tab_drag_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.tab_auto.last_drag_position = Some(position);

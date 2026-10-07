@@ -4,7 +4,12 @@ use component::scroll::Scrollbar;
 #[derive(Clone)]
 struct TreeDrag {
     ids: Vec<u64>,
-    title: String,
+}
+struct TreeDragPreview;
+impl Render for TreeDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(0.))
+    }
 }
 #[derive(Clone)]
 struct TabDrag {
@@ -142,15 +147,50 @@ impl Edot {
         )
         .track_scroll(&self.tree_scroll)
         .size_full();
+        let tree_bounds = self.tree_bounds.clone();
+        let scroll = self.tree_scroll.0.borrow().base_handle.clone();
+        let root_y = (scroll.bounds().top() - self.tree_bounds.get().top()
+            + scroll.offset().y
+            + px(count as f32 * TREE_ROW_HEIGHT + 4.))
+        .min((self.tree_bounds.get().size.height - px(32.)).max(px(0.)));
         div()
             .id("tree-host")
+            .debug_selector(|| "tree-host".into())
             .relative()
             .flex_1()
             .min_h_0()
             .pt_3()
             .px_2()
             .track_focus(&self.tree_focus)
+            .child(
+                canvas(move |bounds, _, _| tree_bounds.set(bounds), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0(),
+            )
             .child(list)
+            .when(
+                self.drop_target.is_some_and(|t| t.zone == DropZone::Root),
+                |view| {
+                    view.child(
+                        div()
+                            .debug_selector(|| "tree-root-drop".into())
+                            .absolute()
+                            .left_2()
+                            .right_2()
+                            .top(root_y)
+                            .h(px(29.))
+                            .h_flex()
+                            .justify_center()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(cx.theme().primary)
+                            .bg(cx.theme().selection)
+                            .text_sm()
+                            .text_color(cx.theme().primary)
+                            .child("＋ 최상위로 이동"),
+                    )
+                },
+            )
             .child(Scrollbar::vertical(&self.tree_scroll))
             .when(count == 0, |view| {
                 view.child(
@@ -173,20 +213,8 @@ impl Edot {
                     cx.notify();
                 }),
             )
-            .on_drag_move::<TreeDrag>(cx.listener(
-                |this, event: &DragMoveEvent<TreeDrag>, _, cx| {
-                    if !event.bounds.contains(&event.event.position) {
-                        return;
-                    }
-                    let ids = event.drag(cx).ids.clone();
-                    this.tree_drag_at(event.event.position, &ids, cx);
-                },
-            ))
-            .on_drop(cx.listener(|this, drag: &TreeDrag, _, cx| {
-                if let Some(target) = this.drop_target {
-                    this.move_notes(&drag.ids, target, cx);
-                }
-                this.stop_drag();
+            .on_drop(cx.listener(|this, drag: &TreeDrag, window, cx| {
+                this.finish_tree_drag(&drag.ids, window, cx);
                 cx.stop_propagation();
             }))
             .into_any_element()
@@ -211,36 +239,51 @@ impl Edot {
         } else {
             vec![id]
         };
-        let drag = TreeDrag {
-            title: if ids.len() > 1 {
-                format!("{}개 메모", ids.len())
-            } else {
-                title.clone()
-            },
-            ids,
-        };
+        let drag = TreeDrag { ids };
         let target = self.drop_target.filter(|target| target.anchor == Some(id));
         let weak = cx.entity().downgrade();
+        let drag_view = weak.clone();
         div()
             .id(("note", id))
+            .debug_selector(move || format!("tree-note-{id}"))
             .h_flex()
             .relative()
-            .h(px(29.))
+            .h(px(TREE_ROW_HEIGHT))
             .w_full()
             .gap_1()
             .pr_2()
-            .pl(px(4. + depth as f32 * 22.))
+            .pl(px(4. + depth as f32 * TREE_INDENT))
             .rounded(px(4.))
             .text_sm()
             .cursor_pointer()
             .when(selected, |row| row.bg(cx.theme().selection))
-            .when(!selected, |row| row.hover(|row| row.bg(cx.theme().accent)))
+            .when(!selected && self.dragging_notes.is_empty(), |row| {
+                row.hover(|row| row.bg(cx.theme().accent))
+            })
             .when(self.caret == Some(id), |row| {
-                row.border_l_2().border_color(cx.theme().primary)
+                row.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.))
+                        .bg(cx.theme().primary),
+                )
             })
             .when(
                 target.is_some_and(|target| target.zone == DropZone::Inside),
-                |row| row.border_1().border_color(cx.theme().primary),
+                |row| {
+                    row.child(
+                        div()
+                            .debug_selector(|| "tree-inside-drop".into())
+                            .absolute()
+                            .inset_0()
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(cx.theme().primary),
+                    )
+                },
             )
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .child(
@@ -311,13 +354,23 @@ impl Edot {
                 |row, target| {
                     row.child(
                         div()
+                            .debug_selector(|| "tree-insertion-marker".into())
                             .absolute()
-                            .left_0()
-                            .right_0()
+                            .left(self.insertion_indent(target))
+                            .right(px(4.))
                             .h(px(2.))
                             .bg(cx.theme().primary)
-                            .when(target.zone == DropZone::Before, |line| line.top_0())
-                            .when(target.zone != DropZone::Before, |line| line.bottom_0()),
+                            .when(target.zone == DropZone::Before, |line| line.top(px(1.)))
+                            .when(target.zone != DropZone::Before, |line| line.bottom(px(1.)))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(-3.))
+                                    .top(px(-2.))
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(cx.theme().primary),
+                            ),
                     )
                 },
             )
@@ -352,21 +405,16 @@ impl Edot {
                     cx.notify();
                 }),
             )
-            .on_drag(drag, |drag, _, _, cx| {
-                cx.new(|_| DragLabel(drag.title.clone()))
+            .when(!renaming, |row| {
+                row.on_drag(drag, move |drag, _, window, cx| {
+                    let _ = drag_view.update(cx, |this, cx| {
+                        this.tree_drag_at(window.mouse_position(), &drag.ids, cx)
+                    });
+                    cx.new(|_| TreeDragPreview)
+                })
             })
-            .on_drag_move::<TreeDrag>(cx.listener(
-                move |this, event: &DragMoveEvent<TreeDrag>, _, cx| {
-                    let ids = event.drag(cx).ids.clone();
-                    this.tree_drag_at(event.event.position, &ids, cx);
-                    cx.stop_propagation();
-                },
-            ))
-            .on_drop(cx.listener(move |this, drag: &TreeDrag, _, cx| {
-                if let Some(target) = this.drop_target {
-                    this.move_notes(&drag.ids, target, cx);
-                }
-                this.stop_drag();
+            .on_drop(cx.listener(move |this, drag: &TreeDrag, window, cx| {
+                this.finish_tree_drag(&drag.ids, window, cx);
                 cx.stop_propagation();
             }))
             .context_menu(move |mut menu, _, cx| {
@@ -385,7 +433,7 @@ impl Edot {
                         },
                     ));
                     let weak = view.downgrade();
-                    menu = menu.item(PopupMenuItem::new("이름 바꾸기    F2").on_click(
+                    menu = menu.item(PopupMenuItem::new("이름 바꾸기").shortcut("F2").on_click(
                         move |_, window, cx| {
                             let _ = weak.update(cx, |this, cx| this.begin_rename(id, window, cx));
                         },
@@ -400,11 +448,14 @@ impl Edot {
                     );
                 }
                 let weak = view.downgrade();
-                menu = menu.separator().item(PopupMenuItem::new("삭제").on_click(
-                    move |_, window, cx| {
-                        let _ = weak.update(cx, |this, cx| this.confirm_delete(window, cx));
-                    },
-                ));
+                menu = menu.separator().item(
+                    PopupMenuItem::new("삭제")
+                        .shortcut("Delete")
+                        .destructive()
+                        .on_click(move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| this.confirm_delete(window, cx));
+                        }),
+                );
                 if multiple {
                     let weak = view.downgrade();
                     menu = menu.item(
@@ -594,20 +645,20 @@ impl Edot {
                         };
                         let count = view.read(cx).open.len();
                         let mut menu = menu;
-                        for (mode, label, disabled) in [
-                            (0, "탭 닫기    Ctrl+W", false),
-                            (1, "다른 탭 닫기", count <= 1),
-                            (2, "오른쪽 탭들 닫기", index + 1 >= count),
+                        for (mode, label, shortcut, disabled) in [
+                            (0, "탭 닫기", Some("Ctrl+W"), false),
+                            (1, "다른 탭 닫기", None, count <= 1),
+                            (2, "오른쪽 탭들 닫기", None, index + 1 >= count),
                         ] {
                             let weak = view.downgrade();
-                            menu =
-                                menu.item(PopupMenuItem::new(label).disabled(disabled).on_click(
-                                    move |_, window, cx| {
-                                        let _ = weak.update(cx, |this, cx| {
-                                            this.close_tabs(id, mode, window, cx)
-                                        });
-                                    },
-                                ));
+                            let mut item = PopupMenuItem::new(label).disabled(disabled);
+                            if let Some(shortcut) = shortcut {
+                                item = item.shortcut(shortcut);
+                            }
+                            menu = menu.item(item.on_click(move |_, window, cx| {
+                                let _ = weak
+                                    .update(cx, |this, cx| this.close_tabs(id, mode, window, cx));
+                            }));
                         }
                         menu
                     }),
@@ -1316,31 +1367,37 @@ impl Edot {
                     .aria_label("메모 본문"),
             )
             .context_menu(move |mut menu, _, _| {
-                for (label, action) in [
+                for (label, shortcut, action) in [
                     (
-                        "실행 취소    Ctrl+Z",
+                        "실행 취소",
+                        "Ctrl+Z",
                         Box::new(component::input::Undo) as Box<dyn Action>,
                     ),
-                    ("다시 실행    Ctrl+Y", Box::new(component::input::Redo)),
-                    ("잘라내기    Ctrl+X", Box::new(component::input::Cut)),
-                    ("복사    Ctrl+C", Box::new(component::input::Copy)),
-                    ("붙여넣기    Ctrl+V", Box::new(component::input::Paste)),
-                    ("전체 선택    Ctrl+A", Box::new(component::input::SelectAll)),
+                    ("다시 실행", "Ctrl+Y", Box::new(component::input::Redo)),
+                    ("잘라내기", "Ctrl+X", Box::new(component::input::Cut)),
+                    ("복사", "Ctrl+C", Box::new(component::input::Copy)),
+                    ("붙여넣기", "Ctrl+V", Box::new(component::input::Paste)),
+                    ("전체 선택", "Ctrl+A", Box::new(component::input::SelectAll)),
                 ] {
                     let editor = editor_menu.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        editor.update(cx, |state, cx| state.focus(window, cx));
-                        window.dispatch_action(action.boxed_clone(), cx);
-                    }));
+                    menu = menu.item(PopupMenuItem::new(label).shortcut(shortcut).on_click(
+                        move |_, window, cx| {
+                            editor.update(cx, |state, cx| state.focus(window, cx));
+                            window.dispatch_action(action.boxed_clone(), cx);
+                        },
+                    ));
                 }
                 menu = menu.separator();
-                for (label, replace) in [("찾기    Ctrl+F", false), ("바꾸기    Ctrl+H", true)]
+                for (label, shortcut, replace) in
+                    [("찾기", "Ctrl+F", false), ("바꾸기", "Ctrl+H", true)]
                 {
                     let weak = weak.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        let _ =
-                            weak.update(cx, |this, cx| this.show_find(false, replace, window, cx));
-                    }));
+                    menu = menu.item(PopupMenuItem::new(label).shortcut(shortcut).on_click(
+                        move |_, window, cx| {
+                            let _ = weak
+                                .update(cx, |this, cx| this.show_find(false, replace, window, cx));
+                        },
+                    ));
                 }
                 menu
             })
@@ -1395,7 +1452,10 @@ impl Edot {
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .child(self.status.clone()),
+                    .child(
+                        self.tree_drag_description()
+                            .unwrap_or_else(|| self.status.clone()),
+                    ),
             )
             .child(position)
             .child(
@@ -1416,6 +1476,16 @@ impl Edot {
 
 impl Render for Edot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.dragging_notes.is_empty() && cx.has_active_drag() {
+            let cursor = if self.drop_target.is_some() {
+                CursorStyle::ClosedHand
+            } else {
+                CursorStyle::OperationNotAllowed
+            };
+            if cx.active_drag_cursor_style() != Some(cursor) {
+                cx.set_active_drag_cursor_style(cursor, window);
+            }
+        }
         let mut body = div()
             .relative()
             .flex_1()
@@ -1449,6 +1519,19 @@ impl Render for Edot {
             .font_family("Segoe UI")
             .text_size(px(15.))
             .capture_key_down(cx.listener(Self::key_down))
+            .on_drag_move::<TreeDrag>(cx.listener(
+                |this, event: &DragMoveEvent<TreeDrag>, _, cx| {
+                    let ids = event.drag(cx).ids.clone();
+                    this.tree_drag_at(event.event.position, &ids, cx);
+                },
+            ))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.stop_drag();
+                    cx.notify();
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {

@@ -43,6 +43,8 @@ fn clear_menu(cx: &mut App) {
 pub struct PopupMenuItem {
     label: SharedString,
     disabled: bool,
+    shortcut: Option<SharedString>,
+    destructive: bool,
     callback: Option<ClickHandler>,
 }
 impl PopupMenuItem {
@@ -50,8 +52,18 @@ impl PopupMenuItem {
         Self {
             label: label.into(),
             disabled: false,
+            shortcut: None,
+            destructive: false,
             callback: None,
         }
+    }
+    pub fn shortcut(mut self, value: impl Into<SharedString>) -> Self {
+        self.shortcut = Some(value.into());
+        self
+    }
+    pub fn destructive(mut self) -> Self {
+        self.destructive = true;
+        self
     }
     pub fn disabled(mut self, value: bool) -> Self {
         self.disabled = value;
@@ -109,9 +121,15 @@ impl PopupMenu {
         self.items.push(None);
         self
     }
-    pub fn menu(self, label: impl Into<SharedString>, action: Box<dyn Action>) -> Self {
+    pub fn menu(
+        self,
+        label: impl Into<SharedString>,
+        shortcut: impl Into<SharedString>,
+        action: Box<dyn Action>,
+    ) -> Self {
         self.item(
             PopupMenuItem::new(label)
+                .shortcut(shortcut)
                 .on_click(move |_, w, cx| w.dispatch_action(action.boxed_clone(), cx)),
         )
     }
@@ -184,7 +202,25 @@ impl Render for PopupMenu {
                         .px_3()
                         .py_1()
                         .cursor_pointer()
-                        .child(item.label.clone())
+                        .h_flex()
+                        .justify_between()
+                        .gap_6()
+                        .whitespace_nowrap()
+                        .when(item.destructive, |d| d.text_color(cx.theme().destructive))
+                        .child(div().child(item.label.clone()))
+                        .when_some(item.shortcut.clone(), |d, shortcut| {
+                            d.child(
+                                div()
+                                    .debug_selector(|| format!("menu-shortcut-{shortcut}"))
+                                    .flex_shrink_0()
+                                    .text_color(if item.destructive {
+                                        cx.theme().destructive
+                                    } else {
+                                        cx.theme().muted_foreground
+                                    })
+                                    .child(shortcut),
+                            )
+                        })
                         .when(i == self.selected, |d| d.bg(hover))
                         .when(item.disabled, |d| d.opacity(0.4))
                         .hover(move |s| s.bg(hover))
