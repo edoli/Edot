@@ -1,0 +1,8 @@
+Use case: background-extraction
+Asset type: transparent Windows desktop app icon for Edot.
+Edit target: supplied E. app icon.
+Requested edit: Remove the entire blue rounded-square background tile. Keep ONLY the uppercase E and the circular period. Recolor those two retained shapes to opaque vivid blue #2674f5 so the mark remains visible on a light background.
+Preserve: the exact recognizable uppercase E silhouette, attached vertical spine and three arms, rounded outside corners and square inside corners, shorter middle arm, the separate circular period at the lower right, and the existing optical relationship and gap between letter and dot.
+Composition: center the E-and-period group together on a square transparent canvas, scale that group up to occupy approximately 84% of canvas width with a balanced transparent margin. Preserve the relative proportions of E and period. The whole glyph group should have equal transparent margin above and below. The only visible pixels must be the blue E and the blue circular dot.
+Style: clean flat solid fills, crisp antialiased contours, no gradient, no texture, no grain.
+Background: truly transparent alpha across all canvas areas outside the E and dot, INCLUDING the gaps inside the E and the gap between E and dot. Absolutely no square tile, no plate, no document, no outline, no shadow, no border, no white backdrop, no checkerboard rendered into the image, no glow, no extra shapes. No additional text. Output one finished icon.

@@ -13,6 +13,9 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globa
 [dev-dependencies]
 gpui = { git = "https://github.com/edoli/zed.git", rev = "d910aecc63523831fd947ea0f631d91604e02963", default-features = false, features = ["test-support"] }
 
+[build-dependencies]
+embed-resource = "=3.0.11"
+
 [profile.dev]
 debug = 0
 
