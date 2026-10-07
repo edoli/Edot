@@ -1,2 +1,4 @@
+include = ["path-remap.toml"] # Generate with: python tools/configure_path_remap.py
+
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
