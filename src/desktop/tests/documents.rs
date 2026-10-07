@@ -92,6 +92,7 @@ fn failed_save_retains_dirty_editor_and_blocks_closing(cx: &mut TestAppContext) 
         fs::create_dir(this.book.file(&f.dir, f.ids[0]).with_extension("tmp")).unwrap();
         assert!(!this.save_all(cx));
         this.close_tabs(f.ids[0], crate::tabs::CloseMode::Current, window, cx);
+        assert!(this.closed_tabs.is_empty());
         assert!(this.open[0].dirty);
         assert!(this.error.is_some());
         assert_eq!(editor.read(cx).value(), "미저장 본문");
@@ -124,5 +125,123 @@ fn tab_close_modes_keep_expected_tabs_and_never_delete_notes(cx: &mut TestAppCon
                 assert!(this.book.file(&this.dir, id).exists());
             }
         });
+        for _ in indices.len()..3 {
+            f.press(cx, "ctrl-shift-t");
+        }
+        f.update(cx, |this, _, _| {
+            assert_eq!(
+                this.open.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                f.ids
+            );
+            assert!(this.closed_tabs.is_empty());
+        });
     }
+}
+
+#[gpui::test]
+fn close_and_reopen_shortcuts_save_content_and_restore_tab_position(cx: &mut TestAppContext) {
+    use gpui::Focusable;
+    let f = Fixture::new(cx);
+    f.update(cx, |this, w, cx| {
+        this.open_note(f.ids[2], true, w, cx);
+        this.open_note(f.ids[1], true, w, cx);
+        this.active_editor()
+            .unwrap()
+            .update(cx, |s, cx| s.replace_all("수정한 메모", w, cx));
+    });
+    f.press(cx, "ctrl-f4");
+    f.update(cx, |this, _, _| {
+        assert_eq!(
+            this.open.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![f.ids[0], f.ids[2]]
+        );
+        assert_eq!(
+            fs::read_to_string(this.book.file(&f.dir, f.ids[1])).unwrap(),
+            "수정한 메모"
+        );
+    });
+    f.press(cx, "ctrl-shift-t");
+    f.update(cx, |this, w, cx| {
+        assert_eq!(
+            this.open.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            f.ids
+        );
+        assert_eq!(this.session.active, Some(f.ids[1]));
+        let editor = this.active_editor().unwrap();
+        assert_eq!(editor.read(cx).value(), "수정한 메모");
+        assert!(editor.read(cx).focus_handle(cx).is_focused(w));
+    });
+    f.press(cx, "ctrl-shift-t");
+    f.update(cx, |this, _, _| assert_eq!(this.open.len(), 3));
+}
+
+#[gpui::test]
+fn reopen_shortcut_works_after_the_last_tab_closes(cx: &mut TestAppContext) {
+    for sidebar_visible in [true, false] {
+        let f = Fixture::new(cx);
+        f.update(cx, |this, w, cx| {
+            this.session.sidebar_visible = sidebar_visible;
+            this.focus_editor(w, cx);
+        });
+        f.press(cx, "ctrl-w");
+        f.press(cx, "ctrl-f4");
+        f.update(cx, |this, _, _| {
+            assert!(this.open.is_empty());
+            assert_eq!(this.session.active, None);
+        });
+        f.press(cx, "ctrl-f4");
+        f.press(cx, "ctrl-shift-t");
+        f.update(cx, |this, _, _| {
+            assert_eq!(this.session.active, Some(f.ids[1]))
+        });
+        f.press(cx, "ctrl-shift-t");
+        f.update(cx, |this, _, _| {
+            assert_eq!(
+                this.open.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                f.ids[..2]
+            );
+            assert_eq!(this.session.active, Some(f.ids[0]));
+            assert!(this.closed_tabs.is_empty());
+        });
+    }
+}
+
+#[gpui::test]
+fn reopen_skips_manually_opened_and_deleted_notes_and_retries_read_errors(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    f.update(cx, |this, w, cx| {
+        this.open_note(f.ids[2], true, w, cx);
+        this.close_tabs(f.ids[0], crate::tabs::CloseMode::Current, w, cx);
+        this.close_tabs(f.ids[1], crate::tabs::CloseMode::Current, w, cx);
+        this.open_note(f.ids[1], true, w, cx);
+        assert_eq!(this.closed_tabs.len(), 1);
+    });
+    f.press(cx, "ctrl-shift-t");
+    f.update(cx, |this, w, cx| {
+        assert_eq!(this.session.active, Some(f.ids[0]));
+        this.close_tabs(f.ids[1], crate::tabs::CloseMode::Current, w, cx);
+        assert!(this.delete_confirmed(&[f.ids[1]], w, cx));
+        assert!(this.closed_tabs.is_empty());
+    });
+    f.press(cx, "ctrl-shift-t");
+    f.update(cx, |this, w, cx| {
+        assert_eq!(this.open.len(), 2);
+        this.close_tabs(f.ids[2], crate::tabs::CloseMode::Current, w, cx);
+        let path = this.book.file(&f.dir, f.ids[2]);
+        fs::rename(&path, path.with_extension("unavailable")).unwrap();
+    });
+    f.press(cx, "ctrl-shift-t");
+    f.update(cx, |this, _, _| {
+        assert!(this.error.is_some());
+        assert_eq!(this.closed_tabs.len(), 1);
+        assert_eq!(this.open.len(), 1);
+        let path = this.book.file(&f.dir, f.ids[2]);
+        fs::rename(path.with_extension("unavailable"), &path).unwrap();
+    });
+    f.press(cx, "escape");
+    f.press(cx, "ctrl-shift-t");
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.session.active, Some(f.ids[2]));
+        assert!(this.closed_tabs.is_empty());
+    });
 }

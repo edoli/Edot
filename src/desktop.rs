@@ -23,7 +23,7 @@ use std::{
 };
 
 mod documents;
-use documents::OpenTab;
+use documents::{ClosedTab, OpenTab};
 use preferences::Preferences;
 use search_ui::SearchPanel;
 mod interaction;
@@ -46,6 +46,7 @@ pub struct Edot {
     settings: Settings,
     session: Session,
     open: Vec<OpenTab>,
+    closed_tabs: Vec<ClosedTab>,
     tree_focus: FocusHandle,
     results_focus: FocusHandle,
     focus: FocusHandle,
@@ -107,6 +108,7 @@ impl Edot {
             settings,
             session,
             open: vec![],
+            closed_tabs: vec![],
             tree_focus: cx.focus_handle(),
             results_focus: cx.focus_handle(),
             focus: cx.focus_handle(),

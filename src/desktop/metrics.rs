@@ -6,6 +6,7 @@ pub(super) const SIDEBAR_RESIZE_WIDTH: f32 = 6.;
 pub(super) const EDITOR_MIN_WIDTH: f32 = 220.;
 pub(super) const TAB_MIN_WIDTH: i32 = 100;
 pub(super) const TAB_PREFERRED_WIDTH: i32 = 180;
+pub(super) const CLOSED_TAB_HISTORY_LIMIT: usize = 100;
 pub(super) const TREE_ROW_HEIGHT: f32 = 29.;
 pub(super) const TREE_INDENT: f32 = 22.;
 // Row padding + disclosure width + gap: insertion lines start at the note icon.

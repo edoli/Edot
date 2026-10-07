@@ -180,6 +180,7 @@ impl Edot {
             .position(|tab| Some(tab.id) == self.session.active)
             .unwrap_or(0);
         self.open.retain(|tab| !ids.contains(&tab.id));
+        self.closed_tabs.retain(|tab| !ids.contains(&tab.id));
         self.selection.retain(|id| !ids.contains(&id));
         self.collapsed.retain(|id| !ids.contains(id));
         if self.caret.is_some_and(|id| ids.contains(&id)) {

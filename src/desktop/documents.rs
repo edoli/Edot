@@ -1,6 +1,12 @@
 //! Open editor lifetime, persistence and tab operations.
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) struct ClosedTab {
+    pub(super) id: u64,
+    index: usize,
+}
+
 pub(super) struct OpenTab {
     pub(super) id: u64,
     pub(super) editor: Option<Entity<TextareaState>>,
@@ -89,6 +95,7 @@ impl Edot {
                 self.open.push(tab);
             }
         }
+        self.closed_tabs.retain(|tab| tab.id != id);
         self.session.active = Some(id);
         self.local.last = None;
         if focus {
@@ -184,15 +191,31 @@ impl Edot {
             return;
         };
         let mut cursor = 0;
-        self.open.retain(|_| {
+        let mut kept = 0;
+        self.open.retain(|tab| {
             let keep = match mode {
                 CloseMode::Others => cursor == index,
                 CloseMode::ToRight => cursor <= index,
                 CloseMode::Current => cursor != index,
             };
             cursor += 1;
+            if keep {
+                kept += 1;
+            } else {
+                // Position after earlier removals, so undoing a batch in reverse
+                // order restores the original tab order.
+                self.closed_tabs.push(ClosedTab {
+                    id: tab.id,
+                    index: kept,
+                });
+            }
             keep
         });
+        let excess = self
+            .closed_tabs
+            .len()
+            .saturating_sub(CLOSED_TAB_HISTORY_LIMIT);
+        self.closed_tabs.drain(..excess);
         if self
             .session
             .active
@@ -201,9 +224,31 @@ impl Edot {
             self.session.active = None;
             if let Some(tab) = self.open.get(index.min(self.open.len().saturating_sub(1))) {
                 self.open_note(tab.id, true, window, cx);
+            } else {
+                self.focus.focus(window, cx);
             }
         }
         cx.notify();
+    }
+    pub(super) fn reopen_closed_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        while let Some(closed) = self.closed_tabs.last().copied() {
+            if self.book.get(closed.id).is_none() || self.open.iter().any(|tab| tab.id == closed.id)
+            {
+                self.closed_tabs.pop();
+                continue;
+            }
+            // Failed reads/renames keep the record available for a later retry.
+            if !self.open_note(closed.id, true, window, cx) {
+                return;
+            }
+            // open_note appends new tabs and removes their closed history entry.
+            let tab = self.open.pop().unwrap();
+            let index = closed.index.min(self.open.len());
+            self.open.insert(index, tab);
+            self.tab_scroll.scroll_to_item(index);
+            cx.notify();
+            return;
+        }
     }
     pub(super) fn reorder_tab(&mut self, id: u64, gap: usize, cx: &mut Context<Self>) {
         let Some(index) = self.open.iter().position(|tab| tab.id == id) else {

@@ -51,10 +51,12 @@ impl Edot {
         } else if ctrl && key == "s" {
             self.finish_rename(true, false, window, cx);
             self.save_all(cx);
-        } else if ctrl && key == "w" {
+        } else if ctrl && (key == "w" || key == "f4" && !shift && !event.keystroke.modifiers.alt) {
             if let Some(id) = self.session.active {
                 self.close_tabs(id, crate::tabs::CloseMode::Current, window, cx);
             }
+        } else if ctrl && shift && key == "t" && !event.keystroke.modifiers.alt {
+            self.reopen_closed_tab(window, cx);
         } else if ctrl && key == "b" {
             self.session.sidebar_visible = !self.session.sidebar_visible;
         } else if ctrl && key == "," {
