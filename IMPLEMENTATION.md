@@ -289,6 +289,14 @@ UI 기본 글꼴은 Segoe UI 15px, 본문 기본값은 Consolas 18px다. SVG 아
 | `storage.rs`, `settings.rs`, `session.rs`, `datetime.rs` | 파일 교체, 설정·세션 형식, 지역 날짜·시간 |
 | `lib.rs`, `desktop/tests.rs`, `desktop/tests/` | UI 독립 모듈 공개, 단위 테스트·별도 저장소를 쓰는 headless UI 테스트 |
 
+빌드·의존성 검증 도구는 다음 세 파일로 관리한다.
+
+| 도구 | 역할 |
+| --- | --- |
+| `tools/configure_path_remap.py` | 실제 checkout·의존성·Rust 경로를 읽어 로컬 Cargo 경로 치환 설정 생성 |
+| `tools/check_gpui_features.py` | GPUI Git revision 일치, Windows manifest와 코덱·SVG 기능 제한 검사 |
+| `tools/check_binary_paths.py` | 최종 EXE의 절대 소스·빌드 경로 검사 |
+
 새 checkout이나 Rust/Cargo 캐시·Git 의존성 revision 변경 후에는 `tools/configure_path_remap.py`로 로컬 `.cargo/path-remap.toml`을 생성한다. 이 파일은 Git에서 제외되며 `.cargo/config.toml`이 필수 include한다. Git rev를 바꾼 경우 기존 설정이 있는 상태에서 Cargo metadata로 lockfile을 먼저 갱신한 뒤 재생성한다.
 
 ```powershell
