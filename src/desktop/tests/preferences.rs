@@ -1,6 +1,39 @@
 use super::*;
 
 #[gpui::test]
+fn wrap_switch_only_toggles_near_status_and_track(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    f.update(cx, |this, w, cx| this.show_settings(w, cx));
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let label = visual.debug_bounds("settings-wrap-label").unwrap();
+    let control = visual.debug_bounds("settings-wrap").unwrap();
+    let track = visual.debug_bounds("settings-wrap-track").unwrap();
+    for x in [
+        label.left() + px(10.),
+        label.right() - px(10.),
+        control.left() - px(2.),
+    ] {
+        visual.simulate_click(point(x, control.center().y), Default::default());
+        visual.update(|w, cx| w.render_frame(cx));
+        f.update(cx, |this, _, _| {
+            assert!(this.settings_visible);
+            assert!(this.settings.wrap);
+        });
+    }
+    // The status text and the track are both interactive.
+    visual.simulate_click(
+        point(control.left() + px(14.), control.center().y),
+        Default::default(),
+    );
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |this, _, _| assert!(!this.settings.wrap));
+    visual.simulate_click(track.center(), Default::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |this, _, _| assert!(this.settings.wrap));
+}
+
+#[gpui::test]
 fn wrap_switch_animates_reverses_and_respects_reduced_motion(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     f.update(cx, |this, window, cx| this.show_settings(window, cx));

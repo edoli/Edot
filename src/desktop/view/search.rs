@@ -10,6 +10,7 @@ impl Edot {
         let panel = if global { &self.global } else { &self.local };
         let query = Input::new(&panel.query)
             .small()
+            .text_size(px(SEARCH_INPUT_FONT_SIZE))
             .aria_label(if global {
                 "전체 메모 검색어"
             } else {
@@ -88,6 +89,7 @@ impl Edot {
                     div().when(global, |d| d.pl(px(18.))).child(
                         Input::new(&panel.replacement)
                             .small()
+                            .text_size(px(SEARCH_INPUT_FONT_SIZE))
                             .aria_label(if global {
                                 "전체 메모 바꿀 내용"
                             } else {

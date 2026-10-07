@@ -90,7 +90,7 @@ impl InputState {
                 })
             }
             "up" | "down" | "pageup" | "pagedown" if self.multiline => {
-                let p = self.position(cursor);
+                let p = self.caret_position();
                 let x = self.preferred_x.unwrap_or(p.x);
                 self.preferred_x = Some(x);
                 let step = if key.starts_with("page") {
@@ -152,6 +152,12 @@ impl InputState {
         self.index_at(point(if end { px(1e8) } else { px(0.) }, p.y))
     }
     pub(super) fn position(&self, at: usize) -> Point<Pixels> {
+        self.position_with_wrap_side(at, false)
+    }
+    pub(super) fn caret_position(&self) -> Point<Pixels> {
+        self.position_with_wrap_side(self.cursor(), self.reversed && !self.selection.is_empty())
+    }
+    pub(super) fn position_with_wrap_side(&self, at: usize, after_wrap: bool) -> Point<Pixels> {
         let i = self
             .lines
             .partition_point(|l| l.start <= at)
@@ -159,24 +165,76 @@ impl InputState {
         self.lines.get(i).map_or(
             point(self.content_padding.left, self.content_padding.top),
             |p| {
-                p.position(at.min(p.end) - p.start, self.line_height)
-                    + point(self.content_padding.left, p.top)
+                let byte = at.min(p.end) - p.start;
+                let pos = if after_wrap {
+                    p.position_after_wrap(byte, self.line_height)
+                } else {
+                    p.position(byte, self.line_height)
+                };
+                pos + point(self.content_padding.left, p.top)
             },
         )
     }
     pub(super) fn index_at(&self, p: Point<Pixels>) -> usize {
+        if self.content.is_empty() {
+            // Placeholder glyphs are not editable text (including multi-clicks).
+            return 0;
+        }
+        if self.multiline {
+            if self.lines.first().is_some_and(|l| p.y < l.top) {
+                return 0;
+            }
+            if self
+                .lines
+                .last()
+                .is_some_and(|l| p.y >= l.top + l.line.size(self.line_height).height)
+            {
+                return self.content.len();
+            }
+        }
         let p = point(p.x - self.content_padding.left, p.y);
         let i = self
             .lines
             .partition_point(|l| l.top <= p.y)
             .saturating_sub(1);
         self.lines.get(i).map_or(0, |l| {
-            l.start
-                + l.source_index(
-                    l.line
-                        .index_for_position(point(p.x, (p.y - l.top).max(px(0.))), self.line_height)
-                        .unwrap_or_else(|i| i),
-                )
+            // A single-line field's vertical padding must still use its text row.
+            let y = if self.multiline {
+                (p.y - l.top).max(px(0.))
+            } else {
+                px(0.)
+            };
+            let at = self.boundary(
+                l.start
+                    + l.source_index(
+                        l.line
+                            .index_for_position(point(p.x, y), self.line_height)
+                            .unwrap_or_else(|i| i),
+                    ),
+            );
+            // Shaping returns the glyph under the pointer. Choose the nearest
+            // caret instead, keeping combining sequences and emoji indivisible.
+            let mut cursor =
+                unicode_segmentation::GraphemeCursor::new(at, self.content.len(), true);
+            let start = if cursor.is_boundary(&self.content, 0).expect("complete text") {
+                at
+            } else {
+                cursor
+                    .prev_boundary(&self.content, 0)
+                    .expect("complete text")
+                    .unwrap_or(0)
+            };
+            let end = self.next(start).min(l.end);
+            let left = l.position(start - l.start, self.line_height);
+            let right = l.position(end - l.start, self.line_height);
+            // A wrap boundary's caret is represented at the preceding row's end.
+            let row_top = (y / self.line_height).floor() * self.line_height;
+            let left_x = if left.y < row_top { px(0.) } else { left.x };
+            if right.y == row_top && p.x > (left_x + right.x) / 2. {
+                end
+            } else {
+                start
+            }
         })
     }
     pub(super) fn mouse_index(&self, position: Point<Pixels>) -> usize {
@@ -234,6 +292,7 @@ impl InputState {
             return;
         }
         self.selecting = true;
+        self.preferred_x = None;
         let at = self.mouse_index(e.position);
         if e.click_count >= 3 {
             let start = self.content[..at].rfind(['\n', '\r']).map_or(0, |i| i + 1);

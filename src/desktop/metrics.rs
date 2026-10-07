@@ -11,6 +11,7 @@ pub(super) const TREE_INDENT: f32 = 22.;
 // Row padding + disclosure width + gap: insertion lines start at the note icon.
 pub(super) const TREE_ICON_LEFT: f32 = 24.;
 pub(super) const SEARCH_ROW_HEIGHT: f32 = 26.;
+pub(super) const SEARCH_INPUT_FONT_SIZE: f32 = 14.;
 pub(super) const TREE_SCROLL_EDGE: f32 = 24.;
 pub(super) const TREE_SCROLL_ROWS: f32 = 2.;
 pub(super) const TREE_SCROLL_INTERVAL: Duration = Duration::from_millis(160);

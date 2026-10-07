@@ -1,6 +1,319 @@
 use super::*;
 
 #[gpui::test]
+fn wrapped_word_selection_paints_only_its_visual_row(cx: &mut TestAppContext) {
+    use crate::widgets::ActiveTheme;
+    use gpui::EntityInputHandler;
+    let f = Fixture::new(cx);
+    let prefix = "prefix ".repeat(4);
+    let word = "IMPLEMENTATION.md";
+    let start = prefix.len();
+    let end = start + word.len();
+    let editor = f.update(cx, |this, w, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| {
+            s.set_value(format!("{prefix}{word} tail"), w, cx);
+            s.focus(w, cx);
+        });
+        editor
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.simulate_resize(size(px(620.), px(760.)));
+    for scale in [1., 1.25, 1.5, 2.] {
+        visual.simulate_scale_factor_change(scale);
+        visual.update(|w, cx| w.render_frame(cx));
+        let body = visual.debug_bounds("body-editor").unwrap();
+        let (first, inside, last) = f.update(cx, |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                (
+                    s.bounds_for_range(0..0, Bounds::default(), w, cx).unwrap(),
+                    s.bounds_for_range(start + 1..start + 1, Bounds::default(), w, cx)
+                        .unwrap(),
+                    s.bounds_for_range(end..end, Bounds::default(), w, cx)
+                        .unwrap(),
+                )
+            })
+        });
+        assert!(inside.top() > first.top(), "the word must wrap");
+        let word_start = point(first.left() + px(0.1), inside.center().y);
+        f.update(cx, |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                assert_eq!(s.character_index_for_point(word_start, w, cx), Some(start));
+            })
+        });
+        for range in [start..end, 0..start, start..start] {
+            f.update(cx, |_, _, cx| {
+                editor.update(cx, |s, cx| s.set_selected_range(range.clone(), cx))
+            });
+            visual.update(|w, cx| w.render_frame(cx));
+            f.update(cx, |_, w, cx| {
+                let quads: Vec<_> = w
+                    .painted_quads()
+                    .into_iter()
+                    .filter(|q| {
+                        q.background == cx.theme().selection.into()
+                            && body.scale(scale).contains(&q.bounds.origin)
+                    })
+                    .collect();
+                if range.is_empty() {
+                    assert!(quads.is_empty(), "a caret has no selection background");
+                } else {
+                    assert_eq!(
+                        quads.len(),
+                        1,
+                        "selection {range:?} must not spill across a wrap"
+                    );
+                    let expected = if range.start == start { inside } else { first };
+                    // Painted quads snap to physical pixels at fractional DPI.
+                    assert!((quads[0].bounds.top().0 - expected.scale(scale).top().0).abs() <= 1.);
+                    assert!((quads[0].bounds.left().0 - first.scale(scale).left().0).abs() <= 1.);
+                    if range.start == start {
+                        assert!(
+                            (quads[0].bounds.right().0 - last.scale(scale).left().0).abs() <= 1.
+                        );
+                    }
+                    assert_eq!(
+                        editor.read(cx).selected_value(),
+                        if range.start == start { word } else { &prefix }
+                    );
+                }
+            });
+        }
+        // Selecting backwards must place the active caret on the word's row too.
+        visual.simulate_click(point(last.left(), last.center().y), Default::default());
+        visual.simulate_click(
+            word_start,
+            gpui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        );
+        visual.update(|w, cx| w.render_frame(cx));
+        f.update(cx, |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                assert_eq!(s.selected_range(), start..end);
+                assert_eq!(s.cursor(), start);
+                let caret = s
+                    .bounds_for_range(start..start, Bounds::default(), w, cx)
+                    .unwrap();
+                assert_eq!(caret.top(), inside.top());
+                assert_eq!(caret.left(), first.left());
+            })
+        });
+        // IME composition uses the same start/end distinction as selection.
+        f.update(cx, |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                s.replace_and_mark_text_in_range(Some(start..end), word, None, w, cx);
+            })
+        });
+        visual.update(|w, cx| w.render_frame(cx));
+        f.update(cx, |_, w, cx| {
+            let underlines: Vec<_> = w
+                .painted_quads()
+                .into_iter()
+                .filter(|q| {
+                    q.background == cx.theme().foreground.into()
+                        && q.bounds.size.height.0 <= scale + 1.
+                        && q.bounds.size.width.0 > 4. * scale
+                        && body.scale(scale).contains(&q.bounds.origin)
+                })
+                .collect();
+            assert_eq!(underlines.len(), 1);
+            assert!(underlines[0].bounds.top() >= inside.scale(scale).top());
+            assert!(underlines[0].bounds.bottom() <= inside.scale(scale).bottom());
+            editor.update(cx, |s, cx| s.unmark_text(w, cx));
+        });
+    }
+}
+
+#[gpui::test]
+fn mouse_selection_below_document_anchors_at_end(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler;
+    let f = Fixture::new(cx);
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    for wrap in [false, true] {
+        for text in [
+            "first\r\n마지막🙂".to_owned(),
+            "first\r\n마지막🙂\r\n".to_owned(),
+            "wrapped words ".repeat(25),
+            String::new(),
+        ] {
+            let editor = f.update(cx, |this, w, cx| {
+                let editor = this.active_editor().unwrap();
+                editor.update(cx, |s, cx| {
+                    s.set_soft_wrap(wrap, w, cx);
+                    s.set_value(text.clone(), w, cx);
+                });
+                editor
+            });
+            visual.update(|w, cx| w.render_frame(cx));
+            let body = visual.debug_bounds("body-editor").unwrap();
+            let first = f.update(cx, |_, w, cx| {
+                editor.update(cx, |s, cx| {
+                    s.bounds_for_range(0..0, Bounds::default(), w, cx).unwrap()
+                })
+            });
+            // Left-side whitespace well below the last visual row.
+            let below = point(first.left() + px(1.), body.bottom() - px(25.));
+            visual.simulate_mouse_down(below, gpui::MouseButton::Left, Default::default());
+            f.update(cx, |_, _, cx| {
+                assert_eq!(editor.read(cx).selected_range(), text.len()..text.len());
+            });
+            // A long unwrapped line may have scrolled horizontally to reveal
+            // the new caret. The upper margin still reaches document start.
+            let start = point(first.left(), body.top() + px(1.));
+            visual.simulate_mouse_move(start, Some(gpui::MouseButton::Left), Default::default());
+            f.update(cx, |_, _, cx| {
+                assert_eq!(editor.read(cx).selected_range(), 0..text.len());
+            });
+            visual.simulate_mouse_up(start, gpui::MouseButton::Left, Default::default());
+            // The upper margin also maps to the document boundary, regardless of x.
+            visual.simulate_click(
+                point(body.right() - px(30.), body.top() + px(1.)),
+                Default::default(),
+            );
+            f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).cursor(), 0));
+            visual.simulate_click(
+                below,
+                gpui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            );
+            f.update(cx, |_, _, cx| {
+                assert_eq!(editor.read(cx).selected_range(), 0..text.len())
+            });
+        }
+    }
+}
+
+#[gpui::test]
+fn mouse_hit_testing_keeps_graphemes_and_tabs_atomic(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler;
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = "Wa\u{301}\t한👨‍👩‍👧‍👦W";
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, w, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| s.set_value(text, w, cx));
+        editor
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    for (byte, grapheme) in text.grapheme_indices(true) {
+        let end = byte + grapheme.len();
+        let from = text[..byte].encode_utf16().count();
+        let to = text[..end].encode_utf16().count();
+        let (left, right) = f.update(cx, |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                (
+                    s.bounds_for_range(from..from, Bounds::default(), w, cx)
+                        .unwrap(),
+                    s.bounds_for_range(to..to, Bounds::default(), w, cx)
+                        .unwrap(),
+                )
+            })
+        });
+        for (fraction, expected) in [(0.25, byte), (0.75, end)] {
+            visual.simulate_click(
+                point(
+                    left.left() + (right.left() - left.left()) * fraction,
+                    left.center().y,
+                ),
+                Default::default(),
+            );
+            f.update(cx, |_, _, cx| {
+                assert_eq!(
+                    editor.read(cx).cursor(),
+                    expected,
+                    "{grapheme:?} at {fraction}"
+                )
+            });
+        }
+    }
+}
+
+#[gpui::test]
+fn mouse_uses_nearest_caret_and_resets_keyboard_column(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler;
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, w, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| {
+            s.set_value("WWWWWW\nWWWWWW\nWWWWWW", w, cx);
+            s.set_selected_range(5..5, cx);
+            s.focus(w, cx);
+        });
+        editor
+    });
+    f.press(cx, "down");
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let (left, right) = f.update(cx, |_, w, cx| {
+        editor.update(cx, |s, cx| {
+            (
+                s.bounds_for_range(7..7, Bounds::default(), w, cx).unwrap(),
+                s.bounds_for_range(8..8, Bounds::default(), w, cx).unwrap(),
+            )
+        })
+    });
+    for (fraction, expected) in [(0.25, 7), (0.75, 8)] {
+        visual.simulate_click(
+            point(
+                left.left() + (right.left() - left.left()) * fraction,
+                left.center().y,
+            ),
+            Default::default(),
+        );
+        f.update(cx, |_, _, cx| {
+            assert_eq!(editor.read(cx).cursor(), expected)
+        });
+    }
+    f.press(cx, "down");
+    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).cursor(), 15));
+}
+
+#[gpui::test]
+fn single_line_vertical_padding_keeps_horizontal_hit_testing(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler;
+    let f = Fixture::new(cx);
+    let query = f.update(cx, |this, w, cx| {
+        this.show_find(false, false, w, cx);
+        let query = this.local.query.clone();
+        query.update(cx, |s, cx| s.set_value("WWWW", w, cx));
+        query
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let field = visual.debug_bounds("현재 메모 검색어").unwrap();
+    let caret = f.update(cx, |_, w, cx| {
+        query.update(cx, |s, cx| {
+            s.bounds_for_range(2..2, Bounds::default(), w, cx).unwrap()
+        })
+    });
+    for y in [field.top() + px(2.), field.bottom() - px(2.)] {
+        visual.simulate_click(point(caret.left() + px(0.1), y), Default::default());
+        f.update(cx, |_, _, cx| assert_eq!(query.read(cx).cursor(), 2));
+    }
+    f.update(cx, |_, w, cx| {
+        query.update(cx, |s, cx| s.set_value("", w, cx))
+    });
+    visual.update(|w, cx| w.render_frame(cx));
+    for click_count in [2, 3] {
+        visual.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: point(field.left() + px(40.), field.center().y),
+            click_count,
+            ..Default::default()
+        });
+        visual.simulate_mouse_up(field.center(), gpui::MouseButton::Left, Default::default());
+        f.update(cx, |_, _, cx| {
+            assert_eq!(query.read(cx).selected_range(), 0..0)
+        });
+    }
+}
+
+#[gpui::test]
 fn korean_ime_protocol_and_emoji_selection_are_atomic(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let editor = f.update(cx, |this, window, cx| {

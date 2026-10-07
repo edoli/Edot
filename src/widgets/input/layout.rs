@@ -2,16 +2,31 @@
 use super::*;
 
 impl Paragraph {
-    pub(super) fn position(&self, byte: usize, height: Pixels) -> Point<Pixels> {
-        let added: usize = self
+    fn display_index(&self, byte: usize) -> usize {
+        byte + self
             .tabs
             .iter()
             .filter(|(source, _, _)| *source < byte)
             .map(|(_, _, spaces)| spaces - 1)
-            .sum();
+            .sum::<usize>()
+    }
+    pub(super) fn position(&self, byte: usize, height: Pixels) -> Point<Pixels> {
         self.line
-            .position_for_index(byte + added, height)
+            .position_for_index(self.display_index(byte), height)
             .unwrap_or_default()
+    }
+    pub(super) fn position_after_wrap(&self, byte: usize, height: Pixels) -> Point<Pixels> {
+        let pos = self.position(byte, height);
+        let row = (pos.y / height).round() as usize;
+        if self.line.wrap_boundaries.get(row).is_some_and(|boundary| {
+            self.line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
+                == self.display_index(byte)
+        }) {
+            // The same byte is both the preceding row's end and this row's start.
+            point(px(0.), pos.y + height)
+        } else {
+            pos
+        }
     }
     pub(super) fn source_index(&self, display: usize) -> usize {
         let mut removed = 0;
@@ -20,7 +35,7 @@ impl Paragraph {
                 break;
             }
             if display < start + spaces {
-                return source + usize::from(display - start >= spaces / 2);
+                return source;
             }
             removed += spaces - 1;
         }
@@ -148,7 +163,7 @@ impl InputState {
             self.layout_key = Some(key);
         }
         if self.reveal {
-            let caret = self.position(self.cursor());
+            let caret = self.caret_position();
             if self.cursor() == 0 {
                 self.scroll = Point::default();
             }
@@ -196,8 +211,12 @@ impl InputState {
             let pos = origin + point(self.content_padding.left, l.top);
             let start = self.selection.start.max(l.start);
             let end = self.selection.end.min(l.end);
-            if start <= end && self.selection.end > l.start && self.selection.start <= l.end {
-                let a = l.position(start - l.start, self.line_height);
+            if !self.selection.is_empty()
+                && start <= end
+                && self.selection.end > l.start
+                && self.selection.start <= l.end
+            {
+                let a = l.position_after_wrap(start - l.start, self.line_height);
                 let b = l.position(end - l.start, self.line_height);
                 let mut y = a.y;
                 while y <= b.y {
@@ -224,7 +243,7 @@ impl InputState {
                 let start = marked.start.max(l.start);
                 let end = marked.end.min(l.end);
                 if start < end {
-                    let a = l.position(start - l.start, self.line_height);
+                    let a = l.position_after_wrap(start - l.start, self.line_height);
                     let b = l.position(end - l.start, self.line_height);
                     let mut y = a.y;
                     while y <= b.y {
@@ -249,7 +268,7 @@ impl InputState {
         if focused && self.blink {
             window.paint_quad(fill(
                 Bounds::new(
-                    origin + self.position(self.cursor()),
+                    origin + self.caret_position(),
                     size(px(1.5), self.line_height),
                 ),
                 cx.theme().foreground,

@@ -117,7 +117,11 @@ impl EntityInputHandler for InputState {
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let r = self.range_from_utf16(&r);
-        let a = self.position(r.start);
+        let a = if r.is_empty() && r.start == self.cursor() {
+            self.caret_position()
+        } else {
+            self.position_with_wrap_side(r.start, !r.is_empty())
+        };
         let b = self.position(r.end);
         Some(Bounds::new(
             self.bounds.origin + self.scroll + a,

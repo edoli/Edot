@@ -135,15 +135,6 @@ impl Edot {
                             .child(title.clone())
                             .into_any_element()
                     })
-                    .when(tab.dirty, |row| {
-                        row.child(
-                            div()
-                                .size(px(5.))
-                                .flex_shrink_0()
-                                .rounded_full()
-                                .bg(cx.theme().primary),
-                        )
-                    })
                     .child(
                         div()
                             .id(("close-tab", id))
