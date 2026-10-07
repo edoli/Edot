@@ -155,4 +155,5 @@ mod layout;
 mod menus;
 mod preferences;
 mod search;
+mod shortcuts;
 mod tree;

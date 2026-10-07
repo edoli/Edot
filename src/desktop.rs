@@ -30,6 +30,7 @@ mod interaction;
 mod keyboard;
 mod preferences;
 mod search_ui;
+mod shortcuts;
 #[cfg(test)]
 mod tests;
 mod tree;
@@ -47,6 +48,7 @@ pub struct Edot {
     session: Session,
     open: Vec<OpenTab>,
     closed_tabs: Vec<ClosedTab>,
+    shortcut_help: Option<Entity<shortcuts::ShortcutHelp>>,
     tree_focus: FocusHandle,
     results_focus: FocusHandle,
     focus: FocusHandle,
@@ -109,6 +111,7 @@ impl Edot {
             session,
             open: vec![],
             closed_tabs: vec![],
+            shortcut_help: None,
             tree_focus: cx.focus_handle(),
             results_focus: cx.focus_handle(),
             focus: cx.focus_handle(),

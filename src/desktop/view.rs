@@ -257,6 +257,9 @@ impl Render for Edot {
                 .with_priority(1),
             );
         }
+        if let Some(help) = &self.shortcut_help {
+            root = root.child(help.clone());
+        }
         if let Some(error) = &self.error {
             root = root.child(
                 div()

@@ -21,6 +21,16 @@ impl Edot {
         }
         let ctrl = event.keystroke.modifiers.control;
         let shift = event.keystroke.modifiers.shift;
+        if self.shortcut_help.is_some() {
+            return;
+        }
+        if key == "f1" && event.keystroke.modifiers == Modifiers::default() {
+            if !event.is_held {
+                self.show_shortcuts(window, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         let tree = self.tree_focus.is_focused(window);
         let results = self.results_focus.is_focused(window);
         let title = self.rename.is_some()

@@ -60,8 +60,11 @@ pub struct Scrollbar {
 }
 impl Scrollbar {
     pub fn vertical(handle: &UniformListScrollHandle) -> Self {
+        Self::vertical_handle(&handle.0.borrow().base_handle)
+    }
+    pub fn vertical_handle(handle: &ScrollHandle) -> Self {
         Self {
-            handle: handle.0.borrow().base_handle.clone(),
+            handle: handle.clone(),
             horizontal: false,
         }
     }
