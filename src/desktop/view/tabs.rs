@@ -66,17 +66,22 @@ impl Edot {
                     .whitespace_nowrap()
                     .when(active, |row| {
                         row.bg(cx.theme().background)
-                            .border_l_1()
-                            .border_r_1()
-                            .border_t_1()
-                            .rounded_t(px(6.))
                             .border_color(cx.theme().border)
                             .child(
                                 div()
                                     .absolute()
+                                    .right_0()
+                                    .top(px(7.))
+                                    .bottom(px(7.))
+                                    .w(px(1.))
+                                    .bg(cx.theme().border),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
                                     .top(px(1.))
-                                    .left(px(4.))
-                                    .right(px(4.))
+                                    .left(px(2.))
+                                    .right(px(2.))
                                     .h(px(2.))
                                     .bg(cx.theme().primary),
                             )
