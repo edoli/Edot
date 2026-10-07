@@ -65,101 +65,198 @@ impl Scrollbar {
         }
     }
 }
-#[derive(Clone)]
-struct ScrollDrag {
-    start: Rc<std::cell::Cell<Pixels>>,
-    offset: Pixels,
-}
-struct EmptyDrag;
-impl Render for EmptyDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
+#[derive(Default)]
+struct ScrollbarState {
+    drag: Option<(Pixels, Pixels)>,
+    hovered: bool,
 }
 impl RenderOnce for Scrollbar {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let handle = self.handle;
-        let bounds = handle.bounds();
-        let offset = handle.offset();
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let horizontal = self.horizontal;
-        let max = handle.max_offset();
-        let viewport = if horizontal {
-            bounds.size.width
+        let id = if horizontal {
+            "h-scrollbar"
         } else {
-            bounds.size.height
+            "v-scrollbar"
         };
-        let extent = if horizontal { max.x } else { max.y };
-        let thumb = (viewport * (viewport / (viewport + extent).max(px(1.))))
-            .max(px(22.))
-            .min(viewport);
-        let available = (viewport - thumb).max(px(1.));
-        let current = if horizontal { offset.x } else { offset.y };
-        let pos = available * (-current / extent.max(px(1.)));
-        let click_handle = handle.clone();
-        let drag_handle = handle.clone();
+        let state = window.use_keyed_state(id, cx, |_, _| ScrollbarState::default());
+        let handle = self.handle;
+        let layout_handle = handle.clone();
+        let layout_state = state.clone();
         div()
-            .id(if horizontal {
-                "h-scrollbar"
-            } else {
-                "v-scrollbar"
-            })
+            .id(id)
+            .debug_selector(move || id.into())
             .absolute()
-            .when(horizontal, |d| d.bottom_0().left_0().w_full().h(px(8.)))
-            .when(!horizontal, |d| d.right_0().top_0().h_full().w(px(8.)))
-            .when(extent <= px(0.), |d| d.invisible())
-            .on_mouse_down(MouseButton::Left, move |e, w, _| {
-                let at = if horizontal {
-                    e.position.x - bounds.left()
-                } else {
-                    e.position.y - bounds.top()
-                };
-                let value = -(extent * ((at - thumb / 2.) / available)).clamp(px(0.), extent);
-                let mut p = click_handle.offset();
-                if horizontal {
-                    p.x = value
-                } else {
-                    p.y = value
-                }
-                click_handle.set_offset(p);
-                w.refresh();
-            })
+            .when(horizontal, |d| d.bottom_0().left_0().w_full().h(px(10.)))
+            .when(!horizontal, |d| d.right_0().top_0().h_full().w(px(10.)))
             .child(
-                div()
-                    .id("thumb")
-                    .absolute()
-                    .rounded_md()
-                    .bg(cx.theme().muted_foreground.opacity(0.45))
-                    .when(horizontal, |d| d.left(pos).w(thumb).h(px(6.)))
-                    .when(!horizontal, |d| d.top(pos).h(thumb).w(px(6.)))
-                    .on_drag(
-                        ScrollDrag {
-                            start: Rc::new(std::cell::Cell::new(px(0.))),
-                            offset: current,
-                        },
-                        move |drag, _, w, cx| {
-                            let p = w.mouse_position();
-                            drag.start.set(if horizontal { p.x } else { p.y });
-                            cx.new(|_| EmptyDrag)
-                        },
-                    )
-                    .on_drag_move(move |e: &DragMoveEvent<ScrollDrag>, w, cx| {
-                        let drag = e.drag(cx);
-                        let at = if horizontal {
-                            e.event.position.x
-                        } else {
-                            e.event.position.y
-                        };
-                        let value = (drag.offset - extent * ((at - drag.start.get()) / available))
-                            .clamp(-extent, px(0.));
-                        let mut p = drag_handle.offset();
-                        if horizontal {
-                            p.x = value
-                        } else {
-                            p.y = value
+                canvas(
+                    move |bounds, window, cx| {
+                        // The sibling viewport has completed prepaint, so these metrics
+                        // include this frame's layout and scroll offset.
+                        let max = layout_handle.max_offset();
+                        let extent = if horizontal { max.x } else { max.y };
+                        if extent <= px(0.) {
+                            return None;
                         }
-                        drag_handle.set_offset(p);
-                        w.refresh();
-                    }),
+                        let viewport = if horizontal {
+                            bounds.size.width
+                        } else {
+                            bounds.size.height
+                        };
+                        let length = (viewport * (viewport / (viewport + extent)))
+                            .max(px(22.))
+                            .min(viewport);
+                        let available = (viewport - length).max(px(1.));
+                        let offset = layout_handle.offset();
+                        let current = if horizontal { offset.x } else { offset.y };
+                        let pos = available * (-current / extent);
+                        let thumb = if horizontal {
+                            Bounds::new(
+                                point(bounds.left() + pos, bounds.top() + px(2.)),
+                                size(length, px(6.)),
+                            )
+                        } else {
+                            Bounds::new(
+                                point(bounds.left() + px(2.), bounds.top() + pos),
+                                size(px(6.), length),
+                            )
+                        };
+                        let capture = layout_state.read(cx).drag.map(|_| {
+                            window.insert_hitbox(
+                                Bounds::new(point(px(0.), px(0.)), window.viewport_size()),
+                                HitboxBehavior::BlockMouse,
+                            )
+                        });
+                        let hitbox =
+                            window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll);
+                        Some((hitbox, capture, thumb, extent, available, current))
+                    },
+                    move |bounds, layout, window, cx| {
+                        let Some((hitbox, capture, thumb, extent, available, current)) = layout
+                        else {
+                            return;
+                        };
+                        let hovered = hitbox.is_hovered(window);
+                        state.update(cx, |s, _| s.hovered = hovered);
+                        let active = state.read(cx).drag.is_some();
+                        window.set_cursor_style(CursorStyle::Arrow, &hitbox);
+                        if let Some(capture) = &capture {
+                            window.set_cursor_style(CursorStyle::Arrow, capture);
+                        }
+                        if active || hovered {
+                            window.paint_quad(fill(bounds, cx.theme().primary.opacity(0.1)));
+                        }
+                        window.paint_quad(quad(
+                            thumb,
+                            px(3.),
+                            if active || hovered {
+                                cx.theme().primary
+                            } else {
+                                cx.theme().muted_foreground.opacity(0.5)
+                            },
+                            px(0.),
+                            transparent_black(),
+                            BorderStyle::Solid,
+                        ));
+                        let down_state = state.clone();
+                        let down_handle = handle.clone();
+                        let down_hitbox = hitbox.clone();
+                        window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Bubble
+                                || e.button != MouseButton::Left
+                                || !down_hitbox.is_hovered(window)
+                            {
+                                return;
+                            }
+                            let at = if horizontal {
+                                e.position.x
+                            } else {
+                                e.position.y
+                            };
+                            let start = if horizontal {
+                                thumb.left()
+                            } else {
+                                thumb.top()
+                            };
+                            let length = if horizontal {
+                                thumb.size.width
+                            } else {
+                                thumb.size.height
+                            };
+                            let origin = if horizontal {
+                                bounds.left()
+                            } else {
+                                bounds.top()
+                            };
+                            let value = if at >= start && at <= start + length {
+                                current
+                            } else {
+                                -(extent * ((at - origin - length / 2.) / available))
+                                    .clamp(px(0.), extent)
+                            };
+                            let mut offset = down_handle.offset();
+                            if horizontal {
+                                offset.x = value;
+                            } else {
+                                offset.y = value;
+                            }
+                            down_handle.set_offset(offset);
+                            down_state.update(cx, |s, cx| {
+                                s.drag = Some((at, value));
+                                cx.notify();
+                            });
+                            window.refresh();
+                            cx.stop_propagation();
+                        });
+                        let move_state = state.clone();
+                        let move_handle = handle.clone();
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            move_state.update(cx, |s, cx| {
+                                let hovered = hitbox.is_hovered(window);
+                                if s.hovered != hovered {
+                                    s.hovered = hovered;
+                                    cx.notify();
+                                }
+                                if let Some((start, offset)) = s.drag {
+                                    let at = if horizontal {
+                                        e.position.x
+                                    } else {
+                                        e.position.y
+                                    };
+                                    let value = (offset - extent * ((at - start) / available))
+                                        .clamp(-extent, px(0.));
+                                    let mut p = move_handle.offset();
+                                    if horizontal {
+                                        p.x = value;
+                                    } else {
+                                        p.y = value;
+                                    }
+                                    move_handle.set_offset(p);
+                                    window.refresh();
+                                    cx.stop_propagation();
+                                }
+                            });
+                        });
+                        let up_state = state.clone();
+                        window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
+                            if phase == DispatchPhase::Capture
+                                && e.button == MouseButton::Left
+                                && up_state.read(cx).drag.is_some()
+                            {
+                                up_state.update(cx, |s, cx| {
+                                    s.drag = None;
+                                    cx.notify();
+                                });
+                                window.refresh();
+                                cx.stop_propagation();
+                            }
+                        });
+                    },
+                )
+                .size_full(),
             )
     }
 }

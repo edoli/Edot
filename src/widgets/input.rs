@@ -99,6 +99,8 @@ pub struct InputState {
     last_edit: Option<std::time::Instant>,
     focused: bool,
     scroll_drag: Option<(bool, Pixels, Pixels)>,
+    scroll_hover: Option<bool>,
+    wheel_gesture: OngoingScroll,
     multiline: bool,
     wrap: bool,
     scroll: Point<Pixels>,
@@ -170,6 +172,8 @@ impl InputState {
             last_edit: None,
             focused: false,
             scroll_drag: None,
+            scroll_hover: None,
+            wheel_gesture: OngoingScroll::default(),
             multiline: false,
             wrap: false,
             scroll: point(px(0.), px(0.)),
@@ -555,38 +559,44 @@ impl InputState {
     }
     fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus(window, cx);
-        let vertical = self.content_size.height > self.bounds.size.height
-            && e.position.x >= self.bounds.right() - px(9.);
-        let horizontal = !self.wrap
-            && self.content_size.width > self.bounds.size.width
-            && e.position.y >= self.bounds.bottom() - px(9.);
-        if vertical || horizontal {
-            let axis = horizontal && !vertical;
+        if let Some((axis, track, thumb)) = [false, true]
+            .into_iter()
+            .filter_map(|axis| {
+                self.scrollbar_geometry(axis)
+                    .map(|(track, thumb)| (axis, track, thumb))
+            })
+            .find(|(_, track, _)| track.contains(&e.position))
+        {
             let at = if axis { e.position.x } else { e.position.y };
             let viewport = if axis {
-                self.bounds.size.width
+                track.size.width
             } else {
-                self.bounds.size.height
+                track.size.height
             };
             let extent = if axis {
                 self.content_size.width
             } else {
                 self.content_size.height
             };
-            let origin = if axis {
-                self.bounds.left()
+            let origin = if axis { track.left() } else { track.top() };
+            let thumb_size = if axis {
+                thumb.size.width
             } else {
-                self.bounds.top()
+                thumb.size.height
             };
-            let thumb = (viewport * (viewport / extent)).max(px(24.));
-            let value = -((extent - viewport)
-                * ((at - origin - thumb / 2.) / (viewport - thumb).max(px(1.))))
-            .clamp(px(0.), extent - viewport);
+            let thumb_start = if axis { thumb.left() } else { thumb.top() };
+            let value = if at >= thumb_start && at <= thumb_start + thumb_size {
+                if axis { self.scroll.x } else { self.scroll.y }
+            } else {
+                -((extent - viewport)
+                    * ((at - origin - thumb_size / 2.) / (viewport - thumb_size).max(px(1.))))
+                .clamp(px(0.), extent - viewport)
+            };
             if axis {
-                self.scroll.x = value
+                self.scroll.x = value;
             } else {
-                self.scroll.y = value
-            };
+                self.scroll.y = value;
+            }
             self.scroll_drag = Some((axis, at, value));
             self.reveal = false;
             cx.notify();
@@ -627,7 +637,7 @@ impl InputState {
                 self.content_size.height
             };
             let at = if axis { e.position.x } else { e.position.y };
-            let thumb = (viewport * (viewport / extent)).max(px(24.));
+            let thumb = (viewport * (viewport / extent)).max(px(24.)).min(viewport);
             let value =
                 offset - (extent - viewport) * ((at - start) / (viewport - thumb).max(px(1.)));
             if axis {
@@ -839,33 +849,73 @@ impl InputState {
                 cx.theme().foreground,
             ));
         }
-        // A proportional overview bar; dragging is handled by the viewport element.
-        if self.multiline && self.content_size.height > self.bounds.size.height {
-            let h = (self.bounds.size.height
-                * (self.bounds.size.height / self.content_size.height))
-                .max(px(24.));
-            let y = (self.bounds.size.height - h)
-                * (-self.scroll.y / (self.content_size.height - self.bounds.size.height));
-            window.paint_quad(fill(
-                Bounds::new(
-                    point(self.bounds.right() - px(7.), self.bounds.top() + y),
-                    size(px(5.), h),
-                ),
-                cx.theme().muted_foreground.opacity(0.5),
-            ));
+        for axis in [false, true] {
+            if let Some((track, thumb)) = self.scrollbar_geometry(axis) {
+                let active = self
+                    .scroll_drag
+                    .is_some_and(|(drag_axis, _, _)| drag_axis == axis);
+                let hovered = self.scroll_hover == Some(axis);
+                if active || hovered {
+                    window.paint_quad(fill(track, cx.theme().primary.opacity(0.1)));
+                }
+                window.paint_quad(fill(
+                    thumb,
+                    if active || hovered {
+                        cx.theme().primary
+                    } else {
+                        cx.theme().muted_foreground.opacity(0.5)
+                    },
+                ));
+            }
         }
-        if self.multiline && !self.wrap && self.content_size.width > self.bounds.size.width {
-            let width = self.bounds.size.width;
-            let thumb = (width * (width / self.content_size.width)).max(px(24.));
-            let x = (width - thumb) * (-self.scroll.x / (self.content_size.width - width));
-            window.paint_quad(fill(
-                Bounds::new(
-                    point(self.bounds.left() + x, self.bounds.bottom() - px(7.)),
-                    size(thumb, px(5.)),
-                ),
-                cx.theme().muted_foreground.opacity(0.5),
-            ));
+    }
+    fn scrollbar_geometry(&self, horizontal: bool) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        if !self.multiline || (horizontal && self.wrap) {
+            return None;
         }
+        let viewport = if horizontal {
+            self.bounds.size.width
+        } else {
+            self.bounds.size.height
+        };
+        let content = if horizontal {
+            self.content_size.width
+        } else {
+            self.content_size.height
+        };
+        if content <= viewport || viewport <= px(0.) {
+            return None;
+        }
+        let length = (viewport * (viewport / content)).max(px(24.)).min(viewport);
+        let offset = if horizontal {
+            self.scroll.x
+        } else {
+            self.scroll.y
+        };
+        let pos = (viewport - length) * (-offset / (content - viewport));
+        Some(if horizontal {
+            (
+                Bounds::new(
+                    point(self.bounds.left(), self.bounds.bottom() - px(10.)),
+                    size(viewport, px(10.)),
+                ),
+                Bounds::new(
+                    point(self.bounds.left() + pos, self.bounds.bottom() - px(8.)),
+                    size(length, px(6.)),
+                ),
+            )
+        } else {
+            (
+                Bounds::new(
+                    point(self.bounds.right() - px(10.), self.bounds.top()),
+                    size(px(10.), viewport),
+                ),
+                Bounds::new(
+                    point(self.bounds.right() - px(8.), self.bounds.top() + pos),
+                    size(px(6.), length),
+                ),
+            )
+        })
     }
     fn utf8(&self, offset: usize) -> usize {
         utf8_offset(&self.content, offset)
@@ -1010,7 +1060,7 @@ impl IntoElement for EditorElement {
 }
 impl Element for EditorElement {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = (Vec<(bool, Hitbox)>, Option<Hitbox>);
     fn id(&self) -> Option<ElementId> {
         None
     }
@@ -1037,8 +1087,27 @@ impl Element for EditorElement {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Self::PrepaintState {
         self.0.update(cx, |s, _| s.layout(bounds, window));
+        let state = self.0.read(cx);
+        let capture = state.scroll_drag.map(|_| {
+            window.insert_hitbox(
+                Bounds::new(point(px(0.), px(0.)), window.viewport_size()),
+                HitboxBehavior::BlockMouse,
+            )
+        });
+        let bars = [true, false]
+            .into_iter()
+            .filter_map(|axis| {
+                state.scrollbar_geometry(axis).map(|(track, _)| {
+                    (
+                        axis,
+                        window.insert_hitbox(track, HitboxBehavior::BlockMouseExceptScroll),
+                    )
+                })
+            })
+            .collect();
+        (bars, capture)
     }
     fn paint(
         &mut self,
@@ -1046,10 +1115,64 @@ impl Element for EditorElement {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut (),
+        bars: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
+        let hovered = bars
+            .0
+            .iter()
+            .find(|(_, hitbox)| hitbox.is_hovered(window))
+            .map(|(axis, _)| *axis);
+        self.0.update(cx, |s, _| s.scroll_hover = hovered);
+        for (_, hitbox) in &bars.0 {
+            window.set_cursor_style(CursorStyle::Arrow, hitbox);
+        }
+        if let Some(hitbox) = &bars.1 {
+            window.set_cursor_style(CursorStyle::Arrow, hitbox);
+        }
+        let entity = self.0.clone();
+        let hitboxes = bars.0.clone();
+        window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble
+                && e.button == MouseButton::Left
+                && hitboxes.iter().any(|(_, h)| h.is_hovered(window))
+            {
+                entity.update(cx, |s, cx| s.mouse_down(e, window, cx));
+            }
+        });
+        let entity = self.0.clone();
+        let hitboxes = bars.0.clone();
+        window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+            if phase != DispatchPhase::Capture {
+                return;
+            }
+            entity.update(cx, |s, cx| {
+                let hover = hitboxes
+                    .iter()
+                    .find(|(_, h)| h.is_hovered(window))
+                    .map(|(axis, _)| *axis);
+                if s.scroll_hover != hover {
+                    s.scroll_hover = hover;
+                    cx.notify();
+                }
+                if s.scroll_drag.is_some() {
+                    s.mouse_move(e, window, cx);
+                    cx.stop_propagation();
+                }
+            });
+        });
+        let entity = self.0.clone();
+        window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
+                entity.update(cx, |s, cx| {
+                    if s.scroll_drag.take().is_some() {
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                });
+            }
+        });
         let focus = self.0.read(cx).focus.clone();
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.0.clone()), cx);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -1061,6 +1184,7 @@ impl Render for InputState {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("text-input")
+            .debug_selector(|| "text-input".into())
             .role(if self.multiline {
                 Role::MultilineTextInput
             } else {
@@ -1103,7 +1227,17 @@ impl Render for InputState {
                 if !e.modifiers.control {
                     let mut delta = e.delta.pixel_delta(s.line_height);
                     if e.modifiers.shift {
-                        delta = point(delta.y, delta.x);
+                        // Windows already maps Shift+wheel to x. Only convert
+                        // platforms/events that still provide a vertical delta.
+                        if delta.x == px(0.) {
+                            delta.x = delta.y;
+                        }
+                        delta.y = px(0.);
+                        s.wheel_gesture = OngoingScroll::default();
+                    } else if e.delta.precise() {
+                        // Preserve the left edge during a mostly vertical
+                        // trackpad gesture instead of accumulating sideways noise.
+                        s.wheel_gesture.filter(&mut delta, e.touch_phase);
                     }
                     s.scroll += delta;
                     s.clamp_scroll();

@@ -424,12 +424,13 @@ impl Edot {
             (self.session.sidebar_width as f32)
                 .min(f32::from(window.viewport_size().width) - 220.)
                 .max(150.)
-                + 5.
+                + SIDEBAR_RESIZE_WIDTH
         } else {
             36.
         };
-        let available = (f32::from(window.viewport_size().width) - sidebar_width - 80.).max(88.);
-        let layout = crate::tabs::TabLayout::new(available as i32, self.open.len(), 88, 180, 0);
+        let available = (f32::from(window.viewport_size().width) - sidebar_width - 80.).max(1.);
+        let layout =
+            crate::tabs::TabLayout::new(available as i32, self.open.len(), TAB_MIN_WIDTH, 180, 0);
         self.tab_width = layout.width;
         let mut strip = div()
             .id("tabs-scroll")
@@ -454,6 +455,13 @@ impl Edot {
             strip = strip.child(
                 div()
                     .id(("tab", id))
+                    .debug_selector(move || {
+                        if active {
+                            "active-tab".into()
+                        } else {
+                            format!("tab-{id}")
+                        }
+                    })
                     .h_flex()
                     .relative()
                     .w(px(layout.width as f32))
@@ -463,6 +471,7 @@ impl Edot {
                     .gap_2()
                     .cursor_pointer()
                     .text_sm()
+                    .whitespace_nowrap()
                     .when(active, |row| {
                         row.bg(cx.theme().background)
                             .border_l_1()
@@ -519,25 +528,43 @@ impl Edot {
                             .into_any_element()
                     } else {
                         div()
+                            .debug_selector(move || {
+                                if active {
+                                    "active-tab-title".into()
+                                } else {
+                                    format!("tab-title-{id}")
+                                }
+                            })
                             .flex_1()
                             .min_w_0()
+                            .whitespace_nowrap()
                             .text_ellipsis()
                             .overflow_hidden()
                             .child(title.clone())
                             .into_any_element()
                     })
                     .when(tab.dirty, |row| {
-                        row.child(div().size(px(5.)).rounded_full().bg(cx.theme().primary))
+                        row.child(
+                            div()
+                                .size(px(5.))
+                                .flex_shrink_0()
+                                .rounded_full()
+                                .bg(cx.theme().primary),
+                        )
                     })
                     .child(
                         div()
                             .id(("close-tab", id))
+                            .debug_selector(move || format!("close-tab-{id}"))
+                            .occlude()
+                            .flex_shrink_0()
                             .flex()
                             .items_center()
                             .justify_center()
                             .size(px(20.))
                             .rounded_sm()
-                            .hover(|s| s.bg(cx.theme().accent))
+                            .hover(|s| s.bg(cx.theme().selection).text_color(cx.theme().primary))
+                            .active(|s| s.bg(cx.theme().primary.opacity(0.3)))
                             .child(Icon::new(IconName::Close).size(px(13.)))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1031,15 +1058,18 @@ impl Edot {
         let prefs = self.preferences.as_ref().unwrap();
         div()
             .id("settings-panel")
+            .debug_selector(|| "settings-panel".into())
+            .track_focus(&prefs.focus)
             .occlude()
             .absolute()
             .top_2()
             .right_3()
-            .w(px(340.))
+            .w(px(360.))
             .max_w_full()
             .v_flex()
-            .gap_3()
-            .p_4()
+            .gap_5()
+            .p_5()
+            .text_left()
             .rounded_lg()
             .border_1()
             .border_color(cx.theme().border)
@@ -1059,6 +1089,7 @@ impl Edot {
                     .child(
                         div()
                             .flex_1()
+                            .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("설정"),
                     )
@@ -1076,7 +1107,7 @@ impl Edot {
                 div()
                     .v_flex()
                     .gap_1()
-                    .child(div().text_sm().child("테마"))
+                    .child(div().text_sm().child("앱 테마"))
                     .child(
                         Select::new(&prefs.theme)
                             .w_full()
@@ -1085,29 +1116,42 @@ impl Edot {
             )
             .child(
                 div()
-                    .v_flex()
-                    .gap_1()
-                    .child(div().text_sm().child("본문 글꼴"))
+                    .h_flex()
+                    .items_start()
+                    .gap_3()
                     .child(
-                        Select::new(&prefs.font)
-                            .w_full()
-                            .search_placeholder("글꼴 검색")
-                            .accessibility_label("본문 글꼴"),
-                    ),
-            )
-            .child(
-                div()
-                    .v_flex()
-                    .gap_1()
-                    .child(div().text_sm().child("글자 크기"))
+                        div()
+                            .debug_selector(|| "settings-font".into())
+                            .v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(div().text_sm().child("본문 글꼴"))
+                            .child(
+                                Select::new(&prefs.font)
+                                    .w_full()
+                                    .search_placeholder("글꼴 검색")
+                                    .accessibility_label("본문 글꼴"),
+                            ),
+                    )
                     .child(
-                        Select::new(&prefs.size)
-                            .w_full()
-                            .accessibility_label("글자 크기"),
+                        div()
+                            .debug_selector(|| "settings-size".into())
+                            .v_flex()
+                            .w(px(92.))
+                            .flex_shrink_0()
+                            .gap_1()
+                            .child(div().text_sm().child("글자 크기"))
+                            .child(
+                                Select::new(&prefs.size)
+                                    .w_full()
+                                    .accessibility_label("글자 크기"),
+                            ),
                     ),
             )
             .child(
                 Switch::new("word-wrap")
+                    .track_focus(&prefs.wrap_focus)
                     .label("자동 줄 바꿈")
                     .checked(self.settings.wrap)
                     .on_change(cx.listener(|this, value, window, cx| {
@@ -1115,6 +1159,12 @@ impl Edot {
                         next.wrap = *value;
                         this.change_settings(next, window, cx);
                     })),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("변경 사항은 바로 적용되고 저장됩니다."),
             )
             .into_any_element()
     }
@@ -1151,6 +1201,7 @@ impl Edot {
         let wheel_view = weak.clone();
         div()
             .id("body-editor")
+            .debug_selector(|| "body-editor".into())
             .relative()
             .size_full()
             .min_h_0()
@@ -1172,7 +1223,7 @@ impl Edot {
                                 }
                                 let _ = weak.update(cx, |this, cx| {
                                     let panel_width = if this.settings_visible {
-                                        352.
+                                        372.
                                     } else if this.find_visible {
                                         452.
                                     } else {
@@ -1202,16 +1253,24 @@ impl Edot {
                 .size_full(),
             )
             .child(
-                Textarea::new(&editor)
-                    .h(relative(1.))
-                    .appearance(false)
-                    .font_family(self.settings.font.clone())
-                    .text_size(px(font_size))
-                    .p_0()
-                    .pl(px(16.))
-                    .pr(px(4.))
-                    .pt(px(6.))
-                    .aria_label("메모 본문"),
+                // Keep the gutter outside the scrollable editor and its clip.
+                div()
+                    .debug_selector(|| "body-text-viewport".into())
+                    .absolute()
+                    .left(px(16.))
+                    .right(px(4.))
+                    .top(px(6.))
+                    .bottom_0()
+                    .overflow_hidden()
+                    .child(
+                        Textarea::new(&editor)
+                            .h(relative(1.))
+                            .appearance(false)
+                            .font_family(self.settings.font.clone())
+                            .text_size(px(font_size))
+                            .p_0()
+                            .aria_label("메모 본문"),
+                    ),
             )
             .context_menu(move |mut menu, _, _| {
                 for (label, action) in [
@@ -1347,13 +1406,6 @@ impl Render for Edot {
             .font_family("Segoe UI")
             .text_size(px(15.))
             .capture_key_down(cx.listener(Self::key_down))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                if let Some((start, width)) = this.resizing {
-                    this.session.sidebar_width =
-                        (width + f32::from(event.position.x - start) as i32).clamp(150, 600);
-                    cx.notify();
-                }
-            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -1365,26 +1417,142 @@ impl Render for Edot {
         if self.session.sidebar_visible {
             root = root.child(self.sidebar(window, cx)).child(
                 div()
-                    .id("sidebar-resize")
-                    .relative()
-                    .w(px(5.))
+                    .w(px(SIDEBAR_RESIZE_WIDTH))
                     .h_full()
                     .flex_shrink_0()
+                    .bg(cx.theme().sidebar),
+            );
+        }
+        root = root.child(main);
+        if self.session.sidebar_visible {
+            let edge = (self.session.sidebar_width as f32)
+                .min(f32::from(window.viewport_size().width) - 220.)
+                .max(150.)
+                + SIDEBAR_RESIZE_WIDTH;
+            let dragging = self.resizing.is_some();
+            let view = cx.entity().downgrade();
+            let entity_id = cx.entity_id();
+            #[cfg(test)]
+            let probe = self.splitter_probe.clone();
+            root = root.child(
+                div()
+                    .id("sidebar-resize")
+                    .debug_selector(|| "sidebar-resize".into())
+                    .absolute()
+                    .left(px(edge - SIDEBAR_RESIZE_WIDTH / 2.))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(SIDEBAR_RESIZE_WIDTH))
+                    // This marker has no style or hitbox of its own.
+                    .child(
+                        div()
+                            .debug_selector(|| "sidebar-resize-line".into())
+                            .absolute()
+                            .left(px(SIDEBAR_RESIZE_WIDTH / 2. - 0.5))
+                            .top_0()
+                            .bottom_0()
+                            .w(px(1.)),
+                    )
+                    .child(
+                        canvas(
+                            |bounds, window, _| {
+                                window.insert_hitbox(bounds, HitboxBehavior::BlockMouse)
+                            },
+                            move |bounds, hitbox, window, cx| {
+                                // One hitbox owns color, cursor, and mouse-down. Avoid
+                                // a separate group-hover element and its hover cache.
+                                let hovered = hitbox.is_hovered(window);
+                                let cursor = CursorStyle::ResizeColumn;
+                                window.set_cursor_style(cursor, &hitbox);
+                                let highlighted = dragging || hovered;
+                                let line = Bounds::new(
+                                    point(bounds.center().x - px(0.5), bounds.top()),
+                                    size(px(1.), bounds.size.height),
+                                );
+                                window.paint_quad(fill(
+                                    line,
+                                    if highlighted {
+                                        cx.theme().primary
+                                    } else {
+                                        cx.theme().border
+                                    },
+                                ));
+                                #[cfg(test)]
+                                probe.replace(Some((hitbox.clone(), highlighted, cursor)));
+                                let move_hitbox = hitbox.clone();
+                                window.on_mouse_event(
+                                    move |_: &MouseMoveEvent, phase, window, cx| {
+                                        if phase == DispatchPhase::Capture
+                                            && move_hitbox.is_hovered(window) != hovered
+                                        {
+                                            cx.notify(entity_id);
+                                            window.refresh();
+                                        }
+                                    },
+                                );
+                                let view = view.clone();
+                                window.on_mouse_event(
+                                    move |e: &MouseDownEvent, phase, window, cx| {
+                                        if phase != DispatchPhase::Bubble
+                                            || e.button != MouseButton::Left
+                                            || !hitbox.is_hovered(window)
+                                        {
+                                            return;
+                                        }
+                                        let _ = view.update(cx, |this, cx| {
+                                            let width = (this.session.sidebar_width as f32)
+                                                .min(f32::from(window.viewport_size().width) - 220.)
+                                                .max(150.);
+                                            this.resizing = Some((e.position.x, width as i32));
+                                            cx.notify();
+                                        });
+                                        cx.stop_propagation();
+                                    },
+                                );
+                            },
+                        )
+                        .absolute()
+                        .size_full(),
+                    ),
+            );
+        }
+        if self.resizing.is_some() {
+            root = root.child(
+                div()
+                    .id("sidebar-resize-capture")
+                    .debug_selector(|| "sidebar-resize-capture".into())
+                    .absolute()
+                    .inset_0()
+                    .occlude()
                     .cursor_col_resize()
-                    .bg(cx.theme().sidebar)
-                    .border_r_1()
-                    .border_color(cx.theme().border)
-                    .hover(|s| s.border_color(cx.theme().primary))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                            this.resizing = Some((event.position.x, this.session.sidebar_width));
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                        if let Some((start, width)) = this.resizing {
+                            let max = (f32::from(window.viewport_size().width) as i32 - 220)
+                                .clamp(150, 600);
+                            this.session.sidebar_width = (width
+                                + f32::from(event.position.x - start) as i32)
+                                .clamp(150, max);
+                            cx.notify();
                             cx.stop_propagation();
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.resizing = None;
+                            cx.notify();
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.resizing = None;
+                            cx.notify();
                         }),
                     ),
             );
         }
-        root = root.child(main);
         if let Some(menu) = &self.keyboard_menu {
             root = root.child(
                 deferred(

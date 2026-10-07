@@ -22,6 +22,9 @@ mod search_ui;
 mod tests;
 mod view;
 
+const SIDEBAR_RESIZE_WIDTH: f32 = 6.;
+const TAB_MIN_WIDTH: i32 = 140;
+
 struct OpenTab {
     id: u64,
     editor: Option<Entity<TextareaState>>,
@@ -65,9 +68,11 @@ impl SearchPanel {
 }
 
 struct Preferences {
+    focus: FocusHandle,
     theme: Entity<SelectState<Vec<SharedString>>>,
     font: Entity<SelectState<Vec<SharedString>>>,
     size: Entity<SelectState<Vec<SharedString>>>,
+    wrap_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -113,6 +118,8 @@ pub struct Edot {
     drop_target: Option<DropTarget>,
     tab_drop: Option<usize>,
     resizing: Option<(Pixels, i32)>,
+    #[cfg(test)]
+    splitter_probe: Rc<std::cell::RefCell<Option<(Hitbox, bool, CursorStyle)>>>,
     tree_auto: component::scroll::AutoScroll,
     tab_auto: component::scroll::AutoScroll,
     dragging_notes: Vec<u64>,
@@ -179,6 +186,8 @@ impl Edot {
             drop_target: None,
             tab_drop: None,
             resizing: None,
+            #[cfg(test)]
+            splitter_probe: Default::default(),
             tree_auto: Default::default(),
             tab_auto: Default::default(),
             dragging_notes: vec![],
@@ -823,6 +832,15 @@ impl Edot {
             s.set_selected_value(&self.settings.font_size.to_string().into(), window, cx)
         });
     }
+    fn dismiss_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_visible = false;
+        if let Some(prefs) = &self.preferences {
+            for select in [&prefs.theme, &prefs.font, &prefs.size] {
+                select.update(cx, |s, cx| s.close(cx));
+            }
+        }
+        cx.notify();
+    }
     fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_visible = !self.settings_visible;
         if !self.settings_visible {
@@ -870,6 +888,7 @@ impl Edot {
                     window,
                     cx,
                 )
+                .suffix(" px")
             });
             let mut subscriptions = vec![];
             for (kind, entity) in [(0, &theme), (1, &font), (2, &size)] {
@@ -898,12 +917,30 @@ impl Edot {
                     },
                 ));
             }
+            let focus = cx.focus_handle();
+            subscriptions.push(cx.on_focus_out(&focus, window, |this, _, _, cx| {
+                if this.settings_visible {
+                    this.dismiss_settings(cx);
+                }
+            }));
+            subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+                if this.settings_visible && !window.is_window_active() {
+                    this.dismiss_settings(cx);
+                }
+            }));
             self.preferences = Some(Preferences {
+                focus,
                 theme,
                 font,
                 size,
+                wrap_focus: cx.focus_handle().tab_stop(true),
                 _subscriptions: subscriptions,
             });
+        }
+        if let Some(prefs) = &self.preferences {
+            for select in [&prefs.theme, &prefs.font, &prefs.size] {
+                select.update(cx, |s, cx| s.close(cx));
+            }
         }
         self.sync_preferences(window, cx);
         self.preferences

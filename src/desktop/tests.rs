@@ -23,7 +23,7 @@ impl TestWindowExt for Window {
     fn press(&mut self, key: &str, cx: &mut gpui::App) {
         use gpui::InputEvent;
         let stroke = gpui::Keystroke::parse(key).unwrap();
-        if matches!(stroke.key.as_str(), "enter" | "tab") {
+        if matches!(stroke.key.as_str(), "enter" | "tab" | "space") {
             self.dispatch_event(
                 gpui::KeyDownEvent {
                     keystroke: stroke.clone(),
@@ -147,6 +147,108 @@ impl Fixture {
         })
         .unwrap();
     }
+}
+
+#[gpui::test]
+fn wrap_switch_animates_reverses_and_respects_reduced_motion(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    f.update(cx, |this, window, cx| this.show_settings(window, cx));
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|window, cx| window.render_frame(cx));
+    let right = visual.debug_bounds("settings-wrap-thumb").unwrap().left();
+
+    f.update(cx, |this, window, cx| {
+        let mut settings = this.settings.clone();
+        settings.wrap = !settings.wrap;
+        this.change_settings(settings, window, cx);
+    });
+    visual.update(|window, cx| window.render_frame(cx));
+    let start = visual.debug_bounds("settings-wrap-thumb").unwrap().left();
+    assert!(start <= right && start > right - px(3.));
+    visual.update(|window, cx| window.render_frame(cx));
+    let middle = visual.debug_bounds("settings-wrap-thumb").unwrap().left();
+    assert!(middle < right - px(1.) && middle > right - px(17.));
+
+    f.update(cx, |this, window, cx| {
+        let mut settings = this.settings.clone();
+        settings.wrap = !settings.wrap;
+        this.change_settings(settings, window, cx);
+    });
+    visual.update(|window, cx| window.render_frame(cx));
+    let reversed = visual.debug_bounds("settings-wrap-thumb").unwrap().left();
+    assert!(reversed < right && reversed > right - px(18.));
+    for _ in 0..60 {
+        visual.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.render_frame(cx);
+        });
+    }
+    assert!((visual.debug_bounds("settings-wrap-thumb").unwrap().left() - right).abs() < px(0.1));
+
+    cx.update(|cx| cx.set_reduce_motion(true));
+    f.update(cx, |this, window, cx| {
+        let mut settings = this.settings.clone();
+        settings.wrap = !settings.wrap;
+        this.change_settings(settings, window, cx);
+    });
+    visual.update(|window, cx| window.render_frame(cx));
+    assert!(
+        (visual.debug_bounds("settings-wrap-thumb").unwrap().left() - (right - px(18.))).abs()
+            < px(0.1)
+    );
+    f.update(cx, |this, _, _| assert!(!this.settings.wrap));
+}
+
+#[gpui::test]
+fn settings_row_units_and_wrap_switch_work_without_desktop_input(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, window, cx| {
+        this.show_settings(window, cx);
+        let size = this.preferences.as_ref().unwrap().size.clone();
+        size.update(cx, |state, cx| state.focus(window, cx));
+        this.active_editor().unwrap()
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|window, cx| window.render_frame(cx));
+    let font = visual.debug_bounds("settings-font").unwrap();
+    let size = visual.debug_bounds("settings-size").unwrap();
+    let panel = visual.debug_bounds("settings-panel").unwrap();
+    assert_eq!(font.top(), size.top());
+    assert!(font.right() < size.left());
+    assert!(size.right() < panel.right());
+    f.press(cx, "enter");
+    f.press(cx, "down");
+    f.press(cx, "enter");
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.settings.font_size, 19);
+        assert_eq!(Settings::load(&f.dir).unwrap().font_size, 19);
+    });
+    f.press(cx, "tab");
+    f.update(cx, |this, window, _| {
+        assert!(
+            this.preferences
+                .as_ref()
+                .unwrap()
+                .wrap_focus
+                .is_focused(window)
+        );
+    });
+    f.press(cx, "space");
+    f.update(cx, |this, _, cx| {
+        assert!(!this.settings.wrap);
+        assert!(!Settings::load(&f.dir).unwrap().wrap);
+        assert_eq!(this.active_editor().unwrap(), editor);
+        assert_eq!(editor.read(cx).value(), "🙂 한글12\r\n한글3\rkeep\n");
+    });
+    f.press(cx, "enter");
+    f.update(cx, |this, _, _| assert!(this.settings.wrap));
+    visual.update(|window, cx| window.render_frame(cx));
+    let wrap = visual.debug_bounds("settings-wrap").unwrap();
+    visual.simulate_click(wrap.center(), gpui::Modifiers::default());
+    f.update(cx, |this, _, _| {
+        assert!(!this.settings.wrap);
+        assert!(!Settings::load(&f.dir).unwrap().wrap);
+    });
 }
 
 #[gpui::test]
@@ -683,5 +785,477 @@ fn search_inputs_support_tab_focus_and_plain_text_only(cx: &mut TestAppContext) 
     f.update(cx, |this, _, cx| {
         assert_eq!(this.local.query.read(cx).value(), "needle");
         assert_eq!(this.local.replacement.read(cx).value(), "replacement");
+    });
+}
+
+#[gpui::test]
+fn dropdown_toggle_selection_scroll_and_dismissal(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    f.update(cx, |this, window, cx| {
+        this.settings.font_size = 40;
+        this.show_settings(window, cx);
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let trigger = visual.debug_bounds("settings-size").unwrap().center();
+    visual.simulate_click(trigger, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    let options = visual.debug_bounds("select-options").unwrap();
+    let selected = visual.debug_bounds("select-highlight").unwrap();
+    assert!(
+        selected.top() >= options.top() && selected.bottom() <= options.bottom(),
+        "selected={selected:?} options={options:?}"
+    );
+    f.press(cx, "enter");
+    f.update(cx, |this, _, _| assert_eq!(this.settings.font_size, 40));
+    visual.simulate_click(trigger, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    assert!(visual.debug_bounds("select-popup").is_some());
+    visual.simulate_mouse_down(trigger, gpui::MouseButton::Left, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    assert!(visual.debug_bounds("select-popup").is_some());
+    visual.simulate_mouse_up(trigger, gpui::MouseButton::Left, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    assert!(visual.debug_bounds("select-popup").is_none());
+    f.press(cx, "enter");
+    f.press(cx, "escape");
+    f.update(cx, |this, _, _| assert!(this.settings_visible));
+    visual.update(|w, cx| w.render_frame(cx));
+    assert!(visual.debug_bounds("select-popup").is_none());
+    f.press(cx, "enter");
+    f.press(cx, "tab");
+    f.update(cx, |this, w, _| {
+        assert!(this.preferences.as_ref().unwrap().wrap_focus.is_focused(w))
+    });
+}
+
+#[gpui::test]
+fn splitter_edges_capture_drag_and_release(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    for edge in [0.5, 5.5] {
+        visual.update(|w, cx| w.render_frame(cx));
+        let bounds = visual.debug_bounds("sidebar-resize").unwrap();
+        let line = visual.debug_bounds("sidebar-resize-line").unwrap();
+        assert_eq!(bounds.center().x, line.center().x);
+        let start = point(bounds.left() + px(edge), bounds.center().y);
+        let width = f.update(cx, |this, _, _| this.session.sidebar_width);
+        visual.simulate_mouse_move(start, None, gpui::Modifiers::default());
+        visual.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        visual.update(|w, cx| w.render_frame(cx));
+        assert!(visual.debug_bounds("sidebar-resize-capture").is_some());
+        let end = start + point(px(80.), px(100.));
+        visual.simulate_mouse_move(
+            end,
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        visual.update(|w, cx| w.render_frame(cx));
+        f.update(cx, |this, _, _| {
+            assert_eq!(this.session.sidebar_width, width + 80);
+            assert!(this.resizing.is_some());
+        });
+        visual.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+        visual.update(|w, cx| w.render_frame(cx));
+        assert!(visual.debug_bounds("sidebar-resize-capture").is_none());
+        visual.simulate_mouse_move(
+            end + point(px(50.), px(0.)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        f.update(cx, |this, _, _| {
+            assert_eq!(this.session.sidebar_width, width + 80)
+        });
+    }
+}
+
+#[gpui::test]
+fn tab_scrollbar_does_not_activate_tabs_and_titles_keep_space(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    f.update(cx, |this, w, cx| {
+        for i in 0..12 {
+            let id = this.book.add(0, format!("아주 긴 탭 제목 여러 단어 {i}"));
+            fs::write(this.book.file(&f.dir, id), "").unwrap();
+            assert!(this.open_note(id, true, w, cx));
+        }
+        this.open_note(f.ids[0], true, w, cx);
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    for _ in 0..2 {
+        visual.update(|w, cx| w.render_frame(cx));
+    }
+    let tab = visual.debug_bounds("active-tab").unwrap();
+    let title = visual.debug_bounds("active-tab-title").unwrap();
+    assert!(tab.size.width >= px(140.));
+    assert!(title.size.width >= px(60.));
+    assert!(title.size.height < px(30.));
+    let thumb = visual.debug_bounds("h-scrollbar").unwrap();
+    let start = point(thumb.left() + px(3.), thumb.center().y);
+    let before = f.update(cx, |this, _, _| {
+        assert!(
+            this.tab_scroll.max_offset().x > px(0.),
+            "tabs={} max={:?} bounds={:?}",
+            this.open.len(),
+            this.tab_scroll.max_offset(),
+            thumb
+        );
+        this.tab_scroll.offset()
+    });
+    visual.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.tab_scroll.offset(), before)
+    });
+    let end = start + point(px(90.), px(120.));
+    visual.simulate_mouse_move(
+        end,
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |this, _, _| {
+        assert!(this.tab_scroll.offset().x < before.x);
+        assert_eq!(this.session.active, Some(f.ids[0]));
+    });
+    visual.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    let after = f.update(cx, |this, _, _| this.tab_scroll.offset());
+    visual.simulate_mouse_move(
+        end + point(px(100.), px(0.)),
+        None,
+        gpui::Modifiers::default(),
+    );
+    f.update(cx, |this, _, _| assert_eq!(this.tab_scroll.offset(), after));
+}
+
+#[gpui::test]
+fn editor_scrollbar_preserves_grab_point_and_text_selection(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, w, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| {
+            s.set_value("long document\n".repeat(300), w, cx);
+            s.set_selected_range(0..4, cx);
+        });
+        editor
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let bounds = visual.debug_bounds("text-input").unwrap();
+    let start = point(bounds.right() - px(5.), bounds.top() + px(3.));
+    visual.simulate_mouse_move(start, None, gpui::Modifiers::default());
+    visual.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).scroll_offset().y, px(0.))
+    });
+    let end = start + point(px(-140.), px(100.));
+    visual.simulate_mouse_move(
+        end,
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |_, _, cx| {
+        assert!(editor.read(cx).scroll_offset().y < px(0.));
+        assert_eq!(editor.read(cx).selected_range(), 0..4);
+    });
+    visual.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    let offset = f.update(cx, |_, _, cx| editor.read(cx).scroll_offset());
+    visual.simulate_mouse_move(
+        end + point(px(0.), px(100.)),
+        None,
+        gpui::Modifiers::default(),
+    );
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).scroll_offset(), offset)
+    });
+}
+
+#[gpui::test]
+fn dropdown_empty_search_keeps_value_and_reopen_resets_filter(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let font = f.update(cx, |this, w, cx| {
+        this.show_settings(w, cx);
+        this.settings.font.clone()
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let trigger = visual.debug_bounds("settings-font").unwrap().center();
+    visual.simulate_click(trigger, gpui::Modifiers::default());
+    f.input(cx, "edot nonexistent font qwerty");
+    visual.update(|w, cx| w.render_frame(cx));
+    assert!(visual.debug_bounds("select-highlight").is_none());
+    f.press(cx, "enter");
+    f.update(cx, |this, _, _| assert_eq!(this.settings.font, font));
+    visual.update(|w, cx| w.render_frame(cx));
+    assert!(visual.debug_bounds("select-popup").is_some());
+    f.press(cx, "escape");
+    visual.simulate_click(trigger, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    assert!(visual.debug_bounds("select-highlight").is_some());
+    f.press(cx, "enter");
+    f.update(cx, |this, _, _| assert_eq!(this.settings.font, font));
+    visual.simulate_click(trigger, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    let outside = visual.debug_bounds("settings-panel").unwrap().origin + point(px(8.), px(8.));
+    visual.simulate_click(outside, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    assert!(visual.debug_bounds("select-popup").is_none());
+    f.update(cx, |this, _, _| assert!(this.settings_visible));
+}
+
+#[gpui::test]
+fn body_gutter_and_line_start_stay_fixed_during_scroll(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler;
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, w, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| {
+            s.set_value("가나다 ABC 123\n".repeat(400), w, cx)
+        });
+        editor
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let viewport = visual.debug_bounds("text-input").unwrap();
+    let body = visual.debug_bounds("body-editor").unwrap();
+    assert_eq!(viewport.left() - body.left(), px(16.));
+    assert_eq!(viewport.top() - body.top(), px(6.));
+    assert_eq!(visual.debug_bounds("body-text-viewport").unwrap(), viewport);
+    let caret = f.update(cx, |_, w, cx| {
+        editor.update(cx, |s, cx| {
+            s.bounds_for_range(0..0, Bounds::default(), w, cx).unwrap()
+        })
+    });
+    assert_eq!(caret.left(), viewport.left());
+    for _ in 0..5 {
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Lines(point(0., -3.)),
+            ..Default::default()
+        });
+        visual.update(|w, cx| w.render_frame(cx));
+        f.update(cx, |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                assert!(s.scroll_offset().y < px(0.));
+                assert_eq!(s.scroll_offset().x, px(0.));
+                assert_eq!(
+                    s.bounds_for_range(0..0, Bounds::default(), w, cx)
+                        .unwrap()
+                        .left(),
+                    viewport.left()
+                );
+            })
+        });
+        assert_eq!(visual.debug_bounds("text-input").unwrap(), viewport);
+    }
+    f.update(cx, |_, w, cx| {
+        editor.update(cx, |s, cx| {
+            s.set_soft_wrap(false, w, cx);
+            s.set_value(
+                format!("{}\n", "가나다 ABC 123 ".repeat(100)).repeat(100),
+                w,
+                cx,
+            );
+        })
+    });
+    visual.update(|w, cx| w.render_frame(cx));
+    visual.simulate_event(gpui::ScrollWheelEvent {
+        position: viewport.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(-125.), px(0.))),
+        touch_phase: gpui::TouchPhase::Started,
+        ..Default::default()
+    });
+    visual.simulate_event(gpui::ScrollWheelEvent {
+        position: viewport.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-120.))),
+        touch_phase: gpui::TouchPhase::Started,
+        ..Default::default()
+    });
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |_, _, cx| {
+        assert!(editor.read(cx).scroll_offset().x < px(0.));
+        assert!(editor.read(cx).scroll_offset().y < px(0.));
+    });
+    assert_eq!(visual.debug_bounds("body-text-viewport").unwrap(), viewport);
+    assert_eq!(visual.debug_bounds("text-input").unwrap(), viewport);
+    f.update(cx, |_, w, cx| {
+        editor.update(cx, |s, cx| s.set_soft_wrap(true, w, cx))
+    });
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).scroll_offset().x, px(0.))
+    });
+    assert_eq!(
+        visual.debug_bounds("text-input").unwrap().left() - body.left(),
+        px(16.)
+    );
+}
+
+#[gpui::test]
+fn settings_close_only_when_focus_leaves_the_panel(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    cx.update_window(f.window, |_, w, _| w.activate_window())
+        .unwrap();
+    f.update(cx, |this, w, cx| this.show_settings(w, cx));
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    f.press(cx, "tab");
+    f.update(cx, |this, _, _| assert!(this.settings_visible));
+    let trigger = visual.debug_bounds("settings-font").unwrap().center();
+    visual.simulate_click(trigger, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |this, _, _| assert!(this.settings_visible));
+    assert!(visual.debug_bounds("select-popup").is_some());
+    f.input(cx, "con");
+    f.press(cx, "enter");
+    f.update(cx, |this, _, _| assert!(this.settings_visible));
+    visual.simulate_click(trigger, gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    visual.simulate_click(point(px(440.), px(480.)), gpui::Modifiers::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |this, w, cx| {
+        use gpui::Focusable;
+        assert!(
+            this.active_editor()
+                .unwrap()
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(w),
+            "focus did not reach body: {:?}",
+            w.focused(cx)
+        );
+        assert!(!this.settings_visible);
+        this.show_settings(w, cx);
+    });
+    visual.update(|w, cx| w.render_frame(cx));
+    assert!(visual.debug_bounds("select-popup").is_none());
+    f.update(cx, |this, w, cx| this.tree_focus.focus(w, cx));
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |this, w, _| {
+        assert!(!this.settings_visible);
+        assert!(this.tree_focus.is_focused(w));
+    });
+    f.update(cx, |this, w, cx| this.show_settings(w, cx));
+    visual.update(|w, cx| w.render_frame(cx));
+    // Leaving the final setting by keyboard also dismisses the panel.
+    f.update(cx, |this, w, cx| {
+        this.preferences.as_ref().unwrap().wrap_focus.focus(w, cx)
+    });
+    f.press(cx, "tab");
+    f.update(cx, |this, _, _| assert!(!this.settings_visible));
+}
+
+#[gpui::test]
+fn settings_close_when_window_deactivates(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, _| w.activate_window());
+    f.update(cx, |this, w, cx| this.show_settings(w, cx));
+    visual.update(|w, cx| w.render_frame(cx));
+    visual.deactivate_window();
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |this, _, _| assert!(!this.settings_visible));
+}
+
+#[gpui::test]
+fn splitter_painted_hover_cursor_and_click_share_hitbox_at_each_scale(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    for scale in [1., 1.25, 1.5, 2.] {
+        visual.simulate_scale_factor_change(scale);
+        visual.update(|w, cx| w.render_frame(cx));
+        let bounds = visual.debug_bounds("sidebar-resize").unwrap();
+        for dx in [-2., -0.2, 0.2, 1., 2.9, 3.1, 5., 5.8, 6.8, 8.] {
+            let position = point(bounds.left() + px(dx), bounds.center().y);
+            visual.simulate_mouse_move(position, None, gpui::Modifiers::default());
+            visual.update(|w, cx| w.render_frame(cx));
+            let expected = bounds.contains(&position);
+            f.update(cx, |this, w, _| {
+                let probe = this.splitter_probe.borrow();
+                let (hitbox, highlighted, cursor) = probe.as_ref().unwrap();
+                assert_eq!(*highlighted, expected, "scale={scale} dx={dx}");
+                assert_eq!(hitbox.is_hovered_at(position, w), expected);
+                assert_eq!(*cursor, gpui::CursorStyle::ResizeColumn);
+            });
+            visual.simulate_mouse_down(
+                position,
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            f.update(cx, |this, _, _| {
+                assert_eq!(this.resizing.is_some(), expected)
+            });
+            visual.simulate_mouse_up(
+                position,
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            visual.update(|w, cx| w.render_frame(cx));
+        }
+    }
+}
+
+#[gpui::test]
+fn vertical_scroll_noise_does_not_cut_the_first_character(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, w, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| {
+            s.set_soft_wrap(false, w, cx);
+            s.set_value(
+                format!("{}\n", "왼쪽 시작 text ".repeat(80)).repeat(100),
+                w,
+                cx,
+            );
+        });
+        editor
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let viewport = visual.debug_bounds("text-input").unwrap();
+    for _ in 0..20 {
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(-0.75), px(-48.))),
+            ..Default::default()
+        });
+        visual.update(|w, cx| w.render_frame(cx));
+    }
+    f.update(cx, |_, _, cx| {
+        assert!(editor.read(cx).scroll_offset().y < px(0.));
+        assert_eq!(editor.read(cx).scroll_offset().x, px(0.));
+    });
+}
+
+#[gpui::test]
+fn windows_shift_wheel_is_not_rotated_twice(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, w, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| {
+            s.set_soft_wrap(false, w, cx);
+            s.set_value(format!("{}\n", "long text ".repeat(100)).repeat(100), w, cx);
+        });
+        editor
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let viewport = visual.debug_bounds("text-input").unwrap();
+    visual.simulate_event(gpui::ScrollWheelEvent {
+        position: viewport.center(),
+        delta: gpui::ScrollDelta::Lines(point(-3., 0.)),
+        modifiers: gpui::Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |_, _, cx| {
+        assert!(editor.read(cx).scroll_offset().x < px(0.));
+        assert_eq!(editor.read(cx).scroll_offset().y, px(0.));
     });
 }
