@@ -105,6 +105,9 @@ pub struct InputState {
     wrap: bool,
     scroll: Point<Pixels>,
     bounds: Bounds<Pixels>,
+    content_padding: Edges<Pixels>,
+    #[cfg(test)]
+    paint_clip: Bounds<Pixels>,
     lines: Vec<Paragraph>,
     layout_key: Option<(u64, Pixels, Pixels, Font, Hsla)>,
     line_height: Pixels,
@@ -178,6 +181,9 @@ impl InputState {
             wrap: false,
             scroll: point(px(0.), px(0.)),
             bounds: Bounds::default(),
+            content_padding: Edges::default(),
+            #[cfg(test)]
+            paint_clip: Bounds::default(),
             lines: vec![],
             layout_key: None,
             line_height: px(24.),
@@ -200,6 +206,10 @@ impl InputState {
         self
     }
 
+    pub fn content_padding(mut self, padding: Edges<Pixels>) -> Self {
+        self.content_padding = padding;
+        self
+    }
     pub fn default_value(mut self, text: String) -> Self {
         self.content = text.into();
         self
@@ -298,6 +308,13 @@ impl InputState {
         self.reversed = false;
     }
     fn commit(&mut self, range: Range<usize>, text: &str, merge: bool, cx: &mut Context<Self>) {
+        if self.content[range.clone()] == *text {
+            self.selection = range.start + text.len()..range.start + text.len();
+            self.reversed = false;
+            self.marked = None;
+            self.moved(cx);
+            return;
+        }
         let coalesce = merge
             && range.is_empty()
             && !text.contains(['\r', '\n'])
@@ -536,11 +553,16 @@ impl InputState {
             .lines
             .partition_point(|l| l.start <= at)
             .saturating_sub(1);
-        self.lines.get(i).map_or(Point::default(), |p| {
-            p.position(at.min(p.end) - p.start, self.line_height) + point(px(0.), p.top)
-        })
+        self.lines.get(i).map_or(
+            point(self.content_padding.left, self.content_padding.top),
+            |p| {
+                p.position(at.min(p.end) - p.start, self.line_height)
+                    + point(self.content_padding.left, p.top)
+            },
+        )
     }
     fn index_at(&self, p: Point<Pixels>) -> usize {
+        let p = point(p.x - self.content_padding.left, p.y);
         let i = self
             .lines
             .partition_point(|l| l.top <= p.y)
@@ -678,8 +700,15 @@ impl InputState {
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         self.line_height = (font_size * 1.5).max(px(18.));
+        if !self.multiline {
+            let top = ((bounds.size.height - self.line_height) / 2.).max(px(0.));
+            if self.content_padding.top != top {
+                self.content_padding.top = top;
+                self.layout_key = None;
+            }
+        }
         let width = if self.wrap {
-            bounds.size.width.max(px(1.))
+            (bounds.size.width - self.content_padding.left - self.content_padding.right).max(px(1.))
         } else {
             px(1e8)
         };
@@ -697,7 +726,7 @@ impl InputState {
         if self.layout_key.as_ref() != Some(&key) {
             self.lines.clear();
             let mut start = 0;
-            let mut top = px(0.);
+            let mut top = self.content_padding.top;
             let mut max_width = px(0.);
             loop {
                 let end = display[start..]
@@ -746,22 +775,25 @@ impl InputState {
                 if self.wrap {
                     bounds.size.width
                 } else {
-                    max_width + px(4.)
+                    self.content_padding.left + max_width + self.content_padding.right.max(px(4.))
                 },
-                top.max(self.line_height),
+                top.max(self.content_padding.top + self.line_height) + self.content_padding.bottom,
             );
             self.layout_key = Some(key);
         }
         if self.reveal {
             let caret = self.position(self.cursor());
+            if self.cursor() == 0 {
+                self.scroll = Point::default();
+            }
             if caret.y + self.scroll.y < px(0.) {
-                self.scroll.y = -caret.y;
+                self.scroll.y = -(caret.y - self.content_padding.top).max(px(0.));
             }
             if caret.y + self.line_height + self.scroll.y > bounds.size.height {
                 self.scroll.y = bounds.size.height - caret.y - self.line_height;
             }
             if caret.x + self.scroll.x < px(0.) {
-                self.scroll.x = -caret.x;
+                self.scroll.x = -(caret.x - self.content_padding.left).max(px(0.));
             }
             if caret.x + px(3.) + self.scroll.x > bounds.size.width {
                 self.scroll.x = bounds.size.width - caret.x - px(3.);
@@ -770,7 +802,15 @@ impl InputState {
         }
         self.clamp_scroll();
     }
-    fn paint(&self, window: &mut Window, cx: &mut App) {
+    #[cfg(test)]
+    pub fn paint_clip(&self) -> Bounds<Pixels> {
+        self.paint_clip
+    }
+    fn paint(&mut self, window: &mut Window, cx: &mut App) {
+        #[cfg(test)]
+        {
+            self.paint_clip = window.content_mask().bounds;
+        }
         let origin = self.bounds.origin + self.scroll;
         let focused = self.focus.is_focused(window);
         let selection_color = cx.theme().selection;
@@ -787,7 +827,7 @@ impl InputState {
             {
                 continue;
             }
-            let pos = origin + point(px(0.), l.top);
+            let pos = origin + point(self.content_padding.left, l.top);
             let start = self.selection.start.max(l.start);
             let end = self.selection.end.min(l.end);
             if start <= end && self.selection.end > l.start && self.selection.start <= l.end {
@@ -799,7 +839,7 @@ impl InputState {
                     let right = if y == b.y && self.selection.end <= l.end {
                         b.x
                     } else {
-                        self.bounds.size.width - self.scroll.x
+                        self.bounds.size.width - self.scroll.x - self.content_padding.left
                     };
                     window.paint_quad(fill(
                         Bounds::new(
@@ -826,7 +866,7 @@ impl InputState {
                         let right = if y == b.y {
                             b.x
                         } else {
-                            self.bounds.size.width
+                            self.bounds.size.width - self.scroll.x - self.content_padding.left
                         };
                         window.paint_quad(fill(
                             Bounds::new(
@@ -988,9 +1028,14 @@ impl EntityInputHandler for InputState {
             text.replace(['\r', '\n'], " ")
         };
         if self.composition.is_some() {
+            let changed = self.content[r.clone()] != *text;
             self.apply(r, &text);
             self.finish_composition();
-            self.changed(cx);
+            if changed {
+                self.changed(cx);
+            } else {
+                self.moved(cx);
+            }
         } else {
             self.commit(r, &text, true, cx);
         }
@@ -1256,6 +1301,7 @@ pub struct Input {
     style: StyleRefinement,
     appearance: bool,
     label: SharedString,
+    suffix: Vec<AnyElement>,
 }
 pub type Textarea = Input;
 impl Input {
@@ -1265,10 +1311,15 @@ impl Input {
             style: StyleRefinement::default(),
             appearance: true,
             label: "".into(),
+            suffix: vec![],
         }
     }
+    pub fn suffix(mut self, child: impl IntoElement) -> Self {
+        self.suffix.push(child.into_any_element());
+        self
+    }
     pub fn small(self) -> Self {
-        self.h(px(27.))
+        self.h(px(32.))
     }
     pub fn appearance(mut self, value: bool) -> Self {
         self.appearance = value;
@@ -1289,21 +1340,28 @@ impl RenderOnce for Input {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         self.state
             .update(cx, |state, _| state.label = self.label.clone());
+        let focus = self.state.read(cx).focus.clone();
+        let label = self.label.clone();
         let mut el = div()
             .id(("input", self.state.entity_id()))
+            .debug_selector(move || label.to_string())
+            .track_focus(&focus)
+            .h_flex()
             .w_full()
-            .h(px(30.))
+            .h(px(34.))
             .min_w_0()
             .px_2()
-            .py_1()
+            .py_0()
             .aria_label(self.label)
             .when(self.appearance, |d| {
                 d.border_1()
                     .rounded_md()
                     .border_color(cx.theme().border)
+                    .focus(|s| s.border_color(cx.theme().primary))
                     .bg(cx.theme().background)
             });
         el.style().refine(&self.style);
-        el.child(self.state)
+        el.child(div().flex_1().min_w_0().h_full().child(self.state))
+            .children(self.suffix)
     }
 }

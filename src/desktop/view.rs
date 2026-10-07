@@ -673,102 +673,142 @@ impl Edot {
     }
     pub(super) fn search_fields(&self, global: bool, cx: &mut Context<Self>) -> AnyElement {
         let panel = if global { &self.global } else { &self.local };
+        let query = Input::new(&panel.query)
+            .small()
+            .aria_label(if global {
+                "전체 메모 검색어"
+            } else {
+                "현재 메모 검색어"
+            })
+            .suffix(
+                Button::new(if global { "global-case" } else { "local-case" })
+                    .ghost()
+                    .small()
+                    .w(px(26.))
+                    .px_0()
+                    .label("Aa")
+                    .tooltip("대소문자 구분")
+                    .selected(panel.case)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if global {
+                            this.global.case = !this.global.case;
+                            this.queue_search(window, cx);
+                        } else {
+                            this.local.case = !this.local.case;
+                            this.find_next(false, true, window, cx);
+                        }
+                    })),
+            )
+            .suffix(
+                Button::new(if global {
+                    "global-regex"
+                } else {
+                    "local-regex"
+                })
+                .ghost()
+                .small()
+                .w(px(26.))
+                .px_0()
+                .label(".*")
+                .tooltip("정규식")
+                .selected(panel.regex)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if global {
+                        this.global.regex = !this.global.regex;
+                        this.queue_search(window, cx);
+                    } else {
+                        this.local.regex = !this.local.regex;
+                        this.find_next(false, true, window, cx);
+                    }
+                })),
+            );
         div()
             .v_flex()
-            .gap_2()
+            .gap(px(4.))
             .child(
                 div()
                     .h_flex()
-                    .gap_1()
-                    .child(Input::new(&panel.query).small().aria_label(if global {
-                        "전체 메모 검색어"
-                    } else {
-                        "현재 메모 검색어"
-                    }))
-                    .child(
-                        Button::new(if global { "global-case" } else { "local-case" })
-                            .ghost()
-                            .small()
-                            .label("Aa")
-                            .tooltip("대소문자 구분")
-                            .selected(panel.case)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if global {
-                                    this.global.case = !this.global.case;
-                                    this.queue_search(window, cx);
+                    .when(global, |row| {
+                        row.child(
+                            tool(
+                                "global-replace-toggle",
+                                if panel.replace {
+                                    IconName::ChevronDown
                                 } else {
-                                    this.local.case = !this.local.case;
-                                    this.find_next(false, true, window, cx);
-                                }
+                                    IconName::ChevronRight
+                                },
+                                "바꾸기 표시",
+                            )
+                            .w(px(18.))
+                            .flex_shrink_0()
+                            .px_0()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.global.replace = !this.global.replace;
+                                cx.notify();
                             })),
-                    )
-                    .child(
-                        Button::new(if global {
-                            "global-regex"
-                        } else {
-                            "local-regex"
-                        })
-                        .ghost()
-                        .small()
-                        .label(".*")
-                        .tooltip("정규식")
-                        .selected(panel.regex)
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                if global {
-                                    this.global.regex = !this.global.regex;
-                                    this.queue_search(window, cx);
-                                } else {
-                                    this.local.regex = !this.local.regex;
-                                    this.find_next(false, true, window, cx);
-                                }
-                            },
-                        )),
-                    ),
+                        )
+                    })
+                    .child(query),
             )
             .when(panel.replace, |view| {
                 view.child(
-                    Input::new(&panel.replacement)
-                        .small()
-                        .aria_label("바꿀 내용"),
+                    div().when(global, |d| d.pl(px(18.))).child(
+                        Input::new(&panel.replacement)
+                            .small()
+                            .aria_label(if global {
+                                "전체 메모 바꿀 내용"
+                            } else {
+                                "바꿀 내용"
+                            })
+                            .when(global, |input| {
+                                input.suffix(
+                                    Button::new("replace-global-all")
+                                        .ghost()
+                                        .small()
+                                        .w(px(26.))
+                                        .px_0()
+                                        .icon(IconName::ArrowRight)
+                                        .tooltip("모두 바꾸기")
+                                        .on_click(cx.listener(|this, _, w, cx| {
+                                            this.replace_global_all(w, cx)
+                                        })),
+                                )
+                            }),
+                    ),
                 )
             })
-            .when(panel.replace, |view| {
+            .when(panel.replace && !global, |view| {
                 view.child(
                     div()
                         .h_flex()
                         .justify_end()
                         .gap_2()
-                        .when(!global, |row| {
-                            row.child(Button::new("replace-one").small().label("바꾸기").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.replace_local(false, window, cx)
-                                }),
-                            ))
-                        })
+                        .child(Button::new("replace-one").small().label("바꾸기").on_click(
+                            cx.listener(|this, _, w, cx| this.replace_local(false, w, cx)),
+                        ))
                         .child(
-                            Button::new(if global {
-                                "replace-global-all"
-                            } else {
-                                "replace-local-all"
-                            })
-                            .small()
-                            .label("모두 바꾸기")
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    if global {
-                                        this.replace_global_all(window, cx);
-                                    } else {
-                                        this.replace_local(true, window, cx);
-                                    }
-                                },
-                            )),
+                            Button::new("replace-local-all")
+                                .small()
+                                .label("모두 바꾸기")
+                                .on_click(
+                                    cx.listener(|this, _, w, cx| this.replace_local(true, w, cx)),
+                                ),
                         ),
                 )
             })
             .child(
                 div()
-                    .text_xs()
+                    .debug_selector(move || {
+                        if global {
+                            "global-message"
+                        } else {
+                            "local-message"
+                        }
+                        .into()
+                    })
+                    .px_1()
+                    .py_1()
+                    .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(panel.message.clone()),
             )
@@ -776,6 +816,8 @@ impl Edot {
     }
     pub(super) fn local_view(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
+            .font_family("Segoe UI")
+            .text_size(px(15.))
             .occlude()
             .absolute()
             .right_3()
@@ -861,32 +903,23 @@ impl Edot {
             .child(
                 div()
                     .v_flex()
-                    .gap_2()
+                    .gap(px(2.))
                     .p_2()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .child(
                         div()
                             .h_flex()
-                            .gap_1()
+                            .gap_0()
                             .child(
-                                tool(
-                                    "global-replace-toggle",
-                                    if self.global.replace {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    },
-                                    "바꾸기 표시",
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.global.replace = !this.global.replace;
-                                        cx.notify();
-                                    },
-                                )),
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_sm()
+                                    .child("검색"),
                             )
-                            .child(div().flex_1())
                             .child(
                                 tool("global-prev", IconName::ChevronUp, "이전 결과").on_click(
                                     cx.listener(|this, _, window, cx| {
@@ -926,14 +959,7 @@ impl Edot {
                                         cx.notify();
                                     },
                                 )),
-                            )
-                            .child(tool("global-close", IconName::Close, "검색 닫기").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.search_mode = false;
-                                    this.tree_focus.focus(window, cx);
-                                    cx.notify();
-                                }),
-                            )),
+                            ),
                     )
                     .child(self.search_fields(true, cx)),
             )
@@ -944,6 +970,21 @@ impl Edot {
                     .flex_1()
                     .min_h_0()
                     .track_focus(&self.results_focus)
+                    .when(self.result_rows.is_empty() && !self.scanning, |host| {
+                        host.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .p_3()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if self.global.query.read(cx).value().is_empty() {
+                                    "메모 본문에서 검색합니다"
+                                } else {
+                                    "일치하는 텍스트가 없습니다"
+                                }),
+                        )
+                    })
                     .child(list)
                     .child(Scrollbar::vertical(&self.result_scroll)),
             )
@@ -955,7 +996,11 @@ impl Edot {
         let id = group.id;
         let selected = self.result_cursor == Some(index);
         let mut item = div()
-            .id(("result", index))
+            .id(SharedString::from(format!(
+                "result-{id}-{:?}",
+                row.hit.map(|hit| group.matches[hit].range)
+            )))
+            .debug_selector(move || format!("result-{index}"))
             .h_flex()
             .h(px(global_search::ROW_HEIGHT as f32))
             .w_full()
@@ -965,9 +1010,16 @@ impl Edot {
             .cursor_pointer()
             .when(selected, |row| row.bg(cx.theme().selection))
             .when(!selected, |row| row.hover(|s| s.bg(cx.theme().accent)))
-            .on_click(
-                cx.listener(move |this, _, window, cx| this.activate_result(index, window, cx)),
-            );
+            .on_click(cx.listener({
+                let identity = (id, row.hit.map(|hit| group.matches[hit].range));
+                move |this, _, window, cx| {
+                    if let Some(index) = (0..this.result_rows.len())
+                        .find(|&i| this.result_identity(i) == Some(identity))
+                    {
+                        this.activate_result(index, window, cx);
+                    }
+                }
+            }));
         if let Some(hit) = row.hit {
             let result = &group.matches[hit];
             let range = result.range;
@@ -1253,24 +1305,15 @@ impl Edot {
                 .size_full(),
             )
             .child(
-                // Keep the gutter outside the scrollable editor and its clip.
-                div()
-                    .debug_selector(|| "body-text-viewport".into())
-                    .absolute()
-                    .left(px(16.))
-                    .right(px(4.))
-                    .top(px(6.))
-                    .bottom_0()
-                    .overflow_hidden()
-                    .child(
-                        Textarea::new(&editor)
-                            .h(relative(1.))
-                            .appearance(false)
-                            .font_family(self.settings.font.clone())
-                            .text_size(px(font_size))
-                            .p_0()
-                            .aria_label("메모 본문"),
-                    ),
+                // The editor owns its content padding. Its viewport and clip
+                // cover the whole body, including the initial blank margins.
+                Textarea::new(&editor)
+                    .h(relative(1.))
+                    .appearance(false)
+                    .font_family(self.settings.font.clone())
+                    .text_size(px(font_size))
+                    .p_0()
+                    .aria_label("메모 본문"),
             )
             .context_menu(move |mut menu, _, _| {
                 for (label, action) in [

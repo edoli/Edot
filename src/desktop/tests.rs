@@ -1007,51 +1007,11 @@ fn dropdown_empty_search_keeps_value_and_reopen_resets_filter(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn body_gutter_and_line_start_stay_fixed_during_scroll(cx: &mut TestAppContext) {
+fn body_padding_scrolls_inside_the_full_editor_clip(cx: &mut TestAppContext) {
     use gpui::EntityInputHandler;
     let f = Fixture::new(cx);
     let editor = f.update(cx, |this, w, cx| {
         let editor = this.active_editor().unwrap();
-        editor.update(cx, |s, cx| {
-            s.set_value("가나다 ABC 123\n".repeat(400), w, cx)
-        });
-        editor
-    });
-    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
-    visual.update(|w, cx| w.render_frame(cx));
-    let viewport = visual.debug_bounds("text-input").unwrap();
-    let body = visual.debug_bounds("body-editor").unwrap();
-    assert_eq!(viewport.left() - body.left(), px(16.));
-    assert_eq!(viewport.top() - body.top(), px(6.));
-    assert_eq!(visual.debug_bounds("body-text-viewport").unwrap(), viewport);
-    let caret = f.update(cx, |_, w, cx| {
-        editor.update(cx, |s, cx| {
-            s.bounds_for_range(0..0, Bounds::default(), w, cx).unwrap()
-        })
-    });
-    assert_eq!(caret.left(), viewport.left());
-    for _ in 0..5 {
-        visual.simulate_event(gpui::ScrollWheelEvent {
-            position: viewport.center(),
-            delta: gpui::ScrollDelta::Lines(point(0., -3.)),
-            ..Default::default()
-        });
-        visual.update(|w, cx| w.render_frame(cx));
-        f.update(cx, |_, w, cx| {
-            editor.update(cx, |s, cx| {
-                assert!(s.scroll_offset().y < px(0.));
-                assert_eq!(s.scroll_offset().x, px(0.));
-                assert_eq!(
-                    s.bounds_for_range(0..0, Bounds::default(), w, cx)
-                        .unwrap()
-                        .left(),
-                    viewport.left()
-                );
-            })
-        });
-        assert_eq!(visual.debug_bounds("text-input").unwrap(), viewport);
-    }
-    f.update(cx, |_, w, cx| {
         editor.update(cx, |s, cx| {
             s.set_soft_wrap(false, w, cx);
             s.set_value(
@@ -1059,39 +1019,70 @@ fn body_gutter_and_line_start_stay_fixed_during_scroll(cx: &mut TestAppContext) 
                 w,
                 cx,
             );
-        })
+        });
+        editor
     });
-    visual.update(|w, cx| w.render_frame(cx));
-    visual.simulate_event(gpui::ScrollWheelEvent {
-        position: viewport.center(),
-        delta: gpui::ScrollDelta::Pixels(point(px(-125.), px(0.))),
-        touch_phase: gpui::TouchPhase::Started,
-        ..Default::default()
-    });
-    visual.simulate_event(gpui::ScrollWheelEvent {
-        position: viewport.center(),
-        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-120.))),
-        touch_phase: gpui::TouchPhase::Started,
-        ..Default::default()
-    });
-    visual.update(|w, cx| w.render_frame(cx));
-    f.update(cx, |_, _, cx| {
-        assert!(editor.read(cx).scroll_offset().x < px(0.));
-        assert!(editor.read(cx).scroll_offset().y < px(0.));
-    });
-    assert_eq!(visual.debug_bounds("body-text-viewport").unwrap(), viewport);
-    assert_eq!(visual.debug_bounds("text-input").unwrap(), viewport);
-    f.update(cx, |_, w, cx| {
-        editor.update(cx, |s, cx| s.set_soft_wrap(true, w, cx))
-    });
-    visual.update(|w, cx| w.render_frame(cx));
-    f.update(cx, |_, _, cx| {
-        assert_eq!(editor.read(cx).scroll_offset().x, px(0.))
-    });
-    assert_eq!(
-        visual.debug_bounds("text-input").unwrap().left() - body.left(),
-        px(16.)
-    );
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    for scale in [1., 1.25, 1.5, 2.] {
+        visual.simulate_scale_factor_change(scale);
+        f.update(cx, |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                s.set_soft_wrap(false, w, cx);
+                s.set_scroll_offset(point(px(0.), px(0.)), cx);
+            })
+        });
+        visual.update(|w, cx| w.render_frame(cx));
+        let body = visual.debug_bounds("body-editor").unwrap();
+        f.update(cx, |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                let initial = s.bounds_for_range(0..0, Bounds::default(), w, cx).unwrap();
+                assert_eq!(initial.left(), body.left() + px(16.));
+                assert_eq!(initial.top(), body.top() + px(6.));
+                // Inspect the effective paint mask, not only layout coordinates.
+                assert_eq!(s.paint_clip(), body);
+            })
+        });
+        // Move the first character INTO what used to be the blank margins.
+        for (delta, expected) in [
+            (point(px(-12.), px(0.)), point(px(4.), px(6.))),
+            (point(px(0.), px(-3.)), point(px(4.), px(3.))),
+        ] {
+            visual.simulate_event(gpui::ScrollWheelEvent {
+                position: body.center(),
+                delta: gpui::ScrollDelta::Pixels(delta),
+                touch_phase: gpui::TouchPhase::Started,
+                ..Default::default()
+            });
+            visual.update(|w, cx| w.render_frame(cx));
+            f.update(cx, |_, w, cx| {
+                editor.update(cx, |s, cx| {
+                    let caret = s.bounds_for_range(0..0, Bounds::default(), w, cx).unwrap();
+                    assert_eq!(caret.origin, body.origin + expected);
+                    assert!(s.paint_clip().contains(&caret.origin));
+                    assert_eq!(s.character_index_for_point(caret.origin, w, cx), Some(0));
+                    assert_eq!(s.paint_clip(), body);
+                })
+            });
+        }
+        f.press(cx, "ctrl-home");
+        f.update(cx, |_, _, cx| {
+            assert_eq!(editor.read(cx).scroll_offset(), point(px(0.), px(0.)))
+        });
+        f.update(cx, |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                s.set_soft_wrap(true, w, cx);
+                s.set_scroll_offset(point(px(0.), px(-3.)), cx);
+            })
+        });
+        visual.update(|w, cx| w.render_frame(cx));
+        f.update(cx, |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                let caret = s.bounds_for_range(0..0, Bounds::default(), w, cx).unwrap();
+                assert_eq!(caret.top(), body.top() + px(3.));
+                assert!(s.paint_clip().contains(&caret.origin));
+            })
+        });
+    }
 }
 
 #[gpui::test]
@@ -1257,5 +1248,356 @@ fn windows_shift_wheel_is_not_rotated_twice(cx: &mut TestAppContext) {
     f.update(cx, |_, _, cx| {
         assert!(editor.read(cx).scroll_offset().x < px(0.));
         assert_eq!(editor.read(cx).scroll_offset().y, px(0.));
+    });
+}
+
+fn settle_search(cx: &mut TestAppContext) {
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn search_fields_center_text_and_paint_focus_border(cx: &mut TestAppContext) {
+    use crate::widgets::ActiveTheme;
+    use gpui::EntityInputHandler;
+    let f = Fixture::new(cx);
+    f.update(cx, |this, _, _| {
+        this.settings.font_size = 40;
+        this.zoom = 200;
+    });
+    for global in [false, true] {
+        let (query, replacement) = f.update(cx, |this, w, cx| {
+            this.show_find(global, true, w, cx);
+            let panel = if global { &this.global } else { &this.local };
+            (panel.query.clone(), panel.replacement.clone())
+        });
+        let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+        for scale in [1., 1.25, 1.5, 2.] {
+            visual.simulate_scale_factor_change(scale);
+            for (entity, label) in [
+                (
+                    &query,
+                    if global {
+                        "전체 메모 검색어"
+                    } else {
+                        "현재 메모 검색어"
+                    },
+                ),
+                (
+                    &replacement,
+                    if global {
+                        "전체 메모 바꿀 내용"
+                    } else {
+                        "바꿀 내용"
+                    },
+                ),
+            ] {
+                f.update(cx, |_, w, cx| entity.update(cx, |s, cx| s.focus(w, cx)));
+                visual.update(|w, cx| w.render_frame(cx));
+                let field = visual.debug_bounds(label).unwrap();
+                assert_eq!(field.size.height, px(32.));
+                f.update(cx, |_, w, cx| {
+                    let caret = entity.update(cx, |s, cx| {
+                        s.bounds_for_range(0..0, Bounds::default(), w, cx).unwrap()
+                    });
+                    assert!(
+                        (f32::from(caret.center().y - field.center().y)).abs() < 0.6,
+                        "field={field:?} caret={caret:?}"
+                    );
+                    assert!(caret.top() > field.top() && caret.bottom() < field.bottom());
+                    let border = w
+                        .painted_quads()
+                        .into_iter()
+                        .find(|q| {
+                            q.bounds == field.scale(scale)
+                                && q.border_widths.top > gpui::ScaledPixels(0.)
+                        })
+                        .unwrap();
+                    assert_eq!(border.border_color, cx.theme().primary);
+                });
+                f.update(cx, |this, w, cx| this.focus_editor(w, cx));
+                visual.update(|w, cx| w.render_frame(cx));
+                f.update(cx, |_, w, cx| {
+                    let border = w
+                        .painted_quads()
+                        .into_iter()
+                        .find(|q| {
+                            q.bounds == field.scale(scale)
+                                && q.border_widths.top > gpui::ScaledPixels(0.)
+                        })
+                        .unwrap();
+                    assert_eq!(border.border_color, cx.theme().border);
+                });
+            }
+        }
+        if global {
+            let field = visual.debug_bounds("전체 메모 검색어").unwrap();
+            let replace = visual.debug_bounds("전체 메모 바꿀 내용").unwrap();
+            assert_eq!(field.left(), replace.left());
+            assert!(field.bottom() < replace.top());
+            // Escape returns focus to the body without closing global search.
+            f.press(cx, "escape");
+            f.update(cx, |this, _, _| assert!(this.search_mode));
+        }
+    }
+}
+
+#[gpui::test]
+fn search_result_first_click_survives_ime_confirmation(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let query = f.update(cx, |this, w, cx| {
+        this.open_note(f.ids[1], true, w, cx);
+        this.show_find(true, false, w, cx);
+        this.global.query.clone()
+    });
+    cx.update_window(f.window, |_, w, cx| {
+        let mut handler = ElementInputHandler::new(Bounds::default(), query.clone());
+        handler.replace_and_mark_text_in_range(None, "한글", Some(2..2), w, cx);
+    })
+    .unwrap();
+    settle_search(cx);
+    let generation = f.update(cx, |this, _, _| {
+        assert!(!this.scanning);
+        assert_eq!(this.rows[0].count, 2);
+        this.search_generation
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let result = visual.debug_bounds("result-1").unwrap().center();
+    visual.simulate_mouse_down(result, gpui::MouseButton::Left, gpui::Modifiers::default());
+    // Windows may confirm the composition as focus leaves the query.
+    visual.update(|w, cx| {
+        let mut handler = ElementInputHandler::new(Bounds::default(), query.clone());
+        handler.replace_text_in_range(None, "한글", w, cx);
+        w.render_frame(cx);
+    });
+    visual.simulate_mouse_up(result, gpui::MouseButton::Left, gpui::Modifiers::default());
+    f.update(cx, |this, _, cx| {
+        assert_eq!(this.search_generation, generation);
+        assert!(!this.scanning);
+        assert_eq!(this.session.active, Some(f.ids[0]));
+        assert_eq!(
+            this.active_editor().unwrap().read(cx).selected_value(),
+            "한글"
+        );
+    });
+}
+
+#[gpui::test]
+fn search_edit_updates_one_note_and_preserves_other_results(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, w, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| s.set_value("needle first\n".repeat(20), w, cx));
+        fs::write(
+            this.book.file(&this.dir, f.ids[1]),
+            "needle other\n".repeat(80),
+        )
+        .unwrap();
+        this.show_find(true, false, w, cx);
+        this.global
+            .query
+            .update(cx, |s, cx| s.set_value("needle", w, cx));
+        editor
+    });
+    settle_search(cx);
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let (generation, other_preview, anchor, selected, offset) = f.update(cx, |this, _, _| {
+        this.result_collapsed.insert(f.ids[2]);
+        this.rebuild_results();
+        let group = this.rows.iter().position(|r| r.id == f.ids[1]).unwrap();
+        let index = this
+            .result_rows
+            .iter()
+            .position(|r| r.group == group && r.hit == Some(10))
+            .unwrap();
+        this.result_cursor = Some(index);
+        let selected = this.result_identity(index).unwrap();
+        let top = index - 2;
+        let offset = point(
+            px(0.),
+            -px(top as f32 * crate::global_search::ROW_HEIGHT as f32 + 3.),
+        );
+        this.result_scroll.0.borrow().base_handle.set_offset(offset);
+        (
+            this.search_generation,
+            this.rows[group].matches[0].preview.clone(),
+            this.result_identity(top).unwrap(),
+            selected,
+            offset,
+        )
+    });
+    f.update(cx, |_, w, cx| {
+        editor.update(cx, |s, cx| {
+            s.replace_all("needle changed\n".repeat(25), w, cx)
+        })
+    });
+    f.update(cx, |this, _, _| {
+        assert!(!this.scanning);
+        assert_eq!(this.rows[0].count, 20, "keep old results during debounce");
+        assert_eq!(this.search_generation, generation);
+    });
+    settle_search(cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.rows[0].count, 25);
+        let other = this.rows.iter().find(|r| r.id == f.ids[1]).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&other.matches[0].preview, &other_preview),
+            "unmodified note was rescanned"
+        );
+        assert_eq!(
+            this.result_cursor.and_then(|i| this.result_identity(i)),
+            Some(selected)
+        );
+        assert!(this.result_collapsed.contains(&f.ids[2]));
+        let new_offset = this.result_scroll.0.borrow().base_handle.offset();
+        assert_eq!(
+            new_offset.y,
+            offset.y - px(5. * crate::global_search::ROW_HEIGHT as f32)
+        );
+        let top =
+            (f32::from(-new_offset.y) / crate::global_search::ROW_HEIGHT as f32).floor() as usize;
+        assert_eq!(this.result_identity(top), Some(anchor));
+    });
+    // Rapid edits use the latest revision; removing/re-adding a group preserves document order.
+    f.update(cx, |_, w, cx| {
+        editor.update(cx, |s, cx| s.replace_all("none", w, cx))
+    });
+    settle_search(cx);
+    f.update(cx, |this, _, _| {
+        assert!(!this.rows.iter().any(|r| r.id == f.ids[0]))
+    });
+    f.update(cx, |_, w, cx| {
+        editor.update(cx, |s, cx| s.replace_all("needle stale needle", w, cx))
+    });
+    f.update(cx, |_, w, cx| {
+        editor.update(cx, |s, cx| s.replace_all("needle latest", w, cx))
+    });
+    settle_search(cx);
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.rows[0].id, f.ids[0]);
+        assert_eq!(this.rows[0].count, 1);
+        assert!(this.rows[0].matches[0].preview.contains("latest"));
+        assert_eq!(this.search_generation, generation);
+    });
+    // A new query cancels any old per-note job.
+    f.update(cx, |this, w, cx| {
+        editor.update(cx, |s, cx| s.replace_all("needle queued", w, cx));
+        this.global
+            .query
+            .update(cx, |s, cx| s.set_value("other", w, cx));
+    });
+    settle_search(cx);
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.rows.len(), 1);
+        assert_eq!(this.rows[0].id, f.ids[1]);
+    });
+}
+
+#[gpui::test]
+fn search_edits_during_full_scan_and_in_multiple_notes_use_latest_text(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let (first, second) = f.update(cx, |this, w, cx| {
+        let first = this.active_editor().unwrap();
+        this.open_note(f.ids[1], true, w, cx);
+        let second = this.active_editor().unwrap();
+        this.show_find(true, false, w, cx);
+        this.global
+            .query
+            .update(cx, |s, cx| s.set_value("needle", w, cx));
+        (first, second)
+    });
+    f.update(cx, |this, w, cx| {
+        assert!(this.scanning);
+        first.update(cx, |s, cx| s.replace_all("needle during scan", w, cx));
+        second.update(cx, |s, cx| s.replace_all("needle second", w, cx));
+    });
+    settle_search(cx);
+    settle_search(cx);
+    f.update(cx, |this, _, _| {
+        assert!(!this.scanning);
+        assert!(this.pending_search_notes.is_empty());
+        assert_eq!(this.rows.len(), 3);
+        assert!(this.rows[0].matches[0].preview.contains("during scan"));
+    });
+    f.update(cx, |_, w, cx| {
+        first.update(cx, |s, cx| s.replace_all("needle one needle two", w, cx));
+        second.update(cx, |s, cx| s.replace_all("no match", w, cx));
+    });
+    settle_search(cx);
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.rows.len(), 2);
+        assert_eq!(this.rows[0].id, f.ids[0]);
+        assert_eq!(this.rows[0].count, 2);
+        assert_eq!(this.rows[1].id, f.ids[2]);
+    });
+    // An externally changed, unopened note is reconciled without clearing other groups.
+    f.update(cx, |this, w, cx| {
+        fs::write(
+            this.book.file(&this.dir, f.ids[2]),
+            "updated needle twice needle",
+        )
+        .unwrap();
+        this.open_match(
+            MatchKey {
+                id: f.ids[2],
+                range: CharRange { start: 6, end: 12 },
+            },
+            w,
+            cx,
+        );
+        assert_eq!(this.rows.len(), 2);
+    });
+    settle_search(cx);
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.rows[1].count, 2);
+        assert!(this.rows[1].matches[0].preview.contains("updated"));
+    });
+}
+
+#[gpui::test]
+fn search_preview_limit_refills_after_a_large_group_is_removed(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, w, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| {
+            s.set_value(
+                "needle\n".repeat(crate::global_search::MAX_RESULTS + 1),
+                w,
+                cx,
+            )
+        });
+        this.show_find(true, false, w, cx);
+        this.global
+            .query
+            .update(cx, |s, cx| s.set_value("needle", w, cx));
+        editor
+    });
+    settle_search(cx);
+    f.update(cx, |this, _, _| {
+        assert_eq!(
+            this.rows.iter().map(|r| r.matches.len()).sum::<usize>(),
+            crate::global_search::MAX_RESULTS
+        );
+        assert_eq!(this.rows[1].matches.len(), 0);
+    });
+    f.update(cx, |_, w, cx| {
+        editor.update(cx, |s, cx| s.replace_all("removed", w, cx))
+    });
+    for _ in 0..3 {
+        settle_search(cx);
+    }
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.rows.len(), 2);
+        assert!(
+            this.rows
+                .iter()
+                .all(|r| r.count == 1 && r.matches.len() == 1)
+        );
+        assert!(this.note_search_tasks.is_empty());
     });
 }

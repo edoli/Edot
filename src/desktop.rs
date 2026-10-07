@@ -13,7 +13,13 @@ use crate::{
     startup,
 };
 use gpui::{prelude::*, *};
-use std::{collections::HashSet, fs, io, path::PathBuf, rc::Rc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    path::PathBuf,
+    rc::Rc,
+    time::Duration,
+};
 
 mod interaction;
 mod keyboard;
@@ -48,7 +54,7 @@ struct SearchPanel {
 impl SearchPanel {
     fn new(window: &mut Window, cx: &mut App) -> Self {
         Self {
-            query: cx.new(|cx| InputState::new(window, cx).placeholder("검색어")),
+            query: cx.new(|cx| InputState::new(window, cx).placeholder("찾을 내용")),
             replacement: cx.new(|cx| InputState::new(window, cx).placeholder("바꿀 내용")),
             case: false,
             regex: false,
@@ -105,6 +111,9 @@ pub struct Edot {
     scanning: bool,
     pending_navigation: Option<bool>,
     global_task: Option<Task<()>>,
+    note_search_tasks: HashMap<u64, Task<()>>,
+    pending_search_notes: HashSet<u64>,
+    search_errors: usize,
     autosave: Option<Task<()>>,
     zoom: u32,
     status: String,
@@ -173,6 +182,9 @@ impl Edot {
             scanning: false,
             pending_navigation: None,
             global_task: None,
+            note_search_tasks: HashMap::new(),
+            pending_search_notes: HashSet::new(),
+            search_errors: 0,
             autosave: None,
             zoom: 100,
             status: "준비됨".into(),
@@ -341,6 +353,12 @@ impl Edot {
             };
             let editor = cx.new(|cx| {
                 TextareaState::new(window, cx)
+                    .content_padding(Edges {
+                        left: px(16.),
+                        top: px(6.),
+                        right: px(4.),
+                        bottom: px(0.),
+                    })
                     .soft_wrap(self.settings.wrap)
                     .default_value(text.clone())
             });
@@ -415,7 +433,7 @@ impl Edot {
             });
         }));
         if self.search_mode {
-            self.queue_search(window, cx);
+            self.queue_note_search(id, window, cx);
         }
         cx.notify();
     }

@@ -149,8 +149,7 @@ impl Edot {
                 self.find_visible = false;
                 self.focus_editor(window, cx);
             } else if self.search_mode {
-                self.search_mode = false;
-                self.tree_focus.focus(window, cx);
+                self.focus_editor(window, cx);
             }
             self.stop_drag();
             self.resizing = None;

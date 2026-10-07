@@ -166,6 +166,9 @@ impl Edot {
         self.search_generation += 1;
         let generation = self.search_generation;
         self.global_task = None;
+        self.note_search_tasks.clear();
+        self.pending_search_notes.clear();
+        self.search_errors = 0;
         self.rows.clear();
         self.result_rows.clear();
         self.result_cursor = None;
@@ -247,21 +250,12 @@ impl Edot {
                 if this.search_generation != generation {
                     return;
                 }
-                let total: usize = rows.iter().map(|row| row.count).sum();
-                this.global.message = format!("{total}곳 · {}개 메모", rows.len());
-                if errors > 0 {
-                    this.global
-                        .message
-                        .push_str(&format!(" · {errors}개 읽기 실패"));
-                }
-                if total > displayed {
-                    this.global
-                        .message
-                        .push_str(&format!(" · {displayed}개까지 표시"));
-                }
                 this.rows = rows;
+                this.search_errors = errors;
+                this.update_search_message();
                 this.rebuild_results();
                 this.scanning = false;
+                this.refresh_pending_notes(window, cx);
                 if let Some(backwards) = this.pending_navigation.take() {
                     this.global_next(backwards, window, cx);
                 }
@@ -269,6 +263,185 @@ impl Edot {
             });
         }));
         cx.notify();
+    }
+    fn update_search_message(&mut self) {
+        let total: usize = self.rows.iter().map(|r| r.count).sum();
+        let displayed: usize = self.rows.iter().map(|r| r.matches.len()).sum();
+        self.global.message = format!("{total}곳 · {}개 메모", self.rows.len());
+        if self.search_errors > 0 {
+            self.global
+                .message
+                .push_str(&format!(" · {}개 읽기 실패", self.search_errors));
+        }
+        if total > displayed {
+            self.global
+                .message
+                .push_str(&format!(" · {displayed}개까지 표시"));
+        }
+    }
+    fn refresh_pending_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for id in std::mem::take(&mut self.pending_search_notes) {
+            self.queue_note_search(id, window, cx);
+        }
+    }
+    pub(super) fn queue_note_search(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A full scan may already have read this note. Reconcile after it finishes.
+        if self.scanning {
+            self.pending_search_notes.insert(id);
+            return;
+        }
+        let Ok(Some(pattern)) = self.global.pattern(cx) else {
+            return;
+        };
+        let generation = self.search_generation;
+        self.note_search_tasks.remove(&id);
+        let task = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(180))
+                .await;
+            let Ok(Some((path, loaded, revision))) = this.update(cx, |this, cx| {
+                this.book.get(id)?;
+                let editor = this
+                    .open
+                    .iter()
+                    .find(|t| t.id == id)
+                    .and_then(|t| t.editor.as_ref());
+                Some((
+                    this.book.file(&this.dir, id),
+                    editor.map(|e| e.read(cx).value()),
+                    editor.map(|e| e.read(cx).revision),
+                ))
+            }) else {
+                return;
+            };
+            let row = cx
+                .background_executor()
+                .spawn(async move {
+                    let text = loaded
+                        .map(|s| Ok(s.to_string()))
+                        .unwrap_or_else(|| fs::read_to_string(path))?;
+                    Ok::<_, io::Error>(global_search::scan(
+                        id,
+                        &text,
+                        &pattern,
+                        global_search::MAX_RESULTS,
+                    ))
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if generation != this.search_generation {
+                    return;
+                }
+                this.note_search_tasks.remove(&id);
+                let current = this
+                    .open
+                    .iter()
+                    .find(|t| t.id == id)
+                    .and_then(|t| t.editor.as_ref())
+                    .map(|e| e.read(cx).revision);
+                if current != revision {
+                    this.queue_note_search(id, window, cx);
+                    return;
+                }
+                match row {
+                    Ok(row) => {
+                        this.merge_note_results(id, row);
+                        // Only refill previously truncated previews when space becomes available.
+                        let displayed: usize = this.rows.iter().map(|r| r.matches.len()).sum();
+                        if displayed < global_search::MAX_RESULTS
+                            && let Some(next) = this
+                                .rows
+                                .iter()
+                                .find(|r| {
+                                    r.count > r.matches.len()
+                                        && !this.note_search_tasks.contains_key(&r.id)
+                                })
+                                .map(|r| r.id)
+                        {
+                            this.queue_note_search(next, window, cx);
+                        }
+                    }
+                    Err(error) => this.global.message = format!("메모 검색 실패: {error}"),
+                }
+                cx.notify();
+            });
+        });
+        self.note_search_tasks.insert(id, task);
+    }
+    pub(super) fn result_identity(&self, index: usize) -> Option<(u64, Option<CharRange>)> {
+        let row = self.result_rows.get(index)?;
+        let group = &self.rows[row.group];
+        Some((group.id, row.hit.map(|hit| group.matches[hit].range)))
+    }
+    fn merge_note_results(&mut self, id: u64, mut row: Option<ResultRow>) {
+        let selected = self.result_cursor.and_then(|i| self.result_identity(i));
+        let scroll = self.result_scroll.0.borrow().base_handle.clone();
+        let offset = scroll.offset();
+        let top = (f32::from(-offset.y) / global_search::ROW_HEIGHT as f32)
+            .floor()
+            .max(0.) as usize;
+        let anchor = self.result_identity(top);
+        let other_count: usize = self
+            .rows
+            .iter()
+            .filter(|r| r.id != id)
+            .map(|r| r.matches.len())
+            .sum();
+        if let Some(row) = &mut row {
+            row.matches
+                .truncate(global_search::MAX_RESULTS.saturating_sub(other_count));
+        }
+        if let Some(index) = self.rows.iter().position(|r| r.id == id) {
+            if let Some(row) = row {
+                self.rows[index] = row;
+            } else {
+                self.rows.remove(index);
+            }
+        } else if let Some(row) = row {
+            let order = self
+                .book
+                .notes
+                .iter()
+                .position(|n| n.id == id)
+                .unwrap_or(usize::MAX);
+            let index = self.rows.partition_point(|r| {
+                self.book
+                    .notes
+                    .iter()
+                    .position(|n| n.id == r.id)
+                    .unwrap_or(usize::MAX)
+                    < order
+            });
+            self.rows.insert(index, row);
+        }
+        self.rebuild_results();
+        self.result_cursor = selected.and_then(|key| {
+            (0..self.result_rows.len()).find(|&i| self.result_identity(i) == Some(key))
+        });
+        if let Some(key) = anchor
+            && let Some(index) =
+                (0..self.result_rows.len()).find(|&i| self.result_identity(i) == Some(key))
+        {
+            scroll.set_offset(point(
+                offset.x,
+                offset.y - px((index as f32 - top as f32) * global_search::ROW_HEIGHT as f32),
+            ));
+        }
+        if self.global.last.is_some_and(|key| {
+            key.id == id
+                && !self
+                    .rows
+                    .iter()
+                    .any(|r| r.id == id && r.matches.iter().any(|m| m.range == key.range))
+        }) {
+            self.global.last = None;
+        }
+        self.update_search_message();
     }
     pub(super) fn rebuild_results(&mut self) {
         self.result_rows = global_search::visible_rows(&self.rows, &self.result_collapsed);
@@ -303,7 +476,7 @@ impl Edot {
         });
         if !valid {
             self.global.message = "본문이 변경되었습니다. 결과를 새로 고칩니다".into();
-            self.queue_search(window, cx);
+            self.queue_note_search(key.id, window, cx);
             return;
         }
         if self.open_note(key.id, false, window, cx) {
@@ -361,7 +534,8 @@ impl Edot {
             _ => return,
         };
         let total: usize = self.rows.iter().map(|row| row.count).sum();
-        if total <= global_search::MAX_RESULTS {
+        let displayed: usize = self.rows.iter().map(|row| row.matches.len()).sum();
+        if displayed == total {
             let keys: Vec<_> = self
                 .rows
                 .iter()
@@ -451,6 +625,7 @@ impl Edot {
                     return;
                 }
                 this.scanning = false;
+                this.refresh_pending_notes(window, cx);
                 if let Some(key) = key {
                     this.select_global_match(key, window, cx);
                 }
