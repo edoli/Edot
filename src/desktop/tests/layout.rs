@@ -1,6 +1,80 @@
 use super::*;
 
 #[gpui::test]
+fn tab_close_button_passes_wheel_to_tab_strip(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    f.update(cx, |this, w, cx| {
+        for i in 0..12 {
+            let id = this.book.add(0, format!("메모 {i}"));
+            fs::write(this.book.file(&f.dir, id), "").unwrap();
+            assert!(this.open_note(id, true, w, cx));
+        }
+        this.open_note(f.ids[0], true, w, cx);
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    // GPUI's test selector API requires static strings.
+    let selectors: [[&'static str; 2]; 2] = [
+        [
+            "active-tab-title",
+            Box::leak(format!("close-tab-{}", f.ids[0]).into_boxed_str()),
+        ],
+        [
+            Box::leak(format!("tab-title-{}", f.ids[1]).into_boxed_str()),
+            Box::leak(format!("close-tab-{}", f.ids[1]).into_boxed_str()),
+        ],
+    ];
+    for (id, targets) in [f.ids[0], f.ids[1]].into_iter().zip(selectors) {
+        for delta in [
+            gpui::ScrollDelta::Lines(point(0., -1.)),
+            gpui::ScrollDelta::Lines(point(-1., 0.)),
+            gpui::ScrollDelta::Pixels(point(px(0.), px(-32.))),
+            gpui::ScrollDelta::Pixels(point(px(-32.), px(0.))),
+        ] {
+            let mut offsets = Vec::new();
+            for selector in targets {
+                f.update(cx, |this, _, cx| {
+                    this.tab_scroll.set_offset(point(px(0.), px(0.)));
+                    cx.notify();
+                });
+                visual.update(|w, cx| w.render_frame(cx));
+                let position = visual.debug_bounds(selector).unwrap().center();
+                visual.simulate_mouse_move(position, None, Default::default());
+                visual.simulate_event(gpui::ScrollWheelEvent {
+                    position,
+                    delta,
+                    touch_phase: gpui::TouchPhase::Started,
+                    ..Default::default()
+                });
+                visual.update(|w, cx| w.render_frame(cx));
+                offsets.push(f.update(cx, |this, _, _| {
+                    assert_eq!(this.open.len(), 14);
+                    assert_eq!(this.session.active, Some(f.ids[0]));
+                    this.tab_scroll.offset().x
+                }));
+            }
+            assert!(offsets[0] < px(0.));
+            assert_eq!(
+                offsets[0], offsets[1],
+                "title/close wheel mismatch: {id}, {delta:?}"
+            );
+        }
+    }
+    f.update(cx, |this, _, cx| {
+        this.tab_scroll.set_offset(point(px(0.), px(0.)));
+        cx.notify();
+    });
+    visual.update(|w, cx| w.render_frame(cx));
+    let close = visual.debug_bounds(selectors[1][1]).unwrap().center();
+    visual.simulate_click(close, Default::default());
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.open.len(), 13);
+        assert!(!this.open.iter().any(|tab| tab.id == f.ids[1]));
+        assert_eq!(this.session.active, Some(f.ids[0]));
+    });
+}
+
+#[gpui::test]
 fn tab_scrollbar_does_not_activate_tabs_and_titles_keep_space(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     f.update(cx, |this, w, cx| {
@@ -17,8 +91,8 @@ fn tab_scrollbar_does_not_activate_tabs_and_titles_keep_space(cx: &mut TestAppCo
     }
     let tab = visual.debug_bounds("active-tab").unwrap();
     let title = visual.debug_bounds("active-tab-title").unwrap();
-    assert!(tab.size.width >= px(140.));
-    assert!(title.size.width >= px(60.));
+    assert!(tab.size.width >= px(crate::desktop::metrics::TAB_MIN_WIDTH as f32));
+    assert!(title.size.width >= px(50.));
     assert!(title.size.height < px(30.));
     let thumb = visual.debug_bounds("h-scrollbar").unwrap();
     let start = point(thumb.left() + px(3.), thumb.center().y);

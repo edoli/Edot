@@ -104,15 +104,6 @@ impl Edot {
                         )
                     })
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                    .child(
-                        Icon::new(IconName::FileText)
-                            .size(px(15.))
-                            .text_color(if active {
-                                cx.theme().primary
-                            } else {
-                                cx.theme().muted_foreground
-                            }),
-                    )
                     .child(if renaming {
                         Input::new(&self.title_input)
                             .small()
@@ -139,7 +130,7 @@ impl Edot {
                         div()
                             .id(("close-tab", id))
                             .debug_selector(move || format!("close-tab-{id}"))
-                            .occlude()
+                            .block_mouse_except_scroll()
                             .flex_shrink_0()
                             .flex()
                             .items_center()
