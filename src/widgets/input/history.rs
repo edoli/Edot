@@ -1,6 +1,7 @@
 //! Undo transactions and clipboard operations.
 use super::*;
 pub(super) const TYPING_MERGE_INTERVAL: Duration = Duration::from_millis(700);
+const LINE_COPY_METADATA: &str = "edot-line-copy:1";
 
 impl InputState {
     pub(super) fn apply(&mut self, range: Range<usize>, text: &str) {
@@ -167,8 +168,17 @@ impl InputState {
         }
         let range = self.clipboard_range();
         if !range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.content[range].into()));
+            self.write_clipboard_range(range, cx);
         }
+    }
+    fn write_clipboard_range(&self, range: Range<usize>, cx: &mut Context<Self>) {
+        let text = self.content[range].to_string();
+        let item = if self.multiline && self.selection.is_empty() {
+            ClipboardItem::new_string_with_metadata(text, LINE_COPY_METADATA.into())
+        } else {
+            ClipboardItem::new_string(text)
+        };
+        cx.write_to_clipboard(item);
     }
     pub(super) fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
         if !self.extra.is_empty() {
@@ -194,15 +204,22 @@ impl InputState {
         }
         let range = self.clipboard_range();
         if !range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.content[range.clone()].into(),
-            ));
+            self.write_clipboard_range(range.clone(), cx);
             self.finish_composition();
             self.commit(range, "", false, cx);
         }
     }
     pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+        if let Some(item) = cx.read_from_clipboard()
+            && let Some(text) = item.text()
+        {
+            if self.multiline
+                && item.metadata().is_some_and(|m| m == LINE_COPY_METADATA)
+                && self.selected_ranges().all(|r| r.is_empty())
+            {
+                self.paste_line(text, cx);
+                return;
+            }
             if !self.extra.is_empty() {
                 self.finish_composition();
                 let ranges: Vec<_> = self.selected_ranges().collect();
@@ -228,5 +245,50 @@ impl InputState {
             self.replace(text, window, cx);
             self.last_edit = None;
         }
+    }
+
+    fn paste_line(&mut self, mut text: String, cx: &mut Context<Self>) {
+        self.finish_composition();
+        // A copied final line may have no terminator. Use the destination's
+        // existing line ending, or LF for a document with no line endings.
+        if !text.ends_with(['\r', '\n']) {
+            let newline = self.content.find(['\r', '\n']).map_or("\n", |at| {
+                if self.content[at..].starts_with("\r\n") {
+                    "\r\n"
+                } else {
+                    &self.content[at..at + 1]
+                }
+            });
+            text.push_str(newline);
+        }
+        let selection = self.selection.clone();
+        let mut extra = self.extra.clone();
+        let ranges: Vec<_> = self
+            .selected_ranges()
+            .map(|r| {
+                let start = self.clipboard_range_at(r).start;
+                start..start
+            })
+            .collect();
+        let mut starts: Vec<_> = ranges.iter().map(|r| r.start).collect();
+        starts.sort_unstable();
+        starts.dedup();
+        if extra.is_empty() {
+            self.commit(ranges[0].clone(), &text, false, cx);
+        } else {
+            let texts = vec![text.clone(); ranges.len()];
+            self.commit_multiple(ranges, texts, false, cx);
+        }
+        // Keep every caret on its original line and column after insertion.
+        let shifted = |at| at + starts.partition_point(|&start| start <= at) * text.len();
+        let cursor = shifted(selection.start);
+        self.selection = cursor..cursor;
+        for selection in &mut extra {
+            let cursor = shifted(selection.range.start);
+            selection.range = cursor..cursor;
+        }
+        self.extra = extra;
+        self.deduplicate_selections();
+        self.moved(cx);
     }
 }

@@ -402,12 +402,7 @@ impl InputState {
                 .map_or(self.content.len(), |i| at + i);
             self.set_selected_range(start..end, cx);
         } else if e.click_count == 2 {
-            let range = self
-                .content
-                .unicode_word_indices()
-                .find(|(i, s)| *i <= at && at < *i + s.len())
-                .map(|(i, s)| i..i + s.len())
-                .unwrap_or(at..self.next(at));
+            let range = self.word_at(at).unwrap_or(at..self.next(at));
             self.set_selected_range(range, cx);
         } else {
             self.move_to(at, e.modifiers.shift, cx);
