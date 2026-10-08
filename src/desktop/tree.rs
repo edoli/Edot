@@ -100,7 +100,9 @@ impl Edot {
         let Some((id, focus)) = self.rename.take() else {
             return true;
         };
-        let title = self.title_input.read(cx).value().trim().to_owned();
+        let title = crate::model::normalize_title(&self.title_input.read(cx).value())
+            .trim()
+            .to_owned();
         let mut success = true;
         if commit && !title.is_empty() && self.book.get(id).is_some_and(|n| n.title != title) {
             let previous = self.book.clone();

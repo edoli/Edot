@@ -50,8 +50,6 @@ impl Settings {
                     self.font_size = size;
                 }
             }
-            ("wrap", "1") => self.wrap = true,
-            ("wrap", "0") => self.wrap = false,
             _ => {}
         }
     }
@@ -60,7 +58,7 @@ impl Settings {
         Self::read_document(dir)?.settings()
     }
 
-    pub fn load_or_migrate(dir: &Path, vault: &Path) -> io::Result<Self> {
+    pub fn load_or_create(dir: &Path) -> io::Result<Self> {
         if dir.join(SETTINGS_FILE).try_exists()? {
             return Self::load(dir);
         }
@@ -68,40 +66,12 @@ impl Settings {
         if dir.join(SETTINGS_FILE).try_exists()? {
             return Self::load(dir);
         }
-        // The former app-generated TOML uses the same supported key/value syntax.
-        // Keep that file intact and publish the converted settings only once.
         let document = Self::read_document(dir)?;
-        let settings = if dir.join("settings.toml").try_exists()? {
-            document.settings()?
-        } else {
-            Self::read_legacy(vault)?
-        };
+        let settings = document.settings()?;
         replace_config_file(
             &dir.join(SETTINGS_FILE),
             document.updated(&settings).as_bytes(),
         )?;
-        Ok(settings)
-    }
-
-    fn read_legacy(dir: &Path) -> io::Result<Self> {
-        let text = match std::fs::read_to_string(dir.join("settings.tsv")) {
-            Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(error) => return Err(error),
-        };
-        let mut lines = text.lines();
-        if lines.next() != Some("EDOTSETTINGS1") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "지원하지 않는 이전 설정 형식입니다.",
-            ));
-        }
-        let mut settings = Self::default();
-        for line in lines {
-            if let Some((key, value)) = line.split_once('\t') {
-                settings.apply_stored(key, value);
-            }
-        }
         Ok(settings)
     }
 
@@ -123,14 +93,11 @@ impl Settings {
     }
 
     fn read_document(dir: &Path) -> io::Result<Document> {
-        for name in [SETTINGS_FILE, "settings.toml"] {
-            match std::fs::read_to_string(dir.join(name)) {
-                Ok(text) => return Document::parse(&text),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
+        match std::fs::read_to_string(dir.join(SETTINGS_FILE)) {
+            Ok(text) => Document::parse(&text),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Document::parse(""),
+            Err(error) => Err(error),
         }
-        Document::parse("")
     }
 
     pub fn save(&self, dir: &Path) -> io::Result<()> {

@@ -35,12 +35,12 @@ impl Notebook {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) if recover && error.kind() == io::ErrorKind::NotFound => {
-                String::from("EDOT1\n")
+                String::from("EDOT2\n")
             }
             Err(error) => return Err(error),
         };
         let mut lines = text.lines();
-        if lines.next() != Some("EDOT1") {
+        if lines.next() != Some("EDOT2") {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Unsupported tree index",
@@ -66,8 +66,11 @@ impl Notebook {
                 .ok_or_else(invalid)?
                 .parse()
                 .map_err(|_| invalid())?;
-            let title = String::from_utf8(decode_hex(parts.next().ok_or_else(invalid)?)?)
-                .map_err(|_| invalid())?;
+            let field = parts.next().ok_or_else(invalid)?;
+            if field.contains(['\t', '\r', '\n']) {
+                return Err(invalid());
+            }
+            let title = field.to_owned();
             if parts.next().is_some() || id == 0 || indices.insert(id, notes.len()).is_some() {
                 return Err(invalid());
             }
@@ -158,14 +161,17 @@ impl Notebook {
     }
 
     pub fn save(&self, dir: &Path) -> io::Result<()> {
-        let mut text = String::from("EDOT1\n");
+        let mut text = String::from("EDOT2\n");
         for n in &self.notes {
+            if n.title.contains(['\t', '\r', '\n']) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Titles cannot contain tabs or newlines",
+                ));
+            }
             text.push_str(&format!(
                 "{}\t{}\t{}\t{}\n",
-                n.id,
-                n.parent,
-                n.order,
-                encode_hex(n.title.as_bytes())
+                n.id, n.parent, n.order, n.title
             ));
         }
         replace_file(&dir.join("tree.tsv"), text.as_bytes())
@@ -443,27 +449,8 @@ impl Notebook {
     }
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 15) as usize] as char);
-    }
-    out
-}
-
-fn decode_hex(text: &str) -> io::Result<Vec<u8>> {
-    let bad = || io::Error::new(io::ErrorKind::InvalidData, "Invalid title encoding");
-    if !text.len().is_multiple_of(2) {
-        return Err(bad());
-    }
-    let mut out = Vec::new();
-    for pair in text.as_bytes().chunks_exact(2) {
-        let digit = |c: u8| (c as char).to_digit(16).map(|v| v as u8).ok_or_else(bad);
-        out.push((digit(pair[0])? << 4) | digit(pair[1])?);
-    }
-    Ok(out)
+pub fn normalize_title(text: &str) -> String {
+    text.replace("\r\n", " ").replace(['\t', '\r', '\n'], " ")
 }
 
 #[cfg(test)]
@@ -486,6 +473,52 @@ mod tests {
     }
 
     #[test]
+    fn plain_titles_round_trip_without_hex_guessing() {
+        let dir = loader_test_dir("plain-titles");
+        let text = "EDOT2\r\n1\t0\t0\t한글 😀 제목\r\n2\t1\t0\t414243\r\n3\t0\t1\t\r\n";
+        fs::write(dir.join("tree.tsv"), text).unwrap();
+        let book = Notebook::reload(&dir).unwrap();
+        assert_eq!(book.get(1).unwrap().title, "한글 😀 제목");
+        assert_eq!(book.get(2).unwrap().title, "414243");
+        assert_eq!(book.get(3).unwrap().title, "");
+        book.save(&dir).unwrap();
+        let saved = fs::read_to_string(dir.join("tree.tsv")).unwrap();
+        assert_eq!(saved, text.replace("\r\n", "\n"));
+        assert_eq!(Notebook::load(&dir).unwrap().notes, book.notes);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_plain_titles_cannot_corrupt_the_index() {
+        let dir = loader_test_dir("invalid-titles");
+        let original = "EDOT2\n1\t0\t0\t원래 제목\n";
+        fs::write(dir.join("tree.tsv"), original).unwrap();
+        let mut book = Notebook::load(&dir).unwrap();
+        for title in ["탭\t제목", "줄\n바꿈", "줄\r바꿈", "줄\r\n바꿈"] {
+            book.get_mut(1).unwrap().title = title.into();
+            assert_eq!(
+                book.save(&dir).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), original);
+            assert!(!dir.join("tree.tmp").exists());
+        }
+        for text in [
+            "EDOT2\n1\t0\t0\t탭\t제목\n",
+            "EDOT2\n1\t0\t0\t줄\r바꿈\n",
+            "EDOT2\n1\t0\t0\t줄\n바꿈\n",
+        ] {
+            fs::write(dir.join("tree.tsv"), text).unwrap();
+            assert_eq!(
+                Notebook::reload(&dir).err().unwrap().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), text);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn loader_preserves_row_order_forward_parents_and_sparse_ids() {
         let dir = loader_test_dir("rows");
         let expected = Notebook {
@@ -494,7 +527,7 @@ mod tests {
                     id: u64::MAX,
                     parent: 42,
                     order: 7,
-                    title: "한글\t제목\n😀".into(),
+                    title: "한글 제목 😀".into(),
                 },
                 Note {
                     id: 3,
@@ -527,7 +560,7 @@ mod tests {
         fs::write(dir.join("notes/7.txt"), "leftover body").unwrap();
         assert!(Notebook::reload(&dir).is_err());
         assert!(!dir.join("tree.tsv").exists());
-        fs::write(dir.join("tree.tsv"), "EDOT1\n").unwrap();
+        fs::write(dir.join("tree.tsv"), "EDOT2\n").unwrap();
         assert!(Notebook::reload(&dir).unwrap().notes.is_empty());
         assert_eq!(Notebook::load(&dir).unwrap().notes[0].id, 7);
         fs::remove_dir_all(dir).unwrap();
@@ -539,15 +572,15 @@ mod tests {
         fs::write(dir.join("notes/9.txt"), "unchanged orphan").unwrap();
         for text in [
             "WRONG\n",
-            "EDOT1\n0\t0\t0\t41\n",
-            "EDOT1\n1\t0\t0\t41\n1\t0\t1\t42\n",
-            "EDOT1\n1\t0\t0\t41\textra\n",
-            "EDOT1\n1\t0\t0\tg0\n",
-            "EDOT1\n1\t0\t0\tf\n",
-            "EDOT1\n1\t0\t0\tff\n",
-            "EDOT1\n1\t9\t0\t41\n", // An orphan file cannot repair a missing parent.
-            "EDOT1\n1\t1\t0\t41\n",
-            "EDOT1\n3\t1\t0\t43\n4\t0\t0\t44\n1\t2\t0\t41\n2\t1\t0\t42\n",
+            "EDOT1\n1\t0\t0\t414243\n",
+            "EDOT2\n1\t0\t0\tbad\rtitle\n",
+            "EDOT2\n1\t0\t0",
+            "EDOT2\n0\t0\t0\t41\n",
+            "EDOT2\n1\t0\t0\t41\n1\t0\t1\t42\n",
+            "EDOT2\n1\t0\t0\t41\textra\n",
+            "EDOT2\n1\t9\t0\t41\n", // An orphan file cannot repair a missing parent.
+            "EDOT2\n1\t1\t0\t41\n",
+            "EDOT2\n3\t1\t0\t43\n4\t0\t0\t44\n1\t2\t0\t41\n2\t1\t0\t42\n",
         ] {
             fs::write(dir.join("tree.tsv"), text).unwrap();
             let error = Notebook::load(&dir).err().expect("invalid tree accepted");
@@ -564,7 +597,7 @@ mod tests {
     #[test]
     fn loader_recovers_each_orphan_id_once_with_existing_root_count() {
         let dir = loader_test_dir("recovery");
-        fs::write(dir.join("tree.tsv"), "EDOT1\n2\t50\t0\t43\n50\t0\t9\t52\n").unwrap();
+        fs::write(dir.join("tree.tsv"), "EDOT2\n2\t50\t0\t43\n50\t0\t9\t52\n").unwrap();
         for name in [
             "2.txt", "7.txt", "007.txt", "11.txt", "0.txt", "a.txt", "12.TXT",
         ] {
@@ -599,7 +632,7 @@ mod tests {
         let dir = loader_test_dir("deep");
         const COUNT: u64 = 50_000;
         for cyclic in [false, true] {
-            let mut text = String::from("EDOT1\n");
+            let mut text = String::from("EDOT2\n");
             for id in (1..=COUNT).rev() {
                 let parent = if cyclic && id == 1 { COUNT } else { id - 1 };
                 writeln!(text, "{id}\t{parent}\t0\t41").unwrap();

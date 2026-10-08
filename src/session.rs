@@ -117,7 +117,7 @@ impl Session {
 mod tests {
     use super::*;
     #[test]
-    fn legacy_session_filters_missing_duplicates_and_restores_order() {
+    fn session_filters_missing_duplicates_and_restores_order() {
         let mut book = Notebook {
             next_id: 1,
             ..Default::default()
@@ -141,9 +141,9 @@ mod tests {
         let root = book.add(0, "root".into());
         let child = book.add(root, "child".into());
         let nested = book.add(child, "nested".into());
-        let legacy = Session::parse("EDOTSESSION1\n1\t260\t3\n3\n", &book).unwrap();
-        assert_eq!(legacy.active, Some(nested));
-        assert_eq!(legacy.collapsed(&book), HashSet::from([root, child]));
+        let session = Session::parse("EDOTSESSION1\n1\t260\t3\n3\n", &book).unwrap();
+        assert_eq!(session.active, Some(nested));
+        assert_eq!(session.collapsed(&book), HashSet::from([root, child]));
         let dir = std::env::temp_dir().join(format!(
             "edot-session-{}-{}",
             std::process::id(),
@@ -155,7 +155,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let session = Session {
             expanded: HashSet::from([root, nested, 999]),
-            ..legacy
+            ..session
         };
         session.save(&dir).unwrap();
         let restored = Session::load(&dir, &book);

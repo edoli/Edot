@@ -28,9 +28,7 @@ pub fn config_dir() -> PathBuf {
 
 impl Paths {
     pub fn resolve() -> io::Result<Self> {
-        let explicit = std::env::var_os("EDOT_VAULT_DIR")
-            .or_else(|| std::env::var_os("EDOT_DATA_DIR"))
-            .map(PathBuf::from);
+        let explicit = std::env::var_os("EDOT_VAULT_DIR").map(PathBuf::from);
         let local = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
@@ -38,7 +36,7 @@ impl Paths {
             std::env::args_os().skip(1),
             config_dir(),
             explicit,
-            local.join("Edot"),
+            local.join("Edot/vaults/Default"),
         )
     }
 
@@ -46,7 +44,7 @@ impl Paths {
         args: impl IntoIterator<Item = OsString>,
         config: PathBuf,
         preferred: Option<PathBuf>,
-        legacy: PathBuf,
+        default_vault: PathBuf,
     ) -> io::Result<Self> {
         let mut args = args.into_iter();
         let mut cli = None;
@@ -76,13 +74,7 @@ impl Paths {
                     }
                     path
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    if legacy.join("tree.tsv").try_exists()? || legacy.join("notes").is_dir() {
-                        legacy
-                    } else {
-                        legacy.join("vaults/Default")
-                    }
-                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => default_vault,
                 Err(error) => return Err(error),
             }
         };
@@ -126,11 +118,11 @@ mod tests {
     fn chooses_cli_then_environment_then_remembered_vault() {
         let root = fixture();
         let config = root.join("config");
-        let legacy = root.join("old");
+        let default_vault = root.join("vaults/Default");
         let env = root.join("env");
         let cli = root.join("cli 한글");
         let choose =
-            |args, preferred| Paths::select(args, config.clone(), preferred, legacy.clone());
+            |args, preferred| Paths::select(args, config.clone(), preferred, default_vault.clone());
         let selected = choose(
             vec!["--vault".into(), cli.clone().into_os_string()],
             Some(env.clone()),
@@ -154,22 +146,22 @@ mod tests {
         assert_eq!(choose(vec![], Some(cli.clone())).unwrap().vault, cli);
     }
     #[test]
-    fn preserves_existing_store_and_places_new_default_in_vaults() {
+    fn default_vault_does_not_adopt_an_old_store() {
         let root = fixture();
         let config = root.join("config");
-        let legacy = root.join("old");
+        let default_vault = root.join("vaults/Default");
         assert_eq!(
-            Paths::select(vec![], config.clone(), None, legacy.clone())
+            Paths::select(vec![], config.clone(), None, default_vault.clone())
                 .unwrap()
                 .vault,
-            legacy.join("vaults/Default")
+            default_vault.clone()
         );
-        std::fs::create_dir_all(legacy.join("notes")).unwrap();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
         assert_eq!(
-            Paths::select(vec![], config, None, legacy.clone())
+            Paths::select(vec![], config, None, default_vault.clone())
                 .unwrap()
                 .vault,
-            legacy
+            default_vault
         );
     }
 }

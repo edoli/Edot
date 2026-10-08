@@ -21,6 +21,37 @@ fn sync(f: &Fixture, changes: Changes, cx: &mut TestAppContext) -> Changes {
 }
 
 #[gpui::test]
+fn external_plain_title_changes_are_reflected_and_invalid_titles_are_rejected(
+    cx: &mut TestAppContext,
+) {
+    let f = Fixture::new(cx);
+    let path = f.dir.join("tree.tsv");
+    let original = fs::read_to_string(&path).unwrap();
+    assert!(original.starts_with("EDOT2\n"));
+    let changes = Changes {
+        tree: true,
+        ..Default::default()
+    };
+    fs::write(&path, original.replace("첫 메모", "잘못된\t제목")).unwrap();
+    assert!(sync(&f, changes.clone(), cx).tree);
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.book.get(f.ids[0]).unwrap().title, "첫 메모");
+    });
+    let external = original.replace("첫 메모", "414243 한글 😀");
+    fs::write(&path, &external).unwrap();
+    assert!(sync(&f, changes, cx).is_empty());
+    f.update(cx, |this, _, cx| {
+        assert_eq!(this.book.get(f.ids[0]).unwrap().title, "414243 한글 😀");
+        assert_eq!(this.session.active, Some(f.ids[0]));
+        assert_eq!(
+            this.active_editor().unwrap().read(cx).value(),
+            "🙂 한글12\r\n한글3\rkeep\n"
+        );
+    });
+    assert_eq!(fs::read_to_string(&path).unwrap(), external);
+}
+
+#[gpui::test]
 fn clean_external_reload_preserves_editor_selection_scroll_and_undo(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let original = format!("🙂 한글12\r\n한글3\rkeep\n{}", "more text\n".repeat(100));
@@ -184,7 +215,7 @@ fn external_tree_updates_keep_tabs_selection_and_expansion_and_reject_partial_in
             vec![f.ids[0], f.ids[1]]
         );
     });
-    fs::write(f.dir.join("tree.tsv"), "EDOT1\n1\t").unwrap();
+    fs::write(f.dir.join("tree.tsv"), "EDOT2\n1\t").unwrap();
     assert!(sync(&f, Changes::all(), cx).tree);
     f.update(cx, |this, _, _| {
         assert_eq!(this.book.get(f.ids[0]).unwrap().title, "external title");
@@ -216,7 +247,7 @@ fn external_tree_deletion_removes_clean_tabs_but_keeps_dirty_app_notes(cx: &mut 
         });
         this.changed(f.ids[0], window, cx);
     });
-    fs::write(f.dir.join("tree.tsv"), "EDOT1\n").unwrap();
+    fs::write(f.dir.join("tree.tsv"), "EDOT2\n").unwrap();
     assert!(sync(&f, Changes::all(), cx).is_empty());
     f.update(cx, |this, _, cx| {
         assert_eq!(this.book.notes.len(), 1);

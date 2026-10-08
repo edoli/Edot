@@ -32,6 +32,35 @@ fn settings_round_trip_and_atomic_replace() {
 }
 
 #[test]
+fn initialization_uses_only_ini_and_leaves_other_files_untouched() {
+    let dir = fixture();
+    for name in ["settings.toml", "settings.tsv"] {
+        std::fs::write(dir.join(name), "version = 999\nold settings").unwrap();
+    }
+    let settings = Settings::load_or_create(&dir).unwrap();
+    assert_eq!(settings, Settings::default());
+    assert!(dir.join(SETTINGS_FILE).is_file());
+    let changed = Settings {
+        theme: ThemeMode::Dark,
+        ..settings
+    };
+    changed.save(&dir).unwrap();
+    assert_eq!(Settings::load_or_create(&dir).unwrap(), changed);
+    for name in ["settings.toml", "settings.tsv"] {
+        assert_eq!(
+            std::fs::read_to_string(dir.join(name)).unwrap(),
+            "version = 999\nold settings"
+        );
+    }
+    std::fs::write(dir.join(SETTINGS_FILE), "version = 999").unwrap();
+    assert!(Settings::load_or_create(&dir).is_err());
+    assert_eq!(
+        std::fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap(),
+        "version = 999"
+    );
+}
+
+#[test]
 fn invalid_values_fall_back_but_unknown_version_is_rejected() {
     let text = format!(
         "version=1\ntheme='unknown'\nwrap='bad'\nfont='{}'\nfuture=1\n",
@@ -130,46 +159,6 @@ fn parallel_saves_publish_complete_documents_and_preserve_unknown_keys() {
 }
 
 #[test]
-fn imports_previous_global_toml_once_without_changing_source() {
-    let dir = fixture();
-    let vault = dir.join("vault");
-    let legacy = "# Original preferences\nversion = 1\ntheme = \"dark\"\nfont = \"맑은 고딕\"\nfont_size = 14\nwrap = false\n[extension]\nanswer = 42\n";
-    std::fs::write(dir.join("settings.toml"), legacy).unwrap();
-    let imported = Settings::load_or_migrate(&dir, &vault).unwrap();
-    assert_eq!(imported.theme, ThemeMode::Dark);
-    assert_eq!(imported.font, "맑은 고딕");
-    assert_eq!(imported.font_size, 14);
-    assert!(!imported.wrap);
-    assert_eq!(
-        std::fs::read_to_string(dir.join("settings.toml")).unwrap(),
-        legacy
-    );
-    let ini = std::fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap();
-    assert!(ini.contains("# Original preferences"));
-    assert!(ini.contains("[extension]\nanswer = 42"));
-    // A stale or corrupt old file must not override the current global settings.
-    std::fs::write(dir.join("settings.toml"), "version = 999").unwrap();
-    assert_eq!(Settings::load_or_migrate(&dir, &vault).unwrap(), imported);
-    assert_eq!(Settings::load(&dir).unwrap(), imported);
-}
-
-#[test]
-fn invalid_legacy_config_is_preserved_and_not_replaced_with_defaults() {
-    let dir = fixture();
-    let vault = dir.join("vault");
-    for source in ["version = 999", "font = \"unterminated", "font = [\n"] {
-        std::fs::write(dir.join("settings.toml"), source).unwrap();
-        assert!(Settings::load_or_migrate(&dir, &vault).is_err());
-        assert!(Settings::default().save(&dir).is_err());
-        assert_eq!(
-            std::fs::read_to_string(dir.join("settings.toml")).unwrap(),
-            source
-        );
-        assert!(!dir.join(SETTINGS_FILE).exists());
-    }
-}
-
-#[test]
 fn ini_handles_plain_values_unicode_escapes_bom_and_empty_crlf_values() {
     let dir = fixture();
     let path = dir.join(SETTINGS_FILE);
@@ -209,51 +198,4 @@ fn ini_handles_plain_values_unicode_escapes_bom_and_empty_crlf_values() {
     ] {
         assert!(Settings::parse_ini(text).is_err(), "{text}");
     }
-}
-
-#[test]
-fn imports_vault_tsv_once_and_shares_global_ini_without_modifying_source() {
-    let dir = fixture();
-    let config = dir.join("config");
-    let first = dir.join("first");
-    let second = dir.join("second");
-    std::fs::create_dir(&first).unwrap();
-    std::fs::create_dir(&second).unwrap();
-    let source = "EDOTSETTINGS1\ntheme\tdark\nfont\t맑은 고딕\nfont_size\t24\nwrap\t0\n";
-    std::fs::write(first.join("settings.tsv"), source).unwrap();
-    std::fs::write(second.join("settings.tsv"), "invalid old settings").unwrap();
-    let imported = Settings::load_or_migrate(&config, &first).unwrap();
-    assert_eq!(imported.theme, ThemeMode::Dark);
-    assert_eq!(imported.font, "맑은 고딕");
-    assert_eq!(imported.font_size, 24);
-    assert!(!imported.wrap);
-    assert_eq!(
-        std::fs::read_to_string(first.join("settings.tsv")).unwrap(),
-        source
-    );
-    assert_eq!(
-        Settings::load_or_migrate(&config, &second).unwrap(),
-        imported
-    );
-    let changed = Settings {
-        font_size: 29,
-        ..imported
-    };
-    changed.save(&config).unwrap();
-    assert_eq!(Settings::load_or_migrate(&config, &first).unwrap(), changed);
-    assert!(!first.join(SETTINGS_FILE).exists());
-    assert!(!second.join(SETTINGS_FILE).exists());
-}
-
-#[test]
-fn malformed_old_vault_settings_block_initialization_and_are_preserved() {
-    let dir = fixture();
-    let config = dir.join("config");
-    std::fs::write(dir.join("settings.tsv"), "EDOTSETTINGS2\n").unwrap();
-    assert!(Settings::load_or_migrate(&config, &dir).is_err());
-    assert!(!config.join(SETTINGS_FILE).exists());
-    assert_eq!(
-        std::fs::read_to_string(dir.join("settings.tsv")).unwrap(),
-        "EDOTSETTINGS2\n"
-    );
 }

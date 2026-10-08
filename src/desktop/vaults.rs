@@ -22,7 +22,7 @@ impl LoadedVault {
         let book = Notebook::load(&paths.vault)?;
         let settings = match running_settings {
             Some(settings) => settings,
-            None => Settings::load_or_migrate(&paths.config, &paths.vault)?,
+            None => Settings::load_or_create(&paths.config)?,
         };
         let session = Session::load(&paths.vault, &book);
         if !paths.vault.join("tree.tsv").try_exists()? {
