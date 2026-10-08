@@ -1,6 +1,55 @@
 use super::*;
 
 #[gpui::test]
+fn global_settings_reload_on_activation_keeps_edits_and_rejects_broken_ini(
+    cx: &mut TestAppContext,
+) {
+    let f = Fixture::new(cx);
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let (editor, selection) = f.update(cx, |this, window, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |state, cx| {
+            state.replace_all("global settings retain unsaved edits", window, cx)
+        });
+        this.changed(f.ids[0], window, cx);
+        let selection = editor.read(cx).selected_range();
+        (editor, selection)
+    });
+    let external = Settings {
+        theme: ThemeMode::Dark,
+        font_size: 29,
+        wrap: false,
+        ..Default::default()
+    };
+    visual.deactivate_window();
+    external.save(&f.dir.join("test-global-config")).unwrap();
+    visual.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    f.update(cx, |this, _, cx| {
+        assert_eq!(this.settings, external);
+        assert_eq!(this.active_editor().unwrap(), editor);
+        assert_eq!(editor.read(cx).selected_range(), selection);
+        assert_eq!(
+            editor.read(cx).value(),
+            "global settings retain unsaved edits"
+        );
+        assert!(this.open.iter().any(|tab| tab.dirty));
+    });
+    visual.deactivate_window();
+    let path = f.dir.join("test-global-config/settings.ini");
+    fs::write(&path, "theme = [").unwrap();
+    visual.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.settings, external);
+        assert!(this.error.is_some());
+    });
+    assert_eq!(fs::read_to_string(path).unwrap(), "theme = [");
+}
+
+#[gpui::test]
 fn wrap_switch_only_toggles_near_status_and_track(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     f.update(cx, |this, w, cx| this.show_settings(w, cx));
@@ -105,7 +154,12 @@ fn settings_row_units_and_wrap_switch_work_without_desktop_input(cx: &mut TestAp
     f.press(cx, "enter");
     f.update(cx, |this, _, _| {
         assert_eq!(this.settings.font_size, 19);
-        assert_eq!(Settings::load(&f.dir).unwrap().font_size, 19);
+        assert_eq!(
+            Settings::load(&f.dir.join("test-global-config"))
+                .unwrap()
+                .font_size,
+            19
+        );
     });
     f.press(cx, "tab");
     f.update(cx, |this, window, _| {
@@ -120,7 +174,11 @@ fn settings_row_units_and_wrap_switch_work_without_desktop_input(cx: &mut TestAp
     f.press(cx, "space");
     f.update(cx, |this, _, cx| {
         assert!(!this.settings.wrap);
-        assert!(!Settings::load(&f.dir).unwrap().wrap);
+        assert!(
+            !Settings::load(&f.dir.join("test-global-config"))
+                .unwrap()
+                .wrap
+        );
         assert_eq!(this.active_editor().unwrap(), editor);
         assert_eq!(editor.read(cx).value(), "🙂 한글12\r\n한글3\rkeep\n");
     });
@@ -131,7 +189,11 @@ fn settings_row_units_and_wrap_switch_work_without_desktop_input(cx: &mut TestAp
     visual.simulate_click(wrap.center(), gpui::Modifiers::default());
     f.update(cx, |this, _, _| {
         assert!(!this.settings.wrap);
-        assert!(!Settings::load(&f.dir).unwrap().wrap);
+        assert!(
+            !Settings::load(&f.dir.join("test-global-config"))
+                .unwrap()
+                .wrap
+        );
     });
 }
 
@@ -156,7 +218,12 @@ fn system_theme_uses_gpui_appearance_and_keeps_editor_state(cx: &mut TestAppCont
         this.change_settings(settings, window, cx);
         assert_eq!(cx.theme().background, gpui::Hsla::from(gpui::rgb(0xffffff)));
         assert_eq!(cx.theme().bar, gpui::Hsla::from(gpui::rgb(0xf1f4f8)));
-        assert_eq!(Settings::load(&f.dir).unwrap().theme, ThemeMode::System);
+        assert_eq!(
+            Settings::load(&f.dir.join("test-global-config"))
+                .unwrap()
+                .theme,
+            ThemeMode::System
+        );
         assert_eq!(this.active_editor().unwrap(), editor);
         assert_eq!(editor.read(cx).value(), content);
         assert_eq!(editor.read(cx).selected_range(), selection);
@@ -193,7 +260,12 @@ fn font_picker_preserves_a_family_missing_from_gpui_fonts(cx: &mut TestAppContex
     f.press(cx, "enter");
     f.update(cx, |this, window, cx| {
         assert_eq!(this.settings.font, missing_font);
-        assert_eq!(Settings::load(&f.dir).unwrap().font, missing_font);
+        assert_eq!(
+            Settings::load(&f.dir.join("test-global-config"))
+                .unwrap()
+                .font,
+            missing_font
+        );
         this.show_settings(window, cx);
         this.show_settings(window, cx);
         assert_eq!(this.preferences.as_ref().unwrap().font, picker);
@@ -287,10 +359,12 @@ fn settings_close_only_when_focus_leaves_the_panel(cx: &mut TestAppContext) {
     });
     f.update(cx, |this, w, cx| this.show_settings(w, cx));
     visual.update(|w, cx| w.render_frame(cx));
-    // Leaving the final setting by keyboard also dismisses the panel.
+    // Tab moves from wrap to the vault button, then leaves the panel.
     f.update(cx, |this, w, cx| {
         this.preferences.as_ref().unwrap().wrap_focus.focus(w, cx)
     });
+    f.press(cx, "tab");
+    f.update(cx, |this, _, _| assert!(this.settings_visible));
     f.press(cx, "tab");
     f.update(cx, |this, _, _| assert!(!this.settings_visible));
 }
@@ -319,7 +393,11 @@ fn alt_z_toggles_and_saves_wrap_without_changing_editor_history(cx: &mut TestApp
     f.press(cx, "alt-z");
     f.update(cx, |this, _, cx| {
         assert!(!this.settings.wrap);
-        assert!(!Settings::load(&f.dir).unwrap().wrap);
+        assert!(
+            !Settings::load(&f.dir.join("test-global-config"))
+                .unwrap()
+                .wrap
+        );
         assert_eq!(editor.read(cx).value(), "changed");
     });
     f.press(cx, "ctrl-z");
@@ -330,7 +408,11 @@ fn alt_z_toggles_and_saves_wrap_without_changing_editor_history(cx: &mut TestApp
     f.press(cx, "alt-z");
     f.update(cx, |this, _, _| {
         assert!(this.settings.wrap);
-        assert!(Settings::load(&f.dir).unwrap().wrap);
+        assert!(
+            Settings::load(&f.dir.join("test-global-config"))
+                .unwrap()
+                .wrap
+        );
     });
 }
 

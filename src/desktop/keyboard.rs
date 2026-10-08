@@ -236,7 +236,7 @@ impl Edot {
             "end" => visible.last().copied(),
             "left" => self.caret.and_then(|id| {
                 if !self.book.children(id).is_empty() && !self.collapsed.contains(&id) {
-                    self.collapsed.insert(id);
+                    self.set_collapsed(id, true, cx);
                     None
                 } else {
                     self.book
@@ -246,7 +246,8 @@ impl Edot {
                 }
             }),
             "right" => self.caret.and_then(|id| {
-                if self.collapsed.remove(&id) {
+                if self.collapsed.contains(&id) {
+                    self.set_collapsed(id, false, cx);
                     None
                 } else {
                     self.book.children(id).first().copied()

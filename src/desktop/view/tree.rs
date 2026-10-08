@@ -277,10 +277,7 @@ impl Edot {
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
                             if folder {
-                                if !this.collapsed.insert(id) {
-                                    this.collapsed.remove(&id);
-                                }
-                                cx.notify();
+                                this.set_collapsed(id, !this.collapsed.contains(&id), cx);
                             }
                             cx.stop_propagation();
                         }),

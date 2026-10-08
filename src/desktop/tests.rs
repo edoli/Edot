@@ -1,5 +1,5 @@
 //! Headless GPUI event tests. They never send input to the user's desktop.
-use super::{Edot, Settings, StoreLock};
+use super::{Edot, LoadedVault, Settings, StoreLock};
 use crate::{
     editing::CharRange, global_search::MatchKey, model::Notebook, session::Session,
     settings::ThemeMode,
@@ -86,6 +86,7 @@ impl Fixture {
         Session {
             tabs: vec![first, second],
             active: Some(first),
+            expanded: std::collections::HashSet::from([first]),
             ..Default::default()
         }
         .save(&dir)
@@ -105,7 +106,13 @@ impl Fixture {
                     cx.new(|cx| {
                         Edot::new(
                             dir.clone(),
-                            Ok((lock, book, Settings::default())),
+                            dir.join("test-global-config"),
+                            Ok(LoadedVault {
+                                lock,
+                                session: Session::load(&dir, &book),
+                                book,
+                                settings: Settings::default(),
+                            }),
                             window,
                             cx,
                         )
@@ -159,3 +166,4 @@ mod preferences;
 mod search;
 mod shortcuts;
 mod tree;
+mod vaults;

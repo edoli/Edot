@@ -14,6 +14,8 @@ impl Edot {
             .right_3()
             .w(px(360.))
             .max_w_full()
+            .max_h(relative(0.9))
+            .overflow_y_scroll()
             .v_flex()
             .gap_5()
             .p_5()
@@ -106,6 +108,24 @@ impl Edot {
                         next.wrap = *value;
                         this.change_settings(next, window, cx);
                     })),
+            )
+            .child(
+                div()
+                    .v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("Vault · {}", vault::name(&self.dir))),
+                    )
+                    .child(
+                        Button::new("open-vault")
+                            .label("Vault 열기 / 만들기")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_vault(window, cx)),
+                            ),
+                    ),
             )
             .child(
                 div()

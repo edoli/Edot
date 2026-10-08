@@ -1,9 +1,5 @@
 //! Windows services only; all controls and editing are rendered by GPUI.
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-    ptr::null,
-};
+use std::{fs, io, path::Path, ptr::null};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE},
     System::Threading::CreateMutexW,
@@ -44,14 +40,4 @@ impl Drop for StoreLock {
             CloseHandle(self.0);
         }
     }
-}
-pub fn data_dir() -> PathBuf {
-    std::env::var_os("EDOT_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("LOCALAPPDATA")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-                .join("Edot")
-        })
 }

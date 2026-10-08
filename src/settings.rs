@@ -1,6 +1,10 @@
-use crate::storage::replace_file;
+use crate::storage::replace_config_file;
 use std::io;
 use std::path::Path;
+mod ini;
+use ini::Document;
+
+pub const SETTINGS_FILE: &str = "settings.ini";
 
 pub const DEFAULT_FONT: &str = "Consolas";
 pub const DEFAULT_FONT_SIZE: u32 = 18;
@@ -35,63 +39,116 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn parse(text: &str) -> io::Result<Self> {
+    pub(crate) fn apply_stored(&mut self, key: &str, value: &str) {
+        match (key, value) {
+            ("theme", "light") => self.theme = ThemeMode::Light,
+            ("theme", "dark") => self.theme = ThemeMode::Dark,
+            ("theme", "system") => self.theme = ThemeMode::System,
+            ("font", font) if valid_font(font) => self.font = font.into(),
+            ("font_size", size) => {
+                if let Ok(size @ MIN_FONT_SIZE..=MAX_FONT_SIZE) = size.parse::<u32>() {
+                    self.font_size = size;
+                }
+            }
+            ("wrap", "1") => self.wrap = true,
+            ("wrap", "0") => self.wrap = false,
+            _ => {}
+        }
+    }
+
+    pub fn load(dir: &Path) -> io::Result<Self> {
+        Self::read_document(dir)?.settings()
+    }
+
+    pub fn load_or_migrate(dir: &Path, vault: &Path) -> io::Result<Self> {
+        if dir.join(SETTINGS_FILE).try_exists()? {
+            return Self::load(dir);
+        }
+        let _lock = Self::lock(dir)?;
+        if dir.join(SETTINGS_FILE).try_exists()? {
+            return Self::load(dir);
+        }
+        // The former app-generated TOML uses the same supported key/value syntax.
+        // Keep that file intact and publish the converted settings only once.
+        let document = Self::read_document(dir)?;
+        let settings = if dir.join("settings.toml").try_exists()? {
+            document.settings()?
+        } else {
+            Self::read_legacy(vault)?
+        };
+        replace_config_file(
+            &dir.join(SETTINGS_FILE),
+            document.updated(&settings).as_bytes(),
+        )?;
+        Ok(settings)
+    }
+
+    fn read_legacy(dir: &Path) -> io::Result<Self> {
+        let text = match std::fs::read_to_string(dir.join("settings.tsv")) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(error),
+        };
         let mut lines = text.lines();
         if lines.next() != Some("EDOTSETTINGS1") {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "지원하지 않는 설정 형식입니다.",
+                "지원하지 않는 이전 설정 형식입니다.",
             ));
         }
         let mut settings = Self::default();
         for line in lines {
-            let Some((key, value)) = line.split_once('\t') else {
-                continue;
-            };
-            match (key, value) {
-                ("theme", "light") => settings.theme = ThemeMode::Light,
-                ("theme", "dark") => settings.theme = ThemeMode::Dark,
-                ("theme", "system") => settings.theme = ThemeMode::System,
-                ("font", font) if valid_font(font) => settings.font = font.into(),
-                ("font_size", size) => {
-                    if let Ok(size @ MIN_FONT_SIZE..=MAX_FONT_SIZE) = size.parse::<u32>() {
-                        settings.font_size = size;
-                    }
-                }
-                ("wrap", "1") => settings.wrap = true,
-                ("wrap", "0") => settings.wrap = false,
-                _ => {}
+            if let Some((key, value)) = line.split_once('\t') {
+                settings.apply_stored(key, value);
             }
         }
         Ok(settings)
     }
 
-    pub fn load(dir: &Path) -> io::Result<Self> {
-        match std::fs::read_to_string(dir.join("settings.tsv")) {
-            Ok(text) => Self::parse(&text),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error),
+    fn lock(dir: &Path) -> io::Result<std::fs::File> {
+        std::fs::create_dir_all(dir)?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(".settings.lock"))?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
+    #[cfg(test)]
+    fn parse_ini(text: &str) -> io::Result<Self> {
+        Document::parse(text)?.settings()
+    }
+
+    fn read_document(dir: &Path) -> io::Result<Document> {
+        for name in [SETTINGS_FILE, "settings.toml"] {
+            match std::fs::read_to_string(dir.join(name)) {
+                Ok(text) => return Document::parse(&text),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
+        Document::parse("")
     }
 
     pub fn save(&self, dir: &Path) -> io::Result<()> {
-        let mode = match self.theme {
-            ThemeMode::Light => "light",
-            ThemeMode::Dark => "dark",
-            ThemeMode::System => "system",
-        };
-        replace_file(
-            &dir.join("settings.tsv"),
-            format!(
-                "EDOTSETTINGS1\ntheme\t{mode}\nfont\t{}\nfont_size\t{}\nwrap\t{}\n",
-                self.font, self.font_size, self.wrap as u8
-            )
-            .as_bytes(),
-        )
+        if !valid_font(&self.font) || !(MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&self.font_size) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "설정 값이 잘못되었습니다.",
+            ));
+        }
+        let _lock = Self::lock(dir)?;
+        let path = dir.join(SETTINGS_FILE);
+        let document = Self::read_document(dir)?;
+        document.settings()?;
+        replace_config_file(&path, document.updated(self).as_bytes())
     }
 }
 
-/// Whether a font family name can round-trip through the existing settings format.
+/// Font family constraints shared by the editor and settings validation.
 pub fn valid_font(font: &str) -> bool {
     !font.trim().is_empty()
         && font.encode_utf16().count() < 32
@@ -99,53 +156,4 @@ pub fn valid_font(font: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn settings_round_trip_and_atomic_replace() {
-        let dir = std::env::temp_dir().join(format!("edot-settings-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(Settings::load(&dir).unwrap(), Settings::default());
-        let mut settings = Settings {
-            theme: ThemeMode::Dark,
-            font: "맑은 고딕".into(),
-            font_size: 24,
-            wrap: false,
-        };
-        settings.save(&dir).unwrap();
-        assert_eq!(Settings::load(&dir).unwrap(), settings);
-        settings.theme = ThemeMode::Light;
-        settings.save(&dir).unwrap();
-        assert_eq!(Settings::load(&dir).unwrap(), settings);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn invalid_values_fall_back_but_unknown_version_is_rejected() {
-        let text = format!(
-            "EDOTSETTINGS1\ntheme\tunknown\nwrap\tbad\nfont\t{}\nfuture\t1\n",
-            "a".repeat(32)
-        );
-        assert_eq!(Settings::parse(&text).unwrap(), Settings::default());
-        assert!(Settings::parse("EDOTSETTINGS2\n").is_err());
-        assert!(Settings::parse("garbage").is_err());
-        assert!(!valid_font("bad\tfont"));
-        assert!(!valid_font("\0"));
-        assert!(!valid_font(" "));
-        assert_eq!(
-            Settings::parse("EDOTSETTINGS1\nfont\tArial\n")
-                .unwrap()
-                .font_size,
-            18
-        );
-        for size in ["7", "73", "0", "-1", "bad", "4294967296"] {
-            assert_eq!(
-                Settings::parse(&format!("EDOTSETTINGS1\nfont_size\t{size}\n"))
-                    .unwrap()
-                    .font_size,
-                18
-            );
-        }
-    }
-}
+mod tests;

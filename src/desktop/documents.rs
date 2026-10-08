@@ -175,6 +175,10 @@ impl Edot {
     }
     pub(super) fn save_session(&mut self) -> io::Result<()> {
         self.session.tabs = self.open.iter().map(|tab| tab.id).collect();
+        self.session.expanded = Session::folders(&self.book)
+            .difference(&self.collapsed)
+            .copied()
+            .collect();
         self.session.save(&self.dir)
     }
     pub(super) fn close_tabs(

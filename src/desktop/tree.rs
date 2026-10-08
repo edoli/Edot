@@ -2,6 +2,29 @@
 use super::*;
 
 impl Edot {
+    pub(super) fn set_collapsed(&mut self, id: u64, collapsed: bool, cx: &mut Context<Self>) {
+        let was_collapsed = self.collapsed.contains(&id);
+        if was_collapsed == collapsed {
+            return;
+        }
+        if collapsed {
+            self.collapsed.insert(id);
+        } else {
+            self.collapsed.remove(&id);
+        }
+        let previous_session = self.session.clone();
+        if let Err(error) = self.save_session() {
+            if was_collapsed {
+                self.collapsed.insert(id);
+            } else {
+                self.collapsed.remove(&id);
+            }
+            self.session = previous_session;
+            self.fail("트리 상태를 저장하지 못했습니다", error, cx);
+        }
+        cx.notify();
+    }
+
     pub(super) fn create_note(
         &mut self,
         child: Option<u64>,

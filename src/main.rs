@@ -7,7 +7,7 @@ mod widgets;
 
 use edot::{
     datetime, drag, editing, global_search, model, search, selection, session, settings, storage,
-    tabs,
+    tabs, vault,
 };
 
 fn main() {

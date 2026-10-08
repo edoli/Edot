@@ -5,7 +5,7 @@ use crate::{
     editing::{self, CharRange},
     global_search::{self, MatchKey, ResultRow, VisibleRow},
     model::Notebook,
-    platform::{self, StoreLock},
+    platform::StoreLock,
     search::{Cache, Pattern},
     selection::Selection,
     session::Session,
@@ -13,6 +13,7 @@ use crate::{
     startup,
     storage::replace_file,
     tabs::CloseMode,
+    vault,
 };
 use gpui::{prelude::*, *};
 use std::{
@@ -34,6 +35,8 @@ mod shortcuts;
 #[cfg(test)]
 mod tests;
 mod tree;
+mod vaults;
+use vaults::LoadedVault;
 mod view;
 
 mod menus;
@@ -42,6 +45,7 @@ use metrics::*;
 
 pub struct Edot {
     dir: PathBuf,
+    config_dir: PathBuf,
     _lock: Option<StoreLock>,
     book: Notebook,
     settings: Settings,
@@ -91,20 +95,33 @@ pub struct Edot {
 impl Edot {
     fn new(
         dir: PathBuf,
-        loaded: Result<(StoreLock, Notebook, Settings), String>,
+        config_dir: PathBuf,
+        loaded: Result<LoadedVault, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (lock, book, settings, error) = match loaded {
-            Ok((lock, book, settings)) => (Some(lock), book, settings, None),
-            Err(error) => (None, Notebook::default(), Settings::default(), Some(error)),
+        let (lock, book, settings, session, error) = match loaded {
+            Ok(LoadedVault {
+                lock,
+                book,
+                settings,
+                session,
+            }) => (Some(lock), book, settings, session, None),
+            Err(error) => (
+                None,
+                Notebook::default(),
+                Settings::default(),
+                Session::default(),
+                Some(error),
+            ),
         };
-        let session = Session::load(&dir, &book);
+        let collapsed = session.collapsed(&book);
         let local = SearchPanel::new(window, cx);
         let global = SearchPanel::new(window, cx);
         let title_input = cx.new(|cx| InputState::new(window, cx));
         let mut this = Self {
             dir,
+            config_dir,
             _lock: lock,
             book,
             settings,
@@ -117,7 +134,7 @@ impl Edot {
             focus: cx.focus_handle(),
             selection: Selection::default(),
             caret: None,
-            collapsed: HashSet::new(),
+            collapsed,
             rename: None,
             title_input,
             local,
@@ -218,6 +235,9 @@ impl Edot {
             }));
         this.subscriptions
             .push(cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() && !this.startup_failed {
+                    this.reload_settings(window, cx);
+                }
                 if !window.is_window_active() && !this.dragging_notes.is_empty() {
                     cx.stop_active_drag(window);
                     this.stop_drag();
@@ -246,7 +266,11 @@ impl Edot {
         let active = this.session.active;
         this.session.active = None;
         if let Some(id) = active {
-            this.open_note(id, true, window, cx);
+            // Restore the active editor without changing saved tree expansion.
+            this.open_note(id, false, window, cx);
+            this.caret = Some(id);
+            this.selection.single(id);
+            this.focus_editor(window, cx);
         } else {
             this.tree_focus.focus(window, cx);
         }
@@ -262,15 +286,16 @@ impl Edot {
 
 pub fn run() {
     startup::start();
-    let dir = platform::data_dir();
-    let loaded = (|| -> io::Result<_> {
-        let lock = StoreLock::acquire(&dir)?;
-        let _span = startup::span("notebook.load");
-        let book = Notebook::load(&dir)?;
-        let settings = Settings::load(&dir)?;
-        Ok((lock, book, settings))
-    })()
-    .map_err(|error| format!("메모 저장소를 열지 못했습니다. 파일을 덮어쓰지 않습니다.\n{error}"));
+    let paths = vault::Paths::resolve();
+    let (dir, config_dir) = paths.as_ref().map_or_else(
+        |_| (PathBuf::new(), vault::config_dir()),
+        |paths| (paths.vault.clone(), paths.config.clone()),
+    );
+    let loaded = paths
+        .and_then(|paths| LoadedVault::open(&paths))
+        .map_err(|error| {
+            format!("메모 저장소를 열지 못했습니다. 파일을 덮어쓰지 않습니다.\n{error}")
+        });
     gpui_platform::application()
         .with_assets(component::Assets)
         .run(move |cx| {
@@ -290,13 +315,13 @@ pub fn run() {
                 ))),
                 window_min_size: Some(size(px(560.), px(360.))),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Edot 메모".into()),
+                    title: Some(format!("Edot — {}", vault::name(&dir)).into()),
                     ..Default::default()
                 }),
                 ..Default::default()
             };
             if let Err(error) = component::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Edot::new(dir, loaded, window, cx))
+                cx.new(|cx| Edot::new(dir, config_dir, loaded, window, cx))
             }) {
                 eprintln!("창을 열지 못했습니다: {error}");
                 cx.quit();

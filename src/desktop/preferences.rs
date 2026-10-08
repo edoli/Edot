@@ -30,11 +30,26 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Err(error) = next.save(&self.dir) {
+        if let Err(error) = next.save(&self.config_dir) {
             self.fail("설정을 저장하지 못했습니다", error, cx);
             self.sync_preferences(window, cx);
             return;
         }
+        self.apply_settings(next, window, cx);
+    }
+
+    pub(super) fn reload_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match Settings::load(&self.config_dir) {
+            Ok(settings) if settings != self.settings => {
+                self.apply_settings(settings, window, cx);
+                self.sync_preferences(window, cx);
+            }
+            Ok(_) => {}
+            Err(error) => self.fail("설정을 읽지 못했습니다", error, cx),
+        }
+    }
+
+    fn apply_settings(&mut self, next: Settings, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = next;
         self.apply_theme(window, cx);
         for tab in &self.open {
