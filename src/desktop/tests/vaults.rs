@@ -25,8 +25,8 @@ fn vault_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
         wrap: false,
         ..Default::default()
     };
-    settings.save(&f.dir.join("test-global-config")).unwrap();
     f.update(cx, |this, window, cx| {
+        this.change_settings(settings.clone(), window, cx);
         let editor = this.active_editor().unwrap();
         editor.update(cx, |state, cx| {
             state.replace_all("saved before switching", window, cx)
@@ -98,7 +98,7 @@ fn failed_vault_or_session_write_preserves_current_state(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn new_vault_is_initialized_as_text_and_settings_reload_keeps_edits(cx: &mut TestAppContext) {
+fn new_vault_is_initialized_as_text_and_keeps_running_settings(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let new = f.dir.join("new-vault");
     let config = f.dir.join("test-global-config");
@@ -115,18 +115,13 @@ fn new_vault_is_initialized_as_text_and_settings_reload_keeps_edits(cx: &mut Tes
             ..Default::default()
         };
         changed.save(&config).unwrap();
-        this.reload_settings(window, cx);
-        assert_eq!(this.settings, changed);
+        assert_eq!(this.settings, Settings::default());
         assert_eq!(editor.read(cx).value(), "unsaved edits");
         assert_eq!(editor.read(cx).selected_range(), selection);
         assert!(this.open[0].dirty);
         fs::write(config.join("settings.ini"), "version = 999").unwrap();
-        this.reload_settings(window, cx);
-        assert_eq!(this.settings, changed);
-        assert!(this.error.is_some());
-        fs::write(config.join("settings.ini"), "version = 1").unwrap();
-        this.error = None;
         assert!(this.switch_vault(new.clone(), window, cx));
+        assert_eq!(this.settings, Settings::default());
         assert!(this.book.notes.is_empty());
         assert!(this.open.is_empty());
     });
@@ -134,4 +129,8 @@ fn new_vault_is_initialized_as_text_and_settings_reload_keeps_edits(cx: &mut Tes
     assert_eq!(fs::read_to_string(new.join("tree.tsv")).unwrap(), "EDOT1\n");
     assert!(new.join("session.tsv").is_file());
     assert!(!new.join("edot.sqlite").exists());
+    assert_eq!(
+        fs::read_to_string(config.join("settings.ini")).unwrap(),
+        "version = 999"
+    );
 }

@@ -10,10 +10,20 @@ pub(super) struct LoadedVault {
 
 impl LoadedVault {
     pub(super) fn open(paths: &vault::Paths) -> io::Result<Self> {
+        Self::open_with_settings(paths, None)
+    }
+
+    fn open_with_settings(
+        paths: &vault::Paths,
+        running_settings: Option<Settings>,
+    ) -> io::Result<Self> {
         let lock = StoreLock::acquire(&paths.vault)?;
         let _span = startup::span("notebook.load");
         let book = Notebook::load(&paths.vault)?;
-        let settings = Settings::load_or_migrate(&paths.config, &paths.vault)?;
+        let settings = match running_settings {
+            Some(settings) => settings,
+            None => Settings::load_or_migrate(&paths.config, &paths.vault)?,
+        };
         let session = Session::load(&paths.vault, &book);
         if !paths.vault.join("tree.tsv").try_exists()? {
             book.save(&paths.vault)?;
@@ -80,7 +90,7 @@ impl Edot {
             vault: path.clone(),
             config: self.config_dir.clone(),
         };
-        match LoadedVault::open(&paths) {
+        match LoadedVault::open_with_settings(&paths, Some(self.settings.clone())) {
             Ok(loaded) => {
                 window.set_window_title(&format!("Edot — {}", vault::name(&path)));
                 *self = Self::new(path, self.config_dir.clone(), Ok(loaded), window, cx);

@@ -11,6 +11,7 @@ pub(super) struct OpenTab {
     pub(super) id: u64,
     pub(super) editor: Option<Entity<TextareaState>>,
     pub(super) saved: String,
+    pub(super) saved_revision: u64,
     pub(super) metrics: editing::TextMetrics,
     pub(super) metrics_revision: u64,
     pub(super) dirty: bool,
@@ -86,6 +87,7 @@ impl Edot {
                 metrics: editing::TextMetrics::new(&text),
                 metrics_revision: 0,
                 saved: text,
+                saved_revision: 0,
                 dirty: false,
                 _subscriptions: vec![subscription, observe],
             };
@@ -133,6 +135,10 @@ impl Edot {
             tab.dirty = text.as_ref() != tab.saved;
             tab.metrics = editing::TextMetrics::new(&text);
             tab.metrics_revision = editor.read(cx).revision;
+            if !tab.dirty {
+                cx.notify();
+                return;
+            }
         }
         self.status = "저장 중…".into();
         self.autosave = Some(cx.spawn(async |this, cx| {
@@ -147,18 +153,33 @@ impl Edot {
         cx.notify();
     }
     pub(super) fn save_all(&mut self, cx: &mut Context<Self>) -> bool {
+        self.save_all_inner(false, cx)
+    }
+
+    pub(super) fn save_all_explicit(&mut self, cx: &mut Context<Self>) -> bool {
+        self.save_all_inner(true, cx)
+    }
+
+    fn save_all_inner(&mut self, restore_missing: bool, cx: &mut Context<Self>) -> bool {
         if self.startup_failed {
             return false;
         }
         for tab in &mut self.open {
-            if !tab.dirty {
+            if !(tab.dirty || restore_missing && self.file_sync.missing.contains(&tab.id)) {
                 continue;
             }
             let Some(editor) = &tab.editor else {
                 continue;
             };
             let text = editor.read(cx).value().to_string();
-            if let Err(error) = replace_file(&self.book.file(&self.dir, tab.id), text.as_bytes()) {
+            let path = self.book.file(&self.dir, tab.id);
+            if !restore_missing && !path.exists() {
+                self.status =
+                    "본문 파일이 삭제되었습니다 · Ctrl+S로 앱 내용을 복원할 수 있습니다".into();
+                cx.notify();
+                return false;
+            }
+            if let Err(error) = replace_file(&path, text.as_bytes()) {
                 self.fail(
                     "메모를 저장하지 못했습니다. 수정 내용은 편집기에 남아 있습니다",
                     error,
@@ -167,7 +188,9 @@ impl Edot {
                 return false;
             }
             tab.saved = text;
+            tab.saved_revision = tab.saved_revision.wrapping_add(1);
             tab.dirty = false;
+            self.file_sync.missing.remove(&tab.id);
         }
         self.status = "저장됨".into();
         cx.notify();

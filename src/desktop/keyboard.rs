@@ -60,7 +60,7 @@ impl Edot {
             self.create_note(None, window, cx);
         } else if ctrl && key == "s" {
             self.finish_rename(true, false, window, cx);
-            self.save_all(cx);
+            self.save_all_explicit(cx);
         } else if ctrl && (key == "w" || key == "f4" && !shift && !event.keystroke.modifiers.alt) {
             if let Some(id) = self.session.active {
                 self.close_tabs(id, crate::tabs::CloseMode::Current, window, cx);

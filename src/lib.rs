@@ -11,3 +11,4 @@ pub mod settings;
 pub mod storage;
 pub mod tabs;
 pub mod vault;
+pub mod watch;

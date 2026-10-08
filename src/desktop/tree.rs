@@ -51,7 +51,7 @@ impl Edot {
             self.fail("메모를 만들지 못했습니다", error, cx);
             return;
         }
-        if let Err(error) = self.book.save(&self.dir) {
+        if let Err(error) = self.save_tree() {
             self.book = previous;
             let _ = fs::remove_file(file);
             self.fail("메모 목록을 저장하지 못했습니다", error, cx);
@@ -105,7 +105,7 @@ impl Edot {
         if commit && !title.is_empty() && self.book.get(id).is_some_and(|n| n.title != title) {
             let previous = self.book.clone();
             self.book.get_mut(id).unwrap().title = title;
-            if let Err(error) = self.book.save(&self.dir) {
+            if let Err(error) = self.save_tree() {
                 self.book = previous;
                 self.fail("이름을 저장하지 못했습니다", error, cx);
                 success = false;
@@ -197,6 +197,7 @@ impl Edot {
                 return false;
             }
         };
+        self.file_sync.tree_revision = self.file_sync.tree_revision.wrapping_add(1);
         let active_index = self
             .open
             .iter()
@@ -244,7 +245,7 @@ impl Edot {
             self.fail("폴더를 만들지 못했습니다", error, cx);
             return;
         }
-        if let Err(error) = self.book.save(&self.dir) {
+        if let Err(error) = self.save_tree() {
             self.book = previous;
             let _ = fs::remove_file(file);
             self.fail("폴더를 저장하지 못했습니다", error, cx);
@@ -259,7 +260,7 @@ impl Edot {
     pub(super) fn move_notes(&mut self, ids: &[u64], target: DropTarget, cx: &mut Context<Self>) {
         let previous = self.book.clone();
         if self.book.move_notes(ids, target.parent, target.before) {
-            if let Err(error) = self.book.save(&self.dir) {
+            if let Err(error) = self.save_tree() {
                 self.book = previous;
                 self.fail("이동을 저장하지 못했습니다", error, cx);
             } else {

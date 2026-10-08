@@ -270,6 +270,37 @@ impl InputState {
     pub fn replace_all(&mut self, text: impl AsRef<str>, _: &mut Window, cx: &mut Context<Self>) {
         self.commit(0..self.content.len(), text.as_ref(), false, cx);
     }
+    pub fn is_composing(&self) -> bool {
+        self.composition.is_some() || self.marked.is_some()
+    }
+    /// Keep the editor entity, undo history, selections and scroll when a clean
+    /// document changes on disk. External reload itself is one undoable edit.
+    pub fn reload_from_disk(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text == self.content.as_ref() {
+            return;
+        }
+        let selection = self.selection.clone();
+        let reversed = self.reversed;
+        let extra = self.extra.clone();
+        let scroll = self.scroll;
+        self.last_edit = None;
+        self.commit(0..self.content.len(), text, false, cx);
+        self.selection = self.boundary(selection.start)..self.boundary(selection.end);
+        self.reversed = reversed;
+        self.extra = extra
+            .into_iter()
+            .map(|mut selection| {
+                selection.range =
+                    self.boundary(selection.range.start)..self.boundary(selection.range.end);
+                selection
+            })
+            .collect();
+        self.deduplicate_selections();
+        self.scroll = scroll;
+        self.reveal = false;
+        self.last_edit = None;
+        cx.notify();
+    }
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.column_anchor = None;
         self.selecting = false;

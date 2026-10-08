@@ -115,6 +115,7 @@ impl Edot {
                                     );
                                 });
                                 tab.saved = change.after.clone();
+                                tab.saved_revision = tab.saved_revision.wrapping_add(1);
                                 tab.metrics = editing::TextMetrics::new(&change.after);
                                 tab.metrics_revision = editor.read(cx).revision;
                                 tab.dirty = false;

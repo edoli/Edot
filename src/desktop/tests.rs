@@ -159,6 +159,7 @@ impl Fixture {
 mod column;
 mod documents;
 mod editor;
+mod file_sync;
 mod layout;
 mod menus;
 mod multiselection;

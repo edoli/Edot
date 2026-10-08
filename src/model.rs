@@ -21,11 +21,23 @@ pub struct Notebook {
 impl Notebook {
     pub fn load(dir: &Path) -> io::Result<Self> {
         fs::create_dir_all(dir.join("notes"))?;
+        Self::read_index(dir, true)
+    }
+
+    /// Live reload reads only a complete index. Files may arrive separately;
+    /// recovering orphans here would resurrect notes deleted in another app.
+    pub fn reload(dir: &Path) -> io::Result<Self> {
+        Self::read_index(dir, false)
+    }
+
+    fn read_index(dir: &Path, recover: bool) -> io::Result<Self> {
         let path = dir.join("tree.tsv");
-        let text = if path.exists() {
-            fs::read_to_string(path)?
-        } else {
-            String::from("EDOT1\n")
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if recover && error.kind() == io::ErrorKind::NotFound => {
+                String::from("EDOT1\n")
+            }
+            Err(error) => return Err(error),
         };
         let mut lines = text.lines();
         if lines.next() != Some("EDOT1") {
@@ -76,7 +88,12 @@ impl Notebook {
         }
         // If a previous write stopped after creating a text file, keep that file visible.
         let mut root_count = notes.iter().filter(|n| n.parent == 0).count();
-        for entry in fs::read_dir(dir.join("notes"))? {
+        let entries = if recover {
+            Some(fs::read_dir(dir.join("notes"))?)
+        } else {
+            None
+        };
+        for entry in entries.into_iter().flatten() {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
                 continue;
@@ -501,6 +518,18 @@ mod tests {
         assert_eq!(loaded.next_id, u64::MAX);
         assert_eq!(loaded.children(42), vec![3, u64::MAX]);
         assert_eq!(fs::read(dir.join("tree.tsv")).unwrap(), original);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_reload_requires_an_index_and_does_not_resurrect_leftover_bodies() {
+        let dir = loader_test_dir("reload");
+        fs::write(dir.join("notes/7.txt"), "leftover body").unwrap();
+        assert!(Notebook::reload(&dir).is_err());
+        assert!(!dir.join("tree.tsv").exists());
+        fs::write(dir.join("tree.tsv"), "EDOT1\n").unwrap();
+        assert!(Notebook::reload(&dir).unwrap().notes.is_empty());
+        assert_eq!(Notebook::load(&dir).unwrap().notes[0].id, 7);
         fs::remove_dir_all(dir).unwrap();
     }
 

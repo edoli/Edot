@@ -1,9 +1,7 @@
 use super::*;
 
 #[gpui::test]
-fn global_settings_reload_on_activation_keeps_edits_and_rejects_broken_ini(
-    cx: &mut TestAppContext,
-) {
+fn external_settings_are_ignored_during_execution_even_on_activation(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
     visual.update(|window, _| window.activate_window());
@@ -28,7 +26,7 @@ fn global_settings_reload_on_activation_keeps_edits_and_rejects_broken_ini(
     visual.update(|window, _| window.activate_window());
     cx.run_until_parked();
     f.update(cx, |this, _, cx| {
-        assert_eq!(this.settings, external);
+        assert_eq!(this.settings, Settings::default());
         assert_eq!(this.active_editor().unwrap(), editor);
         assert_eq!(editor.read(cx).selected_range(), selection);
         assert_eq!(
@@ -43,8 +41,8 @@ fn global_settings_reload_on_activation_keeps_edits_and_rejects_broken_ini(
     visual.update(|window, _| window.activate_window());
     cx.run_until_parked();
     f.update(cx, |this, _, _| {
-        assert_eq!(this.settings, external);
-        assert!(this.error.is_some());
+        assert_eq!(this.settings, Settings::default());
+        assert!(this.error.is_none());
     });
     assert_eq!(fs::read_to_string(path).unwrap(), "theme = [");
 }

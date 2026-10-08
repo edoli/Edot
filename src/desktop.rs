@@ -24,6 +24,7 @@ use std::{
 };
 
 mod documents;
+mod file_sync;
 use documents::{ClosedTab, OpenTab};
 use preferences::Preferences;
 use search_ui::SearchPanel;
@@ -69,6 +70,7 @@ pub struct Edot {
     preferences: Option<Preferences>,
     search_results: search_ui::SearchResults,
     autosave: Option<Task<()>>,
+    file_sync: file_sync::FileSync,
     zoom: u32,
     status: String,
     error: Option<String>,
@@ -145,6 +147,7 @@ impl Edot {
             preferences: None,
             search_results: search_ui::SearchResults::default(),
             autosave: None,
+            file_sync: file_sync::FileSync::default(),
             zoom: ZOOM_DEFAULT,
             status: "준비됨".into(),
             startup_failed: error.is_some(),
@@ -176,6 +179,7 @@ impl Edot {
                 id: *id,
                 editor: None,
                 saved: String::new(),
+                saved_revision: 0,
                 metrics: Default::default(),
                 metrics_revision: 0,
                 dirty: false,
@@ -236,7 +240,7 @@ impl Edot {
         this.subscriptions
             .push(cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() && !this.startup_failed {
-                    this.reload_settings(window, cx);
+                    this.request_file_sync(crate::watch::Changes::all(), window, cx);
                 }
                 if !window.is_window_active() && !this.dragging_notes.is_empty() {
                     cx.stop_active_drag(window);
@@ -273,6 +277,10 @@ impl Edot {
             this.focus_editor(window, cx);
         } else {
             this.tree_focus.focus(window, cx);
+        }
+        #[cfg(not(test))]
+        if !this.startup_failed {
+            this.start_file_sync(window, cx);
         }
         this
     }
