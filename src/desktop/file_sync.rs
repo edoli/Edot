@@ -1,4 +1,4 @@
-//! Coalesced directory events, background reads and app-first reconciliation.
+//! Immediate directory event reads and app-first reconciliation.
 use super::*;
 use crate::watch::{Changes, Watcher};
 use std::{
@@ -12,6 +12,7 @@ pub(super) struct FileSync {
     refresh: Option<Task<()>>,
     pending: Changes,
     retry: u32,
+    waiting_retry: bool,
     epoch: u64,
     pub(super) tree_revision: u64,
     pub(super) missing: HashSet<u64>,
@@ -26,6 +27,7 @@ impl Default for FileSync {
             refresh: None,
             pending: Changes::default(),
             retry: 0,
+            waiting_retry: false,
             epoch: EPOCH.fetch_add(1, Ordering::Relaxed),
             tree_revision: 0,
             missing: HashSet::new(),
@@ -163,6 +165,11 @@ impl Edot {
             return;
         }
         self.file_sync.pending.merge(changes);
+        if self.file_sync.waiting_retry {
+            // A fresh notification supersedes the backoff; pending retries are kept.
+            self.file_sync.refresh = None;
+            self.file_sync.waiting_retry = false;
+        }
         self.file_sync.retry = 0;
         if self.file_sync.refresh.is_some() {
             return;
@@ -170,12 +177,18 @@ impl Edot {
         self.file_sync.refresh = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 let Ok(delay) = this.update(cx, |this, _| {
-                    Duration::from_millis(200 * (1 + this.file_sync.retry as u64))
+                    this.file_sync.waiting_retry = this.file_sync.retry > 0;
+                    this.file_sync
+                        .waiting_retry
+                        .then(|| Duration::from_millis(200 * (1 + this.file_sync.retry as u64)))
                 }) else {
                     return;
                 };
-                cx.background_executor().timer(delay).await;
+                if let Some(delay) = delay {
+                    cx.background_executor().timer(delay).await;
+                }
                 let Ok(snapshot) = this.update(cx, |this, cx| {
+                    this.file_sync.waiting_retry = false;
                     let changes = std::mem::take(&mut this.file_sync.pending);
                     this.sync_snapshot(changes, cx)
                 }) else {
@@ -186,12 +199,15 @@ impl Edot {
                     .spawn(async move { snapshot.read() })
                     .await;
                 let Ok(again) = this.update_in(cx, |this, window, cx| {
+                    let fresh_changes = !this.file_sync.pending.is_empty();
                     let retry = this.apply_file_sync(read, window, cx);
                     if !retry.is_empty()
                         && (this.file_sync.retry < 5 || !this.dragging_notes.is_empty())
                     {
                         this.file_sync.pending.merge(retry);
-                        this.file_sync.retry = (this.file_sync.retry + 1).min(5);
+                        if !fresh_changes {
+                            this.file_sync.retry = (this.file_sync.retry + 1).min(5);
+                        }
                     }
                     if this.file_sync.pending.is_empty() {
                         this.file_sync.refresh = None;

@@ -47,8 +47,10 @@ fn clean_external_reload_preserves_editor_selection_scroll_and_undo(cx: &mut Tes
     });
     let external = format!("🙂 외부12\r\n본문3\rkeep\n{}", "more text\n".repeat(100));
     fs::write(f.dir.join(format!("notes/{}.txt", f.ids[0])), &external).unwrap();
-    assert!(sync(&f, note(f.ids[0]), cx).is_empty());
-    cx.run_until_parked();
+    f.update(cx, |this, window, cx| {
+        this.request_file_sync(note(f.ids[0]), window, cx);
+    });
+    cx.run_until_parked(); // Do not advance time: notifications must not wait for a timer.
     f.update(cx, |this, _, cx| {
         assert_eq!(this.active_editor().unwrap(), editor);
         assert_eq!(editor.read(cx).value(), external);
@@ -119,7 +121,10 @@ fn external_tree_updates_keep_tabs_selection_and_expansion_and_reject_partial_in
     let added = book.add(0, "added".into());
     book.add(added, "new child".into());
     book.save(&f.dir).unwrap();
-    assert!(sync(&f, Changes::all(), cx).is_empty());
+    f.update(cx, |this, window, cx| {
+        this.request_file_sync(Changes::all(), window, cx);
+    });
+    cx.run_until_parked();
     f.update(cx, |this, _, _| {
         assert_eq!(this.book.get(f.ids[0]).unwrap().title, "external title");
         assert_eq!(this.book.get(f.ids[1]).unwrap().parent, f.ids[0]);
@@ -134,15 +139,28 @@ fn external_tree_updates_keep_tabs_selection_and_expansion_and_reject_partial_in
         );
     });
     fs::write(f.dir.join("tree.tsv"), "EDOT2\n1\t").unwrap();
-    assert!(sync(&f, Changes::all(), cx).tree);
+    f.update(cx, |this, window, cx| {
+        this.request_file_sync(Changes::all(), window, cx);
+    });
+    cx.run_until_parked();
     f.update(cx, |this, _, _| {
         assert_eq!(this.book.get(f.ids[0]).unwrap().title, "external title");
         assert!(this.error.is_none());
     });
     fs::remove_file(f.dir.join("tree.tsv")).unwrap();
     assert!(sync(&f, Changes::all(), cx).tree);
+    book.get_mut(f.ids[0]).unwrap().title = "completed external title".into();
     book.save(&f.dir).unwrap();
-    assert!(sync(&f, Changes::all(), cx).is_empty());
+    f.update(cx, |this, window, cx| {
+        this.request_file_sync(Changes::all(), window, cx);
+    });
+    cx.run_until_parked(); // A new notification also interrupts a failed read's backoff.
+    f.update(cx, |this, _, _| {
+        assert_eq!(
+            this.book.get(f.ids[0]).unwrap().title,
+            "completed external title"
+        );
+    });
     // An older read must not overwrite a tree change made in this app meanwhile.
     book.get_mut(f.ids[0]).unwrap().title = "stale external title".into();
     book.save(&f.dir).unwrap();
