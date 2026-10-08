@@ -1,7 +1,7 @@
 use crate::storage::replace_config_file;
 use std::io;
 use std::path::Path;
-mod ini;
+pub(crate) mod ini;
 use ini::Document;
 
 pub const SETTINGS_FILE: &str = "settings.ini";

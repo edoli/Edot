@@ -40,6 +40,7 @@ mod preferences;
 mod search;
 mod tabs;
 mod tree;
+mod vaults;
 
 impl Render for Edot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -255,6 +256,13 @@ impl Render for Edot {
         }
         if let Some(help) = &self.shortcut_help {
             root = root.child(help.clone());
+        }
+        if self.vault_ui.open
+            && self.session.sidebar_visible
+            && self.error.is_none()
+            && !window.has_active_dialog(cx)
+        {
+            root = root.child(deferred(self.vault_popup(window, cx)).with_priority(5));
         }
         if let Some(error) = &self.error {
             root = root.child(

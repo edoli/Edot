@@ -1,5 +1,6 @@
 use super::*;
 use crate::vault;
+use crate::widgets::WindowExt;
 use std::collections::HashSet;
 
 #[gpui::test]
@@ -66,6 +67,83 @@ fn vault_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
     });
     assert!(!other.join("edot.sqlite").exists());
     assert!(!other.join("settings.ini").exists());
+    f.update(cx, |this, window, cx| {
+        this.toggle_vault_list(window, cx);
+        assert_eq!(this.vault_ui.registry.entries.len(), 2);
+        this.begin_vault_rename(other.clone(), window, cx);
+        this.vault_ui
+            .rename
+            .as_ref()
+            .unwrap()
+            .1
+            .update(cx, |input, cx| {
+                input.set_value("공유 Vault 🙂", window, cx);
+            });
+    });
+    f.press(cx, "enter");
+    f.update(cx, |this, _, _| {
+        assert!(this.vault_ui.rename.is_none());
+        assert!(this.vault_ui.open);
+        assert_eq!(this.current_vault_name(), "공유 Vault 🙂");
+    });
+    assert_eq!(vault::read_name(&other).unwrap(), "공유 Vault 🙂");
+    assert!(
+        !fs::read_to_string(f.dir.join("test-global-config/vaults.tsv"))
+            .unwrap()
+            .contains("공유 Vault")
+    );
+    f.press(cx, "escape");
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|window, cx| window.render_frame(cx));
+    let footer = visual.debug_bounds("vault-footer").unwrap();
+    assert_eq!(footer.bottom(), px(760.));
+    visual.simulate_mouse_down(footer.center(), gpui::MouseButton::Left, Default::default());
+    visual.simulate_mouse_up(footer.center(), gpui::MouseButton::Left, Default::default());
+    visual.update(|window, cx| window.render_frame(cx));
+    let popup = visual.debug_bounds("vault-popup").unwrap();
+    assert!(popup.top() >= px(0.));
+    assert!(popup.bottom() <= footer.top());
+    f.update(cx, |this, _, _| assert!(this.vault_ui.open));
+    // The list also works from search mode, and keyboard selection changes Vaults.
+    f.update(cx, |this, _, _| this.search_mode = true);
+    visual.update(|window, cx| window.render_frame(cx));
+    assert!(visual.debug_bounds("vault-footer").is_some());
+    f.press(cx, "up");
+    f.press(cx, "enter");
+    f.update(cx, |this, window, cx| {
+        assert_eq!(this.dir, fs::canonicalize(&f.dir).unwrap());
+        assert!(!this.vault_ui.open);
+        assert!(this.switch_vault(other.clone(), window, cx));
+        assert_eq!(this.current_vault_name(), "공유 Vault 🙂");
+        this.toggle_vault_list(window, cx);
+        this.confirm_remove_vault(other.clone(), window, cx);
+    });
+    f.press(cx, "tab");
+    f.press(cx, "enter");
+    f.update(cx, |this, window, cx| {
+        assert_eq!(this.vault_ui.registry.entries.len(), 1);
+        assert_eq!(this.dir, other);
+        assert_eq!(this.current_vault_name(), "공유 Vault 🙂");
+        assert_eq!(
+            this.active_editor().unwrap().read(cx).value(),
+            "active child body"
+        );
+        assert!(!window.has_active_dialog(cx));
+        this.close_vault_list(window, cx);
+        // Removing the active entry does not make it reappear during startup initialization.
+        assert_eq!(
+            vault::Registry::initialize(&this.config_dir, &other)
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+    });
+    assert_eq!(
+        fs::read_to_string(book.file(&other, child)).unwrap(),
+        "active child body"
+    );
+    assert_eq!(vault::read_name(&other).unwrap(), "공유 Vault 🙂");
 }
 
 #[gpui::test]
@@ -80,6 +158,28 @@ fn failed_vault_or_session_write_preserves_current_state(cx: &mut TestAppContext
         assert_eq!(this.dir, f.dir);
         assert_eq!(this.active_editor().unwrap(), editor);
         this.error = None;
+        let missing = f.dir.join("missing-registered-vault");
+        this.select_registered_vault(missing.clone(), window, cx);
+        assert!(this.error.is_some());
+        assert!(!missing.exists());
+        assert_eq!(this.active_editor().unwrap(), editor);
+        this.error = None;
+        this.toggle_vault_list(window, cx);
+        let old_name = this.current_vault_name();
+        this.begin_vault_rename(f.dir.clone(), window, cx);
+        this.vault_ui
+            .rename
+            .as_ref()
+            .unwrap()
+            .1
+            .update(cx, |input, cx| input.set_value("failed name", window, cx));
+        fs::create_dir(f.dir.join("vault.ini")).unwrap();
+        this.finish_vault_rename(window, cx);
+        assert_eq!(this.current_vault_name(), old_name);
+        assert!(this.vault_ui.rename.is_some());
+        assert!(this.error.is_some());
+        this.error = None;
+        this.close_vault_list(window, cx);
         fs::create_dir(f.dir.join("session.tmp")).unwrap();
         let session = this.session.clone();
         this.set_collapsed(f.ids[0], true, cx);

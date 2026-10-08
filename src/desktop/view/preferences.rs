@@ -111,24 +111,6 @@ impl Edot {
             )
             .child(
                 div()
-                    .v_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("Vault · {}", vault::name(&self.dir))),
-                    )
-                    .child(
-                        Button::new("open-vault")
-                            .label("Vault 열기 / 만들기")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_vault(window, cx)),
-                            ),
-                    ),
-            )
-            .child(
-                div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child("변경 사항은 바로 적용되고 저장됩니다."),

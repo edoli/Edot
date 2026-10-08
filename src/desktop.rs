@@ -37,7 +37,7 @@ mod shortcuts;
 mod tests;
 mod tree;
 mod vaults;
-use vaults::LoadedVault;
+use vaults::{LoadedVault, VaultUi};
 mod view;
 
 mod menus;
@@ -47,6 +47,7 @@ use metrics::*;
 pub struct Edot {
     dir: PathBuf,
     config_dir: PathBuf,
+    vault_ui: VaultUi,
     _lock: Option<StoreLock>,
     book: Notebook,
     settings: Settings,
@@ -120,9 +121,24 @@ impl Edot {
         let local = SearchPanel::new(window, cx);
         let global = SearchPanel::new(window, cx);
         let title_input = cx.new(|cx| InputState::new(window, cx));
+        let mut vault_ui = VaultUi::new(cx);
+        vault_ui.name = vault::read_name(&dir).unwrap_or_else(|_| vault::name(&dir));
+        let registry = if error.is_none() {
+            vault::Registry::initialize(&config_dir, &dir)
+        } else {
+            vault::Registry::load(&config_dir)
+        };
+        let registry_error = match registry {
+            Ok(registry) => {
+                vault_ui.registry = registry;
+                None
+            }
+            Err(error) => Some(format!("Vault 목록을 읽지 못했습니다\n{error}")),
+        };
         let mut this = Self {
             dir,
             config_dir,
+            vault_ui,
             _lock: lock,
             book,
             settings,
@@ -168,6 +184,28 @@ impl Edot {
             menu_subscription: None,
             menu_position: Point::default(),
         };
+        if this.error.is_none() {
+            this.error = registry_error;
+        }
+        window.set_window_title(&format!("Edot — {}", this.current_vault_name()));
+        let vault_focus = this.vault_ui.focus.clone();
+        this.subscriptions.push(
+            cx.on_focus_out(&vault_focus, window, |this, _, window, cx| {
+                let editing =
+                    this.vault_ui.rename.as_ref().is_some_and(|(_, input)| {
+                        input.read(cx).focus_handle(cx).is_focused(window)
+                    });
+                if this.vault_ui.open
+                    && !editing
+                    && !window.has_active_dialog(cx)
+                    && this.error.is_none()
+                {
+                    this.vault_ui.open = false;
+                    this.vault_ui.rename = None;
+                    cx.notify();
+                }
+            }),
+        );
         this.apply_theme(window, cx);
         this.open = this
             .session
@@ -237,6 +275,14 @@ impl Edot {
             }));
         this.subscriptions
             .push(cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    let was_open = this.vault_ui.open;
+                    this.vault_ui.open = false;
+                    this.vault_ui.rename = None;
+                    if was_open {
+                        cx.notify();
+                    }
+                }
                 if window.is_window_active() && !this.startup_failed {
                     this.request_file_sync(crate::watch::Changes::all(), window, cx);
                 }

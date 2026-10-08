@@ -1,4 +1,4 @@
-//! A small UTF-8 INI reader/writer for Edot's five global preferences.
+//! A small UTF-8 INI reader/writer shared by preferences and Vault metadata.
 use super::{Settings, ThemeMode};
 use std::{collections::HashSet, io, ops::Range};
 
@@ -8,7 +8,7 @@ struct Field {
     range: Range<usize>,
 }
 
-pub(super) struct Document {
+pub(crate) struct Document {
     text: String,
     fields: Vec<Field>,
 }
@@ -21,7 +21,7 @@ fn invalid() -> io::Error {
 }
 
 impl Document {
-    pub(super) fn parse(text: &str) -> io::Result<Self> {
+    pub(crate) fn parse(text: &str) -> io::Result<Self> {
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut fields = Vec::new();
         let mut seen = HashSet::new();
@@ -108,6 +108,17 @@ impl Document {
             ("font_size", settings.font_size.to_string()),
             ("wrap", settings.wrap.to_string()),
         ];
+        self.updated_values(&values)
+    }
+
+    pub(crate) fn value(&self, key: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|field| field.key == key)
+            .map(|field| field.value.as_str())
+    }
+
+    pub(crate) fn updated_values(&self, values: &[(&str, String)]) -> String {
         let mut text = self.text.clone();
         // Reverse replacements retain the original byte ranges and all comments.
         for field in self.fields.iter().rev() {
@@ -122,7 +133,7 @@ impl Document {
         };
         let mut missing = String::new();
         for (key, value) in values {
-            if !self.fields.iter().any(|field| field.key == key) {
+            if !self.fields.iter().any(|field| field.key == *key) {
                 missing.push_str(&format!("{key} = {value}{newline}"));
             }
         }

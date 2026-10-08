@@ -99,6 +99,7 @@ impl Edot {
             } else {
                 self.tree_view(cx)
             })
+            .child(self.vault_footer(cx))
             .into_any_element()
     }
     pub(in crate::desktop) fn tree_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
