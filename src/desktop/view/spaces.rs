@@ -76,12 +76,19 @@ impl Edot {
                 .flex_shrink_0()
                 .rounded_md()
                 .border_1()
-                .border_color(if index == self.space_ui.cursor {
+                .border_color(if index == self.space_ui.cursor && !current {
                     cx.theme().primary
                 } else {
                     transparent_black()
                 })
-                .when(current, |row| row.bg(cx.theme().selection));
+                .child(
+                    div()
+                        .h_flex()
+                        .w(px(16.))
+                        .h(px(32.))
+                        .flex_shrink_0()
+                        .when(current, |mark| mark.child(Icon::new(IconName::Check))),
+                );
             if let Some((_, input)) = rename {
                 row = row.child(
                     div()
@@ -108,16 +115,11 @@ impl Edot {
                 let select_path = path.clone();
                 row = row.child(
                     Button::new(("space-select", index))
-                        .label(if current {
-                            format!("{} · 현재", entry.name)
-                        } else {
-                            entry.name.clone()
-                        })
+                        .label(entry.name.clone())
                         .tooltip(entry.name.clone())
                         .flex_1()
                         .min_w_0()
                         .justify_start()
-                        .px_0()
                         .text_ellipsis()
                         .overflow_hidden()
                         .on_click(cx.listener(move |this, _, window, cx| {

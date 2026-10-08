@@ -109,12 +109,6 @@ impl Edot {
                         this.change_settings(next, window, cx);
                     })),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("변경 사항은 바로 적용되고 저장됩니다."),
-            )
             .into_any_element()
     }
 }
