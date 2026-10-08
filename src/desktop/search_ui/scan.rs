@@ -132,7 +132,7 @@ impl Edot {
     }
     pub(in crate::desktop) fn queue_note_search(
         &mut self,
-        id: u64,
+        id: NoteId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

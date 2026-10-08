@@ -3,7 +3,7 @@ use super::*;
 use component::menu::PopupMenu;
 
 impl Edot {
-    pub(super) fn note_menu_targets(&self, id: u64) -> Vec<u64> {
+    pub(super) fn note_menu_targets(&self, id: NoteId) -> Vec<NoteId> {
         if self.selection.ids.contains(&id) {
             self.selection.ids.iter().copied().collect()
         } else {
@@ -11,7 +11,7 @@ impl Edot {
         }
     }
 
-    fn note_menu(&self, mut menu: PopupMenu, view: WeakEntity<Edot>, id: u64) -> PopupMenu {
+    fn note_menu(&self, mut menu: PopupMenu, view: WeakEntity<Edot>, id: NoteId) -> PopupMenu {
         let targets = self.note_menu_targets(id);
         let multiple = targets.len() > 1;
         let nested = self.book.get(id).is_some_and(|note| note.parent != 0);
@@ -77,7 +77,7 @@ impl Edot {
 pub(super) fn tab_menu(
     menu: PopupMenu,
     weak: WeakEntity<Edot>,
-    id: u64,
+    id: NoteId,
     index: usize,
     cx: &App,
 ) -> PopupMenu {
@@ -140,7 +140,7 @@ pub(super) fn editor_menu(
 impl Edot {
     pub(super) fn prepare_external_note(
         &mut self,
-        id: u64,
+        id: NoteId,
         cx: &mut Context<Self>,
     ) -> Option<PathBuf> {
         if self.book.get(id).is_none() || self.startup_failed {
@@ -170,7 +170,7 @@ impl Edot {
     fn install_menu(
         &mut self,
         menu: Entity<PopupMenu>,
-        note: Option<u64>,
+        note: Option<NoteId>,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -189,7 +189,7 @@ impl Edot {
 
     pub(super) fn show_tree_menu(
         &mut self,
-        id: u64,
+        id: NoteId,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,

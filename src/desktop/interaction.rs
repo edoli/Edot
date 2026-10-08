@@ -5,7 +5,7 @@ impl Edot {
     pub(super) fn tree_drag_at(
         &mut self,
         position: Point<Pixels>,
-        ids: &[u64],
+        ids: &[NoteId],
         cx: &mut Context<Self>,
     ) {
         self.dragging_notes = ids.to_vec();
@@ -48,7 +48,11 @@ impl Edot {
         self.drop_target = self.tree_drop_at(position, &self.dragging_notes);
         self.pressed = None;
     }
-    pub(super) fn tree_drop_at(&self, position: Point<Pixels>, ids: &[u64]) -> Option<DropTarget> {
+    pub(super) fn tree_drop_at(
+        &self,
+        position: Point<Pixels>,
+        ids: &[NoteId],
+    ) -> Option<DropTarget> {
         if !self.session.sidebar_visible
             || self.search_mode
             || !self.tree_bounds.get().contains(&position)
@@ -77,7 +81,7 @@ impl Edot {
     }
     pub(super) fn finish_tree_drag(
         &mut self,
-        ids: &[u64],
+        ids: &[NoteId],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

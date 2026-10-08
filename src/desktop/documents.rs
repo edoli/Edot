@@ -3,12 +3,12 @@ use super::*;
 
 #[derive(Clone, Copy)]
 pub(super) struct ClosedTab {
-    pub(super) id: u64,
+    pub(super) id: NoteId,
     index: usize,
 }
 
 pub(super) struct OpenTab {
-    pub(super) id: u64,
+    pub(super) id: NoteId,
     pub(super) editor: Option<Entity<TextareaState>>,
     pub(super) saved: String,
     pub(super) saved_revision: u64,
@@ -25,7 +25,7 @@ impl Edot {
             .find(|tab| Some(tab.id) == self.session.active)
             .and_then(|tab| tab.editor.clone())
     }
-    pub(super) fn text(&self, id: u64, cx: &App) -> io::Result<String> {
+    pub(super) fn text(&self, id: NoteId, cx: &App) -> io::Result<String> {
         if let Some(editor) = self
             .open
             .iter()
@@ -45,7 +45,7 @@ impl Edot {
     }
     pub(super) fn open_note(
         &mut self,
-        id: u64,
+        id: NoteId,
         focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -127,7 +127,7 @@ impl Edot {
         cx.notify();
         true
     }
-    pub(super) fn changed(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn changed(&mut self, id: NoteId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.open.iter_mut().find(|tab| tab.id == id)
             && let Some(editor) = &tab.editor
         {
@@ -206,7 +206,7 @@ impl Edot {
     }
     pub(super) fn close_tabs(
         &mut self,
-        id: u64,
+        id: NoteId,
         mode: CloseMode,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -277,7 +277,7 @@ impl Edot {
             return;
         }
     }
-    pub(super) fn reorder_tab(&mut self, id: u64, gap: usize, cx: &mut Context<Self>) {
+    pub(super) fn reorder_tab(&mut self, id: NoteId, gap: usize, cx: &mut Context<Self>) {
         let Some(index) = self.open.iter().position(|tab| tab.id == id) else {
             return;
         };

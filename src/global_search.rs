@@ -1,4 +1,5 @@
 use crate::editing::CharRange;
+use crate::model::NoteId;
 use crate::storage::replace_file;
 use std::{collections::HashSet, fs, io, ops::Range, path::PathBuf, sync::Arc};
 // Bound interactive result memory; replacement still considers every match.
@@ -14,13 +15,13 @@ pub struct Match {
 }
 #[derive(Clone, Debug)]
 pub struct ResultRow {
-    pub id: u64,
+    pub id: NoteId,
     pub count: usize,
     pub matches: Vec<Match>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MatchKey {
-    pub id: u64,
+    pub id: NoteId,
     pub range: CharRange,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +29,7 @@ pub struct VisibleRow {
     pub group: usize,
     pub hit: Option<usize>, // None is the collapsible memo header
 }
-pub fn visible_rows(groups: &[ResultRow], collapsed: &HashSet<u64>) -> Vec<VisibleRow> {
+pub fn visible_rows(groups: &[ResultRow], collapsed: &HashSet<NoteId>) -> Vec<VisibleRow> {
     let mut rows = Vec::new();
     for (group, result) in groups.iter().enumerate() {
         rows.push(VisibleRow { group, hit: None });
@@ -139,7 +140,7 @@ fn match_previews(text: &str, ranges: &[CharRange]) -> Vec<Match> {
 }
 
 pub fn scan(
-    id: u64,
+    id: NoteId,
     text: &str,
     pattern: &crate::search::Pattern,
     limit: usize,
@@ -190,7 +191,7 @@ pub fn replace(text: &str, ranges: &[CharRange], replacement: &str) -> String {
 }
 
 pub struct Change {
-    pub id: u64,
+    pub id: NoteId,
     pub path: PathBuf,
     pub before_disk: Vec<u8>,
     pub after: String,

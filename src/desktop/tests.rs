@@ -1,5 +1,5 @@
 //! Headless GPUI event tests. They never send input to the user's desktop.
-use super::{Edot, LoadedSpace, Settings, StoreLock};
+use super::{Edot, LoadedSpace, NoteId, Settings, StoreLock};
 use crate::{model::Notebook, session::Session, settings::ThemeMode};
 use gpui::{
     AnyWindowHandle, AppContext, Bounds, Context, ElementInputHandler, Entity, InputHandler,
@@ -43,7 +43,7 @@ struct Fixture {
     window: AnyWindowHandle,
     view: Entity<Edot>,
     dir: PathBuf,
-    ids: [u64; 3],
+    ids: [NoteId; 3],
 }
 impl Fixture {
     fn new(cx: &mut TestAppContext) -> Self {
@@ -59,9 +59,9 @@ impl Fixture {
         ));
         let lock = StoreLock::acquire(&dir).unwrap();
         let mut book = Notebook::load(&dir).unwrap();
-        let first = book.add(0, "첫 메모".into());
-        let second = book.add(0, "둘째 메모".into());
-        let third = book.add(first, "하위 메모".into());
+        let first = book.add(0, "첫 메모".into()).unwrap();
+        let second = book.add(0, "둘째 메모".into()).unwrap();
+        let third = book.add(first, "하위 메모".into()).unwrap();
         for (id, text) in [
             (first, "🙂 한글12\r\n한글3\rkeep\n"),
             (second, "closed needle\n"),

@@ -2,7 +2,7 @@ use super::*;
 use crate::watch::Changes;
 use std::collections::HashSet;
 
-fn note(id: u64) -> Changes {
+fn note(id: NoteId) -> Changes {
     Changes {
         notes: HashSet::from([id]),
         ..Default::default()
@@ -118,8 +118,8 @@ fn external_tree_updates_keep_tabs_selection_and_expansion_and_reject_partial_in
     let mut book = Notebook::reload(&f.dir).unwrap();
     book.get_mut(f.ids[0]).unwrap().title = "external title".into();
     book.get_mut(f.ids[1]).unwrap().parent = f.ids[0];
-    let added = book.add(0, "added".into());
-    book.add(added, "new child".into());
+    let added = book.add(0, "added".into()).unwrap();
+    book.add(added, "new child".into()).unwrap();
     book.save(&f.dir).unwrap();
     f.update(cx, |this, window, cx| {
         this.request_file_sync(Changes::all(), window, cx);
@@ -289,7 +289,7 @@ fn ime_and_title_edits_survive_external_changes_without_losing_other_tree_update
     });
     let mut book = Notebook::reload(&f.dir).unwrap();
     book.get_mut(f.ids[0]).unwrap().title = "external title".into();
-    let added = book.add(0, "external added".into());
+    let added = book.add(0, "external added".into()).unwrap();
     book.save(&f.dir).unwrap();
     assert!(sync(&f, Changes::all(), cx).is_empty());
     f.update(cx, |this, window, cx| {

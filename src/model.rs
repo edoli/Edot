@@ -4,10 +4,20 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// A stable numeric identity, stored as decimal text in TSV and file names.
+pub type NoteId = u64;
+
+fn random_note_id() -> io::Result<NoteId> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| io::Error::other(format!("메모 ID를 생성하지 못했습니다 ({error})")))?;
+    Ok(NoteId::from_le_bytes(bytes))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
-    pub id: u64,
-    pub parent: u64,
+    pub id: NoteId,
+    pub parent: NoteId,
     pub order: u32,
     pub title: String,
 }
@@ -15,7 +25,6 @@ pub struct Note {
 #[derive(Clone, Default)]
 pub struct Notebook {
     pub notes: Vec<Note>,
-    pub next_id: u64,
 }
 
 impl Notebook {
@@ -105,7 +114,7 @@ impl Notebook {
             let name = filename.to_string_lossy();
             let Some(id) = name
                 .strip_suffix(".txt")
-                .and_then(|s| s.parse::<u64>().ok())
+                .and_then(|s| s.parse::<NoteId>().ok())
             else {
                 continue;
             };
@@ -122,12 +131,6 @@ impl Notebook {
                 title: format!("복구된 메모 {id}"),
             });
         }
-        let next_id = notes
-            .iter()
-            .map(|n| n.id)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
         // 0 = unseen, 1 = on this parent chain, 2 = checked. Each note is
         // visited at most twice, without recursion even for very deep trees.
         let mut states = vec![0u8; notes.len()];
@@ -157,7 +160,7 @@ impl Notebook {
                 current = (parent != 0).then(|| indices[&parent]);
             }
         }
-        Ok(Self { notes, next_id })
+        Ok(Self { notes })
     }
 
     pub fn save(&self, dir: &Path) -> io::Result<()> {
@@ -177,37 +180,53 @@ impl Notebook {
         replace_file(&dir.join("tree.tsv"), text.as_bytes())
     }
 
-    pub fn file(&self, dir: &Path, id: u64) -> PathBuf {
+    pub fn file(&self, dir: &Path, id: NoteId) -> PathBuf {
         dir.join("notes").join(format!("{id}.txt"))
     }
 
-    pub fn add(&mut self, parent: u64, title: String) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        let order = self.notes.iter().filter(|n| n.parent == parent).count() as u32;
-        self.notes.push(Note {
-            id,
-            parent,
-            order,
-            title,
-        });
-        id
+    pub fn add(&mut self, parent: NoteId, title: String) -> io::Result<NoteId> {
+        self.add_with_rng(parent, title, random_note_id)
     }
 
-    pub fn get(&self, id: u64) -> Option<&Note> {
+    fn add_with_rng(
+        &mut self,
+        parent: NoteId,
+        title: String,
+        mut random: impl FnMut() -> io::Result<NoteId>,
+    ) -> io::Result<NoteId> {
+        for _ in 0..64 {
+            let id = random()?;
+            if id == 0 || self.get(id).is_some() {
+                continue;
+            }
+            let order = self.notes.iter().filter(|n| n.parent == parent).count() as u32;
+            self.notes.push(Note {
+                id,
+                parent,
+                order,
+                title,
+            });
+            return Ok(id);
+        }
+        Err(io::Error::other(
+            "중복되지 않는 메모 ID를 생성하지 못했습니다.",
+        ))
+    }
+
+    pub fn get(&self, id: NoteId) -> Option<&Note> {
         self.notes.iter().find(|n| n.id == id)
     }
-    pub fn get_mut(&mut self, id: u64) -> Option<&mut Note> {
+    pub fn get_mut(&mut self, id: NoteId) -> Option<&mut Note> {
         self.notes.iter_mut().find(|n| n.id == id)
     }
 
-    pub fn children(&self, parent: u64) -> Vec<u64> {
+    pub fn children(&self, parent: NoteId) -> Vec<NoteId> {
         let mut children: Vec<_> = self.notes.iter().filter(|n| n.parent == parent).collect();
         children.sort_by_key(|n| (n.order, n.id));
         children.into_iter().map(|n| n.id).collect()
     }
 
-    pub fn is_descendant(&self, ancestor: u64, candidate: u64) -> bool {
+    pub fn is_descendant(&self, ancestor: NoteId, candidate: NoteId) -> bool {
         let mut current = self.get(candidate).map(|n| n.parent).unwrap_or(0);
         for _ in 0..self.notes.len() {
             if current == 0 {
@@ -221,7 +240,7 @@ impl Notebook {
         true
     }
 
-    pub fn move_note(&mut self, id: u64, parent: u64, before: Option<u64>) -> bool {
+    pub fn move_note(&mut self, id: NoteId, parent: NoteId, before: Option<NoteId>) -> bool {
         if id == parent
             || (parent != 0 && self.get(parent).is_none())
             || self.is_descendant(id, parent)
@@ -257,12 +276,13 @@ impl Notebook {
     }
 
     /// Keep tree order, dropping selected descendants whose ancestor also moves.
-    pub fn selected_roots(&self, ids: &[u64]) -> Vec<u64> {
+    pub fn selected_roots(&self, ids: &[NoteId]) -> Vec<NoteId> {
         if ids.is_empty() {
             return Vec::new();
         }
         let selected: std::collections::HashSet<_> = ids.iter().copied().collect();
-        let mut children: std::collections::HashMap<u64, Vec<_>> = std::collections::HashMap::new();
+        let mut children: std::collections::HashMap<NoteId, Vec<_>> =
+            std::collections::HashMap::new();
         for note in &self.notes {
             children.entry(note.parent).or_default().push(note);
         }
@@ -287,7 +307,7 @@ impl Notebook {
         ordered
     }
 
-    pub fn move_notes(&mut self, ids: &[u64], parent: u64, before: Option<u64>) -> bool {
+    pub fn move_notes(&mut self, ids: &[NoteId], parent: NoteId, before: Option<NoteId>) -> bool {
         if ids.is_empty() || ids.iter().any(|&id| self.get(id).is_none()) {
             return false;
         }
@@ -304,7 +324,7 @@ impl Notebook {
         }
         // Plan every affected sibling list before touching any note.
         let root_set: std::collections::HashSet<_> = roots.iter().copied().collect();
-        let mut affected: std::collections::HashMap<u64, Vec<_>> = roots
+        let mut affected: std::collections::HashMap<NoteId, Vec<_>> = roots
             .iter()
             .map(|&id| (self.get(id).unwrap().parent, Vec::new()))
             .collect();
@@ -351,28 +371,33 @@ impl Notebook {
         true
     }
 
-    pub fn group_notes(&mut self, ids: &[u64]) -> Option<u64> {
+    pub fn group_notes(&mut self, ids: &[NoteId]) -> io::Result<Option<NoteId>> {
         if ids.is_empty() || ids.iter().any(|&id| self.get(id).is_none()) {
-            return None;
+            return Ok(None);
         }
         let roots = self.selected_roots(ids);
-        let first = *roots.first()?;
-        let mut parent = self.get(first)?.parent;
+        let Some(first) = roots.first().and_then(|&id| self.get(id)) else {
+            return Ok(None);
+        };
+        let mut parent = first.parent;
         while parent != 0 && !roots.iter().all(|&id| self.is_descendant(parent, id)) {
-            parent = self.get(parent)?.parent;
+            let Some(ancestor) = self.get(parent) else {
+                return Ok(None);
+            };
+            parent = ancestor.parent;
         }
         let before = self.children(parent).into_iter().find(|&id| {
             roots
                 .iter()
                 .any(|&root| root == id || self.is_descendant(id, root))
         });
-        let folder = self.add(parent, "새 폴더".into());
+        let folder = self.add(parent, "새 폴더".into())?;
         self.move_note(folder, parent, before);
         self.move_notes(&roots, folder, None);
-        Some(folder)
+        Ok(Some(folder))
     }
 
-    pub fn selected_subtrees(&self, ids: &[u64]) -> Vec<u64> {
+    pub fn selected_subtrees(&self, ids: &[NoteId]) -> Vec<NoteId> {
         self.selected_roots(ids)
             .into_iter()
             .flat_map(|id| self.subtree(id))
@@ -381,7 +406,7 @@ impl Notebook {
 
     /// Archive a whole selection and commit its index once. Failed file/index
     /// writes restore the previous tree and every file already archived.
-    pub fn trash_notes(&mut self, dir: &Path, selected: &[u64]) -> io::Result<Vec<u64>> {
+    pub fn trash_notes(&mut self, dir: &Path, selected: &[NoteId]) -> io::Result<Vec<NoteId>> {
         if selected.iter().any(|&id| self.get(id).is_none()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -423,7 +448,7 @@ impl Notebook {
         Ok(ids)
     }
 
-    fn set_orders(&mut self, parent: u64, siblings: &[u64]) {
+    fn set_orders(&mut self, parent: NoteId, siblings: &[NoteId]) {
         for (order, &id) in siblings.iter().enumerate() {
             if let Some(n) = self.get_mut(id) {
                 n.parent = parent;
@@ -432,7 +457,7 @@ impl Notebook {
         }
     }
 
-    pub fn subtree(&self, id: u64) -> Vec<u64> {
+    pub fn subtree(&self, id: NoteId) -> Vec<NoteId> {
         let mut out = vec![id];
         let mut i = 0;
         while i < out.len() {
@@ -442,7 +467,7 @@ impl Notebook {
         out
     }
 
-    pub fn remove(&mut self, id: u64) -> Vec<u64> {
+    pub fn remove(&mut self, id: NoteId) -> Vec<NoteId> {
         let ids = self.subtree(id);
         self.notes.retain(|n| !ids.contains(&n.id));
         ids
@@ -470,6 +495,53 @@ mod tests {
         ));
         fs::create_dir_all(dir.join("notes")).unwrap();
         dir
+    }
+
+    #[test]
+    fn random_ids_survive_reload_and_reject_collisions_without_mutation() {
+        let dir = loader_test_dir("random-ids");
+        let original = format!("EDOT2\n7\t0\t0\told\n{}\t0\t1\tmax\n", NoteId::MAX);
+        fs::write(dir.join("tree.tsv"), &original).unwrap();
+        fs::write(dir.join("notes/7.txt"), "existing body").unwrap();
+        let mut book = Notebook::load(&dir).unwrap();
+        let high = (1u64 << 63) + 7;
+        let mut candidates = [0, 7, NoteId::MAX, high].into_iter();
+        assert_eq!(
+            book.add_with_rng(7, "child".into(), || Ok(candidates.next().unwrap()))
+                .unwrap(),
+            high
+        );
+        let before = book.notes.clone();
+        assert!(
+            book.add_with_rng(0, "failed".into(), || Err(io::Error::other("rng failed")))
+                .is_err()
+        );
+        assert!(book.add_with_rng(0, "collision".into(), || Ok(7)).is_err());
+        assert_eq!(book.notes, before);
+        // Equal snapshots represent independent devices with no shared counter.
+        let mut other = book.clone();
+        let mut ids = std::collections::HashSet::from([7, NoteId::MAX, high]);
+        for _ in 0..64 {
+            for book in [&mut book, &mut other] {
+                let id = book.add(0, "new".into()).unwrap();
+                assert_ne!(id, 0);
+                assert!(ids.insert(id));
+            }
+        }
+        assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), original);
+        book.save(&dir).unwrap();
+        assert_eq!(Notebook::reload(&dir).unwrap().notes, book.notes);
+        assert_eq!(book.file(&dir, high), dir.join(format!("notes/{high}.txt")));
+        assert_eq!(
+            fs::read_to_string(dir.join("notes/7.txt")).unwrap(),
+            "existing body"
+        );
+        fs::write(book.file(&dir, high), "new body").unwrap();
+        book.trash_notes(&dir, &[high]).unwrap();
+        let mut reopened = Notebook::load(&dir).unwrap();
+        assert!(reopened.get(high).is_none());
+        assert!(!ids.contains(&reopened.add(7, "after restart".into()).unwrap()));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -506,7 +578,6 @@ mod tests {
         assert!(Notebook::reload(&dir).unwrap().notes.is_empty());
         let recovered = Notebook::load(&dir).unwrap();
         assert_eq!(recovered.notes[0].id, 7);
-        assert_eq!(recovered.next_id, 8);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -540,16 +611,13 @@ mod tests {
 
     #[test]
     fn batch_moves_preserve_tree_order_and_validate_before_mutating() {
-        let mut book = Notebook {
-            next_id: 1,
-            ..Default::default()
-        };
-        let a = book.add(0, "A".into());
-        let b = book.add(0, "B".into());
-        let c = book.add(0, "C".into());
-        let child = book.add(a, "A1".into());
-        let folder = book.add(0, "Folder".into());
-        let existing = book.add(folder, "existing".into());
+        let mut book = Notebook::default();
+        let a = book.add(0, "A".into()).unwrap();
+        let b = book.add(0, "B".into()).unwrap();
+        let c = book.add(0, "C".into()).unwrap();
+        let child = book.add(a, "A1".into()).unwrap();
+        let folder = book.add(0, "Folder".into()).unwrap();
+        let existing = book.add(folder, "existing".into()).unwrap();
         let selected = [c, child, a, c];
         assert_eq!(book.selected_roots(&selected), vec![a, c]);
         let before = book.notes.clone();
@@ -576,9 +644,9 @@ mod tests {
                 .as_nanos()
         ));
         let mut book = Notebook::load(&dir).unwrap();
-        let a = book.add(0, "A".into());
-        let child = book.add(a, "child".into());
-        let b = book.add(0, "B".into());
+        let a = book.add(0, "A".into()).unwrap();
+        let child = book.add(a, "child".into()).unwrap();
+        let b = book.add(0, "B".into()).unwrap();
         for id in [a, child, b] {
             fs::write(book.file(&dir, id), format!("text {id}")).unwrap();
         }

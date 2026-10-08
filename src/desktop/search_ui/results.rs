@@ -4,12 +4,16 @@ impl Edot {
     pub(in crate::desktop) fn result_identity(
         &self,
         index: usize,
-    ) -> Option<(u64, Option<CharRange>)> {
+    ) -> Option<(NoteId, Option<CharRange>)> {
         let row = self.search_results.visible.get(index)?;
         let group = &self.search_results.groups[row.group];
         Some((group.id, row.hit.map(|hit| group.matches[hit].range)))
     }
-    pub(in crate::desktop) fn merge_note_results(&mut self, id: u64, mut row: Option<ResultRow>) {
+    pub(in crate::desktop) fn merge_note_results(
+        &mut self,
+        id: NoteId,
+        mut row: Option<ResultRow>,
+    ) {
         let selected = self
             .search_results
             .cursor

@@ -8,8 +8,8 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
     let f = Fixture::new(cx);
     let other = f.dir.join("other-space");
     let mut book = Notebook::load(&other).unwrap();
-    let root = book.add(0, "root".into());
-    let child = book.add(root, "child".into());
+    let root = book.add(0, "root".into()).unwrap();
+    let child = book.add(root, "child".into()).unwrap();
     book.save(&other).unwrap();
     fs::write(book.file(&other, root), "root body").unwrap();
     fs::write(book.file(&other, child), "active child body").unwrap();

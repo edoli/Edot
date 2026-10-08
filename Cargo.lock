@@ -1307,6 +1307,7 @@ name = "edot"
 version = "0.1.0"
 dependencies = [
  "embed-resource",
+ "getrandom 0.3.4",
  "gpui",
  "gpui_platform",
  "regex-lite",

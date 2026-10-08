@@ -1,4 +1,5 @@
 //! Space directory notifications. Only tree.tsv and numeric note files are relevant.
+use crate::model::NoteId;
 use std::{
     collections::HashSet,
     future::poll_fn,
@@ -12,7 +13,7 @@ use std::{
 pub struct Changes {
     pub tree: bool,
     pub rescan: bool,
-    pub notes: HashSet<u64>,
+    pub notes: HashSet<NoteId>,
 }
 
 impl Changes {
@@ -50,7 +51,7 @@ impl Changes {
         } else if let Some(name) = name.strip_prefix("notes/")
             && let Some(id) = name
                 .strip_suffix(".txt")
-                .and_then(|s| s.parse::<u64>().ok())
+                .and_then(|s| s.parse::<NoteId>().ok())
             && id != 0
         {
             self.merge(Self {

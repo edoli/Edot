@@ -191,7 +191,7 @@ impl Edot {
     pub(in crate::desktop) fn tree_row(
         &mut self,
         index: usize,
-        visible: &[(u64, usize)],
+        visible: &[(NoteId, usize)],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (id, depth) = visible[index];

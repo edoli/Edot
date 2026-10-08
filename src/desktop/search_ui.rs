@@ -4,14 +4,14 @@ use super::*;
 pub(super) struct SearchResults {
     pub(super) groups: Vec<ResultRow>,
     pub(super) visible: Vec<VisibleRow>,
-    pub(super) collapsed: HashSet<u64>,
+    pub(super) collapsed: HashSet<NoteId>,
     pub(super) cursor: Option<usize>,
     pub(super) generation: u64,
     pub(super) scanning: bool,
     pub(super) pending_navigation: Option<bool>,
     pub(super) scan_task: Option<Task<()>>,
-    pub(super) note_tasks: HashMap<u64, Task<()>>,
-    pub(super) pending_notes: HashSet<u64>,
+    pub(super) note_tasks: HashMap<NoteId, Task<()>>,
+    pub(super) pending_notes: HashSet<NoteId>,
     pub(super) errors: usize,
     pub(super) scroll: UniformListScrollHandle,
 }

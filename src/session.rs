@@ -1,4 +1,5 @@
 //! Space session: tabs, sidebar and explicitly expanded tree items.
+use crate::model::NoteId;
 use crate::{model::Notebook, storage::replace_file};
 use std::{collections::HashSet, io, path::Path};
 
@@ -8,11 +9,11 @@ pub const MAX_SIDEBAR_WIDTH: i32 = 600;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
-    pub tabs: Vec<u64>,
-    pub active: Option<u64>,
+    pub tabs: Vec<NoteId>,
+    pub active: Option<NoteId>,
     pub sidebar_visible: bool,
     pub sidebar_width: i32,
-    pub expanded: HashSet<u64>,
+    pub expanded: HashSet<NoteId>,
 }
 
 impl Default for Session {
@@ -50,7 +51,7 @@ impl Session {
                 .parse::<i32>()
                 .ok()?
                 .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
-            active: fields[2].parse::<u64>().ok().filter(|id| *id != 0),
+            active: fields[2].parse::<NoteId>().ok().filter(|id| *id != 0),
             tabs: vec![],
             expanded: HashSet::new(),
         };
@@ -60,14 +61,14 @@ impl Session {
         for line in lines {
             if let Some(id) = line
                 .strip_prefix("expanded\t")
-                .and_then(|id| id.parse::<u64>().ok())
+                .and_then(|id| id.parse::<NoteId>().ok())
             {
                 if folders.contains(&id) {
                     session.expanded.insert(id);
                 }
                 continue;
             }
-            if let Ok(id) = line.parse::<u64>()
+            if let Ok(id) = line.parse::<NoteId>()
                 && valid.contains(&id)
                 && seen.insert(id)
             {
@@ -80,14 +81,14 @@ impl Session {
         Some(session)
     }
 
-    pub fn folders(book: &Notebook) -> HashSet<u64> {
+    pub fn folders(book: &Notebook) -> HashSet<NoteId> {
         book.notes
             .iter()
             .filter_map(|note| (note.parent != 0).then_some(note.parent))
             .collect()
     }
 
-    pub fn collapsed(&self, book: &Notebook) -> HashSet<u64> {
+    pub fn collapsed(&self, book: &Notebook) -> HashSet<NoteId> {
         Self::folders(book)
             .difference(&self.expanded)
             .copied()
@@ -119,14 +120,15 @@ mod tests {
 
     #[test]
     fn folders_default_to_collapsed_and_only_saved_expansions_restore() {
-        let mut book = Notebook {
-            next_id: 1,
-            ..Default::default()
-        };
-        let root = book.add(0, "root".into());
-        let child = book.add(root, "child".into());
-        let nested = book.add(child, "nested".into());
-        let session = Session::parse("EDOTSESSION1\n1\t260\t3\n3\n", &book).unwrap();
+        let mut book = Notebook::default();
+        let root = book.add(0, "root".into()).unwrap();
+        let child = book.add(root, "child".into()).unwrap();
+        let nested = book.add(child, "nested".into()).unwrap();
+        let session = Session::parse(
+            &format!("EDOTSESSION1\n1\t260\t{nested}\n{nested}\n"),
+            &book,
+        )
+        .unwrap();
         assert_eq!(session.active, Some(nested));
         assert_eq!(session.collapsed(&book), HashSet::from([root, child]));
         let dir = std::env::temp_dir().join(format!(
@@ -146,8 +148,8 @@ mod tests {
         let restored = Session::load(&dir, &book);
         assert_eq!(restored.expanded, HashSet::from([root]));
         assert_eq!(restored.collapsed(&book), HashSet::from([child]));
-        let new_root = book.add(0, "new".into());
-        book.add(new_root, "new child".into());
+        let new_root = book.add(0, "new".into()).unwrap();
+        book.add(new_root, "new child".into()).unwrap();
         assert_eq!(
             Session::load(&dir, &book).collapsed(&book),
             HashSet::from([child, new_root])

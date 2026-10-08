@@ -15,7 +15,7 @@ pub(super) struct FileSync {
     waiting_retry: bool,
     epoch: u64,
     pub(super) tree_revision: u64,
-    pub(super) missing: HashSet<u64>,
+    pub(super) missing: HashSet<NoteId>,
 }
 
 impl Default for FileSync {
@@ -66,13 +66,13 @@ pub(super) struct Snapshot {
     epoch: u64,
     tree_revision: u64,
     changes: Changes,
-    bodies: Vec<(u64, Stamp)>,
+    bodies: Vec<(NoteId, Stamp)>,
 }
 
 pub(super) struct ReadResult {
     snapshot: Snapshot,
     tree: Option<io::Result<Notebook>>,
-    bodies: Vec<(u64, Stamp, io::Result<String>)>,
+    bodies: Vec<(NoteId, Stamp, io::Result<String>)>,
 }
 
 impl Snapshot {
@@ -388,7 +388,6 @@ impl Edot {
                 restored = true;
             }
         }
-        book.next_id = book.next_id.max(self.book.next_id);
         if restored {
             book.save(&self.dir)?;
             self.file_sync.tree_revision = self.file_sync.tree_revision.wrapping_add(1);

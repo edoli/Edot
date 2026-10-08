@@ -17,7 +17,7 @@ impl Edot {
         self.pressed = None;
     }
 
-    pub(super) fn set_collapsed(&mut self, id: u64, collapsed: bool, cx: &mut Context<Self>) {
+    pub(super) fn set_collapsed(&mut self, id: NoteId, collapsed: bool, cx: &mut Context<Self>) {
         let was_collapsed = self.collapsed.contains(&id);
         if was_collapsed == collapsed {
             return;
@@ -42,7 +42,7 @@ impl Edot {
 
     pub(super) fn create_note(
         &mut self,
-        child: Option<u64>,
+        child: Option<NoteId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -55,7 +55,13 @@ impl Edot {
                 .map_or(0, |n| n.parent)
         });
         let previous = self.book.clone();
-        let id = self.book.add(parent, "새 메모".into());
+        let id = match self.book.add(parent, "새 메모".into()) {
+            Ok(id) => id,
+            Err(error) => {
+                self.fail("메모를 만들지 못했습니다", error, cx);
+                return;
+            }
+        };
         let file = self.book.file(&self.dir, id);
         if let Err(error) = fs::OpenOptions::new()
             .write(true)
@@ -80,7 +86,7 @@ impl Edot {
             self.begin_rename(id, window, cx);
         }
     }
-    pub(super) fn begin_rename(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn begin_rename(&mut self, id: NoteId, window: &mut Window, cx: &mut Context<Self>) {
         if self.rename.is_none() && self.session.sidebar_visible && self.selection.ids.len() > 1 {
             return;
         }
@@ -89,7 +95,7 @@ impl Edot {
 
     pub(super) fn begin_rename_note(
         &mut self,
-        id: u64,
+        id: NoteId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -143,7 +149,7 @@ impl Edot {
         cx.notify();
         success
     }
-    pub(super) fn visible_tree(&self) -> Vec<(u64, usize)> {
+    pub(super) fn visible_tree(&self) -> Vec<(NoteId, usize)> {
         let mut out = Vec::new();
         let mut pending: Vec<_> = self
             .book
@@ -166,7 +172,7 @@ impl Edot {
         }
         out
     }
-    pub(super) fn reveal_tree(&self, id: u64) {
+    pub(super) fn reveal_tree(&self, id: NoteId) {
         if let Some(index) = self.visible_tree().iter().position(|(row, _)| *row == id) {
             self.tree_scroll
                 .scroll_to_item(index, ScrollStrategy::Nearest);
@@ -174,7 +180,7 @@ impl Edot {
     }
     pub(super) fn tree_click(
         &mut self,
-        id: u64,
+        id: NoteId,
         modifiers: Modifiers,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -200,7 +206,7 @@ impl Edot {
 
     pub(super) fn confirm_delete_notes(
         &mut self,
-        selected: Vec<u64>,
+        selected: Vec<NoteId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -231,7 +237,7 @@ impl Edot {
     }
     pub(super) fn delete_confirmed(
         &mut self,
-        selected: &[u64],
+        selected: &[NoteId],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -274,13 +280,23 @@ impl Edot {
         cx.notify();
         true
     }
-    pub(super) fn group_notes(&mut self, ids: &[u64], window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn group_notes(
+        &mut self,
+        ids: &[NoteId],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if ids.len() < 2 {
             return;
         }
         let previous = self.book.clone();
-        let Some(id) = self.book.group_notes(ids) else {
-            return;
+        let id = match self.book.group_notes(ids) {
+            Ok(Some(id)) => id,
+            Ok(None) => return,
+            Err(error) => {
+                self.fail("폴더를 만들지 못했습니다", error, cx);
+                return;
+            }
         };
         let file = self.book.file(&self.dir, id);
         if let Err(error) = fs::OpenOptions::new()
@@ -304,7 +320,12 @@ impl Edot {
         self.open_note(id, true, window, cx);
         self.begin_rename(id, window, cx);
     }
-    pub(super) fn move_notes(&mut self, ids: &[u64], target: DropTarget, cx: &mut Context<Self>) {
+    pub(super) fn move_notes(
+        &mut self,
+        ids: &[NoteId],
+        target: DropTarget,
+        cx: &mut Context<Self>,
+    ) {
         let previous = self.book.clone();
         if self.book.move_notes(ids, target.parent, target.before) {
             if let Err(error) = self.save_tree() {
@@ -319,7 +340,7 @@ impl Edot {
         self.pressed = None;
         cx.notify();
     }
-    pub(super) fn outdent(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(super) fn outdent(&mut self, id: NoteId, cx: &mut Context<Self>) {
         let Some(parent) = self
             .book
             .get(id)

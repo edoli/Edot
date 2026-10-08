@@ -1,3 +1,4 @@
+use crate::model::NoteId;
 use crate::model::Notebook;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,19 +14,19 @@ pub enum DropZone {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DropTarget {
-    pub note: Option<u64>,
+    pub note: Option<NoteId>,
     /// Visible row where the insertion marker belongs (possibly a descendant).
-    pub anchor: Option<u64>,
-    pub parent: u64,
-    pub before: Option<u64>,
+    pub anchor: Option<NoteId>,
+    pub parent: NoteId,
+    pub before: Option<NoteId>,
     pub zone: DropZone,
 }
 
 impl DropTarget {
     pub fn resolve_many(
         book: &Notebook,
-        sources: &[u64],
-        note: Option<u64>,
+        sources: &[NoteId],
+        note: Option<NoteId>,
         zone: DropZone,
     ) -> Option<Self> {
         if sources.is_empty() || sources.iter().any(|&id| book.get(id).is_none()) {
@@ -79,10 +80,10 @@ impl DropTarget {
     /// that closes a folder distinguishes its inside and outside positions.
     pub fn resolve_row(
         book: &Notebook,
-        sources: &[u64],
-        row: u64,
-        previous_visible: Option<u64>,
-        next_visible: Option<u64>,
+        sources: &[NoteId],
+        row: NoteId,
+        previous_visible: Option<NoteId>,
+        next_visible: Option<NoteId>,
         y: i32,
         height: i32,
     ) -> Option<Self> {
@@ -99,9 +100,9 @@ impl DropTarget {
 
     fn resolve_boundary(
         book: &Notebook,
-        sources: &[u64],
-        previous: Option<u64>,
-        next: Option<u64>,
+        sources: &[NoteId],
+        previous: Option<NoteId>,
+        next: Option<NoteId>,
         outside: bool,
     ) -> Option<Self> {
         let Some(row) = previous else {

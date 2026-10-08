@@ -3,7 +3,7 @@ use component::scroll::Scrollbar;
 
 #[derive(Clone)]
 struct TreeDrag {
-    ids: Vec<u64>,
+    ids: Vec<NoteId>,
 }
 struct TreeDragPreview;
 impl Render for TreeDragPreview {
@@ -13,7 +13,7 @@ impl Render for TreeDragPreview {
 }
 #[derive(Clone)]
 struct TabDrag {
-    id: u64,
+    id: NoteId,
     title: String,
 }
 struct DragLabel(String);
