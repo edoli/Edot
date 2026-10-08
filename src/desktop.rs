@@ -10,10 +10,9 @@ use crate::{
     selection::Selection,
     session::Session,
     settings::{Settings, ThemeMode},
-    startup,
+    space, startup,
     storage::replace_file,
     tabs::CloseMode,
-    vault,
 };
 use gpui::{prelude::*, *};
 use std::{
@@ -33,11 +32,11 @@ mod keyboard;
 mod preferences;
 mod search_ui;
 mod shortcuts;
+mod spaces;
 #[cfg(test)]
 mod tests;
 mod tree;
-mod vaults;
-use vaults::{LoadedVault, VaultUi};
+use spaces::{LoadedSpace, SpaceUi};
 mod view;
 
 mod menus;
@@ -47,7 +46,7 @@ use metrics::*;
 pub struct Edot {
     dir: PathBuf,
     config_dir: PathBuf,
-    vault_ui: VaultUi,
+    space_ui: SpaceUi,
     _lock: Option<StoreLock>,
     book: Notebook,
     settings: Settings,
@@ -98,12 +97,12 @@ impl Edot {
     fn new(
         dir: PathBuf,
         config_dir: PathBuf,
-        loaded: Result<LoadedVault, String>,
+        loaded: Result<LoadedSpace, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let (lock, book, settings, session, error) = match loaded {
-            Ok(LoadedVault {
+            Ok(LoadedSpace {
                 lock,
                 book,
                 settings,
@@ -121,24 +120,24 @@ impl Edot {
         let local = SearchPanel::new(window, cx);
         let global = SearchPanel::new(window, cx);
         let title_input = cx.new(|cx| InputState::new(window, cx));
-        let mut vault_ui = VaultUi::new(cx);
-        vault_ui.name = vault::read_name(&dir).unwrap_or_else(|_| vault::name(&dir));
+        let mut space_ui = SpaceUi::new(cx);
+        space_ui.name = space::read_name(&dir).unwrap_or_else(|_| space::name(&dir));
         let registry = if error.is_none() {
-            vault::Registry::initialize(&config_dir, &dir)
+            space::Registry::initialize(&config_dir, &dir)
         } else {
-            vault::Registry::load(&config_dir)
+            space::Registry::load(&config_dir)
         };
         let registry_error = match registry {
             Ok(registry) => {
-                vault_ui.registry = registry;
+                space_ui.registry = registry;
                 None
             }
-            Err(error) => Some(format!("Vault 목록을 읽지 못했습니다\n{error}")),
+            Err(error) => Some(format!("Space 목록을 읽지 못했습니다\n{error}")),
         };
         let mut this = Self {
             dir,
             config_dir,
-            vault_ui,
+            space_ui,
             _lock: lock,
             book,
             settings,
@@ -187,21 +186,21 @@ impl Edot {
         if this.error.is_none() {
             this.error = registry_error;
         }
-        window.set_window_title(&format!("Edot — {}", this.current_vault_name()));
-        let vault_focus = this.vault_ui.focus.clone();
+        window.set_window_title(&format!("Edot — {}", this.current_space_name()));
+        let space_focus = this.space_ui.focus.clone();
         this.subscriptions.push(
-            cx.on_focus_out(&vault_focus, window, |this, _, window, cx| {
+            cx.on_focus_out(&space_focus, window, |this, _, window, cx| {
                 let editing =
-                    this.vault_ui.rename.as_ref().is_some_and(|(_, input)| {
+                    this.space_ui.rename.as_ref().is_some_and(|(_, input)| {
                         input.read(cx).focus_handle(cx).is_focused(window)
                     });
-                if this.vault_ui.open
+                if this.space_ui.open
                     && !editing
                     && !window.has_active_dialog(cx)
                     && this.error.is_none()
                 {
-                    this.vault_ui.open = false;
-                    this.vault_ui.rename = None;
+                    this.space_ui.open = false;
+                    this.space_ui.rename = None;
                     cx.notify();
                 }
             }),
@@ -276,9 +275,9 @@ impl Edot {
         this.subscriptions
             .push(cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
-                    let was_open = this.vault_ui.open;
-                    this.vault_ui.open = false;
-                    this.vault_ui.rename = None;
+                    let was_open = this.space_ui.open;
+                    this.space_ui.open = false;
+                    this.space_ui.rename = None;
                     if was_open {
                         cx.notify();
                     }
@@ -344,13 +343,13 @@ impl Edot {
 
 pub fn run() {
     startup::start();
-    let paths = vault::Paths::resolve();
+    let paths = space::Paths::resolve();
     let (dir, config_dir) = paths.as_ref().map_or_else(
-        |_| (PathBuf::new(), vault::config_dir()),
-        |paths| (paths.vault.clone(), paths.config.clone()),
+        |_| (PathBuf::new(), space::config_dir()),
+        |paths| (paths.space.clone(), paths.config.clone()),
     );
     let loaded = paths
-        .and_then(|paths| LoadedVault::open(&paths))
+        .and_then(|paths| LoadedSpace::open(&paths))
         .map_err(|error| {
             format!("메모 저장소를 열지 못했습니다. 파일을 덮어쓰지 않습니다.\n{error}")
         });
@@ -373,7 +372,7 @@ pub fn run() {
                 ))),
                 window_min_size: Some(size(px(560.), px(360.))),
                 titlebar: Some(TitlebarOptions {
-                    title: Some(format!("Edot — {}", vault::name(&dir)).into()),
+                    title: Some(format!("Edot — {}", space::name(&dir)).into()),
                     ..Default::default()
                 }),
                 ..Default::default()

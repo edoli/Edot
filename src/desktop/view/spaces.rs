@@ -1,12 +1,12 @@
-//! Sidebar Vault switcher and management popup.
+//! Sidebar Space switcher and management popup.
 use super::*;
 
 impl Edot {
-    pub(in crate::desktop) fn vault_footer(&self, cx: &mut Context<Self>) -> AnyElement {
-        let bounds = self.vault_ui.bounds.clone();
+    pub(in crate::desktop) fn space_footer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let bounds = self.space_ui.bounds.clone();
         div()
-            .id("vault-footer")
-            .debug_selector(|| "vault-footer".into())
+            .id("space-footer")
+            .debug_selector(|| "space-footer".into())
             .relative()
             .h(px(44.))
             .flex_shrink_0()
@@ -19,24 +19,24 @@ impl Edot {
                     .inset_0(),
             )
             .child(
-                Button::new("vault-toggle")
+                Button::new("space-toggle")
                     .icon(IconName::ChevronsUpDown)
-                    .label(self.current_vault_name())
-                    .tooltip(format!("Vault · {}", self.current_vault_name()))
-                    .selected(self.vault_ui.open)
+                    .label(self.current_space_name())
+                    .tooltip(format!("Space · {}", self.current_space_name()))
+                    .selected(self.space_ui.open)
                     .w_full()
                     .h_full()
                     .justify_start()
                     .text_ellipsis()
                     .overflow_hidden()
                     .on_click(
-                        cx.listener(|this, _, window, cx| this.toggle_vault_list(window, cx)),
+                        cx.listener(|this, _, window, cx| this.toggle_space_list(window, cx)),
                     ),
             )
             .into_any_element()
     }
 
-    pub(in crate::desktop) fn vault_popup(
+    pub(in crate::desktop) fn space_popup(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
@@ -44,39 +44,39 @@ impl Edot {
         let width = (f32::from(window.viewport_size().width) - 16.).clamp(0., 380.);
         let height = (f32::from(window.viewport_size().height) - 132.).clamp(0., 360.);
         let mut list = div()
-            .id("vault-list")
+            .id("space-list")
             .v_flex()
             .gap_1()
             .max_h(px(height))
             .overflow_y_scroll()
-            .track_scroll(&self.vault_ui.scroll);
-        if self.vault_ui.registry.entries.is_empty() {
+            .track_scroll(&self.space_ui.scroll);
+        if self.space_ui.registry.entries.is_empty() {
             list = list.child(
                 div()
                     .p_3()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("등록된 Vault가 없습니다."),
+                    .child("등록된 Space가 없습니다."),
             );
         }
-        for (index, entry) in self.vault_ui.registry.entries.iter().enumerate() {
+        for (index, entry) in self.space_ui.registry.entries.iter().enumerate() {
             let path = entry.path.clone();
-            let current = vault::same_path(&path, &self.dir);
+            let current = space::same_path(&path, &self.dir);
             let rename = self
-                .vault_ui
+                .space_ui
                 .rename
                 .as_ref()
-                .filter(|(target, _)| vault::same_path(target, &path));
+                .filter(|(target, _)| space::same_path(target, &path));
             let mut row = div()
-                .id(("vault-row", index))
-                .debug_selector(move || format!("vault-row-{index}"))
+                .id(("space-row", index))
+                .debug_selector(move || format!("space-row-{index}"))
                 .h_flex()
                 .gap_1()
                 .p_1()
                 .flex_shrink_0()
                 .rounded_md()
                 .border_1()
-                .border_color(if index == self.vault_ui.cursor {
+                .border_color(if index == self.space_ui.cursor {
                     cx.theme().primary
                 } else {
                     transparent_black()
@@ -91,23 +91,23 @@ impl Edot {
                         .gap_1()
                         .child(
                             Input::new(input)
-                                .aria_label("Vault 이름")
+                                .aria_label("Space 이름")
                                 .flex_1()
                                 .min_w_0(),
                         )
                         .child(
-                            Button::new(("vault-name-save", index))
+                            Button::new(("space-name-save", index))
                                 .small()
                                 .label("저장")
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.finish_vault_rename(window, cx)
+                                    this.finish_space_rename(window, cx)
                                 })),
                         ),
                 );
             } else {
                 let select_path = path.clone();
                 row = row.child(
-                    Button::new(("vault-select", index))
+                    Button::new(("space-select", index))
                         .label(if current {
                             format!("{} · 현재", entry.name)
                         } else {
@@ -121,7 +121,7 @@ impl Edot {
                         .text_ellipsis()
                         .overflow_hidden()
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.select_registered_vault(select_path.clone(), window, cx);
+                            this.select_registered_space(select_path.clone(), window, cx);
                         })),
                 );
             }
@@ -133,7 +133,7 @@ impl Edot {
                     .flex_shrink_0()
                     .gap_1()
                     .child(
-                        Button::new(("vault-folder", index))
+                        Button::new(("space-folder", index))
                             .small()
                             .icon(IconName::FolderOpen)
                             .tooltip("폴더 열기")
@@ -141,11 +141,11 @@ impl Edot {
                             .h(px(28.))
                             .px_0()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_vault_folder(&folder_path, cx);
+                                this.open_space_folder(&folder_path, cx);
                             })),
                     )
                     .child(
-                        Button::new(("vault-rename", index))
+                        Button::new(("space-rename", index))
                             .small()
                             .icon(IconName::Pencil)
                             .tooltip("이름 바꾸기")
@@ -153,11 +153,11 @@ impl Edot {
                             .h(px(28.))
                             .px_0()
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.begin_vault_rename(rename_path.clone(), window, cx);
+                                this.begin_space_rename(rename_path.clone(), window, cx);
                             })),
                     )
                     .child(
-                        Button::new(("vault-remove", index))
+                        Button::new(("space-remove", index))
                             .small()
                             .icon(IconName::Trash)
                             .tooltip("목록에서 삭제")
@@ -166,15 +166,15 @@ impl Edot {
                             .px_0()
                             .text_color(cx.theme().destructive)
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.confirm_remove_vault(path.clone(), window, cx);
+                                this.confirm_remove_space(path.clone(), window, cx);
                             })),
                     ),
             );
             list = list.child(row);
         }
         div()
-            .id("vault-popup")
-            .debug_selector(|| "vault-popup".into())
+            .id("space-popup")
+            .debug_selector(|| "space-popup".into())
             .absolute()
             .left(px(8.))
             .bottom(px(48.))
@@ -188,12 +188,12 @@ impl Edot {
             .bg(cx.theme().background)
             .shadow_lg()
             .occlude()
-            .track_focus(&self.vault_ui.focus)
+            .track_focus(&self.space_ui.focus)
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 if !window.has_active_dialog(cx)
-                    && !this.vault_ui.bounds.get().contains(&event.position)
+                    && !this.space_ui.bounds.get().contains(&event.position)
                 {
-                    this.close_vault_list(window, cx);
+                    this.close_space_list(window, cx);
                 }
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -201,39 +201,39 @@ impl Edot {
                     return;
                 }
                 let key = event.keystroke.key.as_str();
-                if let Some((_, input)) = &this.vault_ui.rename {
+                if let Some((_, input)) = &this.space_ui.rename {
                     if input.read(cx).is_composing() {
                         return;
                     }
                     match key {
-                        "enter" => this.finish_vault_rename(window, cx),
+                        "enter" => this.finish_space_rename(window, cx),
                         "escape" => {
-                            this.vault_ui.rename = None;
-                            this.vault_ui.focus.focus(window, cx);
+                            this.space_ui.rename = None;
+                            this.space_ui.focus.focus(window, cx);
                             cx.notify();
                         }
                         _ => return,
                     }
                 } else {
                     match key {
-                        "escape" => this.close_vault_list(window, cx),
-                        "up" | "down" if this.vault_ui.focus.is_focused(window) => {
-                            let count = this.vault_ui.registry.entries.len();
+                        "escape" => this.close_space_list(window, cx),
+                        "up" | "down" if this.space_ui.focus.is_focused(window) => {
+                            let count = this.space_ui.registry.entries.len();
                             if count > 0 {
-                                this.vault_ui.cursor = if key == "up" {
-                                    (this.vault_ui.cursor + count - 1) % count
+                                this.space_ui.cursor = if key == "up" {
+                                    (this.space_ui.cursor + count - 1) % count
                                 } else {
-                                    (this.vault_ui.cursor + 1) % count
+                                    (this.space_ui.cursor + 1) % count
                                 };
-                                this.vault_ui.scroll.scroll_to_item(this.vault_ui.cursor);
+                                this.space_ui.scroll.scroll_to_item(this.space_ui.cursor);
                                 cx.notify();
                             }
                         }
-                        "enter" if this.vault_ui.focus.is_focused(window) => {
+                        "enter" if this.space_ui.focus.is_focused(window) => {
                             if let Some(entry) =
-                                this.vault_ui.registry.entries.get(this.vault_ui.cursor)
+                                this.space_ui.registry.entries.get(this.space_ui.cursor)
                             {
-                                this.select_registered_vault(entry.path.clone(), window, cx);
+                                this.select_registered_space(entry.path.clone(), window, cx);
                             }
                         }
                         _ => return,
@@ -246,16 +246,16 @@ impl Edot {
                     .px_2()
                     .py_1()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Vault"),
+                    .child("Space"),
             )
             .child(list)
             .child(
-                Button::new("vault-add")
+                Button::new("space-add")
                     .icon(IconName::Plus)
-                    .label("Vault 추가")
+                    .label("Space 추가")
                     .w_full()
                     .justify_start()
-                    .on_click(cx.listener(|this, _, window, cx| this.open_vault(window, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.open_space(window, cx))),
             )
             .into_any_element()
     }

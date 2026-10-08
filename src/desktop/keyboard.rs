@@ -19,8 +19,8 @@ impl Edot {
             cx.stop_propagation();
             return;
         }
-        if self.vault_ui.open {
-            return; // The Vault popup owns its keys, including name editing.
+        if self.space_ui.open {
+            return; // The Space popup owns its keys, including name editing.
         }
         let ctrl = event.keystroke.modifiers.control;
         let shift = event.keystroke.modifiers.shift;

@@ -1,4 +1,4 @@
-//! A small UTF-8 INI reader/writer shared by preferences and Vault metadata.
+//! A small UTF-8 INI reader/writer shared by preferences and Space metadata.
 use super::{Settings, ThemeMode};
 use std::{collections::HashSet, io, ops::Range};
 

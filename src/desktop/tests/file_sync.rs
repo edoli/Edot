@@ -236,7 +236,7 @@ fn missing_and_invalid_bodies_keep_editor_and_only_explicit_save_restores_deleti
 }
 
 #[gpui::test]
-fn session_changes_are_ignored_and_old_vault_reads_are_discarded(cx: &mut TestAppContext) {
+fn session_changes_are_ignored_and_old_space_reads_are_discarded(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let snapshot = f.update(cx, |this, _, cx| this.sync_snapshot(Changes::all(), cx));
     let stale = snapshot.read();
@@ -245,7 +245,7 @@ fn session_changes_are_ignored_and_old_vault_reads_are_discarded(cx: &mut TestAp
     f.update(cx, |this, window, cx| {
         assert_eq!(this.session.active, Some(f.ids[0]));
         assert_eq!(this.open.len(), 2);
-        assert!(this.switch_vault(f.dir.join("other"), window, cx));
+        assert!(this.switch_space(f.dir.join("other"), window, cx));
         assert!(this.apply_file_sync(stale, window, cx).is_empty());
         assert!(this.book.notes.is_empty());
         assert!(this.open.is_empty());

@@ -1,4 +1,4 @@
-//! Vault directory notifications. Only tree.tsv and numeric note files are relevant.
+//! Space directory notifications. Only tree.tsv and numeric note files are relevant.
 use std::{
     collections::HashSet,
     future::poll_fn,
@@ -188,7 +188,7 @@ mod native {
             let worker_stop = stop.clone();
             let worker_events = events.clone();
             let thread = thread::Builder::new()
-                .name("edot-vault-watch".into())
+                .name("edot-space-watch".into())
                 .spawn(move || {
                     let result = run(directory, worker_stop, done, &worker_events);
                     if let Err(error) = result {

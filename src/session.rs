@@ -1,4 +1,4 @@
-//! Vault session: tabs, sidebar and explicitly expanded tree items.
+//! Space session: tabs, sidebar and explicitly expanded tree items.
 use crate::{model::Notebook, storage::replace_file};
 use std::{collections::HashSet, io, path::Path};
 

@@ -6,8 +6,8 @@ mod startup;
 mod widgets;
 
 use edot::{
-    datetime, drag, editing, global_search, model, search, selection, session, settings, storage,
-    tabs, vault, watch,
+    datetime, drag, editing, global_search, model, search, selection, session, settings, space,
+    storage, tabs, watch,
 };
 
 fn main() {

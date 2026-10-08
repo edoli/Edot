@@ -1,4 +1,4 @@
-//! Vault selection and device-wide configuration paths.
+//! Space selection and device-wide configuration paths.
 use crate::storage::replace_config_file;
 use std::{
     ffi::OsString,
@@ -8,7 +8,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Paths {
-    pub vault: PathBuf,
+    pub space: PathBuf,
     pub config: PathBuf,
 }
 
@@ -28,7 +28,7 @@ pub fn config_dir() -> PathBuf {
 
 impl Paths {
     pub fn resolve() -> io::Result<Self> {
-        let explicit = std::env::var_os("EDOT_VAULT_DIR").map(PathBuf::from);
+        let explicit = std::env::var_os("EDOT_SPACE_DIR").map(PathBuf::from);
         let local = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
@@ -36,7 +36,7 @@ impl Paths {
             std::env::args_os().skip(1),
             config_dir(),
             explicit,
-            local.join("Edot/vaults/Default"),
+            local.join("Edot/spaces/Default"),
         )
     }
 
@@ -44,52 +44,52 @@ impl Paths {
         args: impl IntoIterator<Item = OsString>,
         config: PathBuf,
         preferred: Option<PathBuf>,
-        default_vault: PathBuf,
+        default_space: PathBuf,
     ) -> io::Result<Self> {
         let mut args = args.into_iter();
         let mut cli = None;
         while let Some(arg) = args.next() {
-            if arg == "--vault" {
+            if arg == "--space" {
                 cli = Some(PathBuf::from(
                     args.next().filter(|path| !path.is_empty()).ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidInput,
-                            "--vault 뒤에 폴더 경로가 필요합니다.",
+                            "--space 뒤에 폴더 경로가 필요합니다.",
                         )
                     })?,
                 ));
             }
         }
-        let vault = if let Some(path) = cli.or(preferred) {
+        let space = if let Some(path) = cli.or(preferred) {
             path
         } else {
-            match std::fs::read_to_string(config.join("last-vault.txt")) {
+            match std::fs::read_to_string(config.join("last-space.txt")) {
                 Ok(path) => {
                     let path = PathBuf::from(path);
                     if !path.is_dir() {
                         return Err(io::Error::new(
                             io::ErrorKind::NotFound,
-                            "마지막 vault를 찾을 수 없습니다. --vault로 폴더를 지정하세요.",
+                            "마지막 space를 찾을 수 없습니다. --space로 폴더를 지정하세요.",
                         ));
                     }
                     path
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => default_vault,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => default_space,
                 Err(error) => return Err(error),
             }
         };
-        Ok(Self { vault, config })
+        Ok(Self { space, config })
     }
 
     pub fn remember(&self) -> io::Result<()> {
-        let path = std::fs::canonicalize(&self.vault)?;
+        let path = std::fs::canonicalize(&self.space)?;
         let path = path.to_str().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "vault 경로를 저장할 수 없습니다.",
+                "space 경로를 저장할 수 없습니다.",
             )
         })?;
-        replace_config_file(&self.config.join("last-vault.txt"), path.as_bytes())
+        replace_config_file(&self.config.join("last-space.txt"), path.as_bytes())
     }
 }
 
@@ -99,7 +99,7 @@ pub fn name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-const METADATA_FILE: &str = "vault.ini";
+const METADATA_FILE: &str = "space.ini";
 
 fn metadata(path: &Path) -> io::Result<crate::settings::ini::Document> {
     let text = match std::fs::read_to_string(path.join(METADATA_FILE)) {
@@ -112,7 +112,7 @@ fn metadata(path: &Path) -> io::Result<crate::settings::ini::Document> {
         .value("version")
         .is_some_and(|version| version != "1")
     {
-        return Err(io::Error::other("지원하지 않는 Vault 정보 버전입니다."));
+        return Err(io::Error::other("지원하지 않는 Space 정보 버전입니다."));
     }
     Ok(document)
 }
@@ -125,7 +125,7 @@ pub fn read_name(path: &Path) -> io::Result<String> {
     let document = metadata(path)?;
     match document.value("name") {
         Some(value) if valid_name(value) => Ok(value.trim().into()),
-        Some(_) => Err(io::Error::other("Vault 이름이 잘못되었습니다.")),
+        Some(_) => Err(io::Error::other("Space 이름이 잘못되었습니다.")),
         None => Ok(name(path)),
     }
 }
@@ -133,19 +133,19 @@ pub fn read_name(path: &Path) -> io::Result<String> {
 pub fn rename(path: &Path, name: &str) -> io::Result<()> {
     if !valid_name(name) {
         return Err(io::Error::other(
-            "Vault 이름은 비어 있거나 제어 문자를 포함할 수 없습니다.",
+            "Space 이름은 비어 있거나 제어 문자를 포함할 수 없습니다.",
         ));
     }
-    // Require an existing Vault, so a missing synced folder is never recreated.
+    // Require an existing Space, so a missing synced folder is never recreated.
     if !path.is_dir() {
-        return Err(io::Error::other("Vault 폴더가 존재하지 않습니다."));
+        return Err(io::Error::other("Space 폴더가 존재하지 않습니다."));
     }
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(path.join(".vault.lock"))?;
+        .open(path.join(".space.lock"))?;
     lock.lock()?;
     let document = metadata(path)?;
     let quoted = name.trim().replace('\\', "\\\\").replace('"', "\\\"");
@@ -181,7 +181,7 @@ pub fn same_path(left: &Path, right: &Path) -> bool {
 }
 
 impl Registry {
-    const FILE: &str = "vaults.tsv";
+    const FILE: &str = "spaces.tsv";
 
     pub fn load(config: &Path) -> io::Result<Self> {
         let text = match std::fs::read_to_string(config.join(Self::FILE)) {
@@ -190,13 +190,13 @@ impl Registry {
             Err(error) => return Err(error),
         };
         let mut lines = text.lines();
-        if lines.next() != Some("EDOTVAULTS1") {
-            return Err(io::Error::other("Vault 목록 형식이 잘못되었습니다."));
+        if lines.next() != Some("EDOTSPACES1") {
+            return Err(io::Error::other("Space 목록 형식이 잘못되었습니다."));
         }
         let mut entries = Vec::new();
         for line in lines {
             if line.is_empty() || line.chars().any(char::is_control) {
-                return Err(io::Error::other("Vault 목록 항목이 잘못되었습니다."));
+                return Err(io::Error::other("Space 목록 항목이 잘못되었습니다."));
             }
             let path = PathBuf::from(line);
             if !path.is_absolute()
@@ -204,7 +204,7 @@ impl Registry {
                     .iter()
                     .any(|entry: &Entry| same_path(&entry.path, &path))
             {
-                return Err(io::Error::other("Vault 경로가 잘못되거나 중복되었습니다."));
+                return Err(io::Error::other("Space 경로가 잘못되거나 중복되었습니다."));
             }
             entries.push(Entry {
                 name: read_name(&path).unwrap_or_else(|_| name(&path)),
@@ -260,7 +260,7 @@ impl Registry {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(config.join(".vaults.lock"))?;
+            .open(config.join(".spaces.lock"))?;
         lock.lock()?;
         Ok(lock)
     }
@@ -274,13 +274,13 @@ impl Registry {
     }
 
     fn save(&self, config: &Path) -> io::Result<()> {
-        let mut text = String::from("EDOTVAULTS1\n");
+        let mut text = String::from("EDOTSPACES1\n");
         for entry in &self.entries {
             let path = entry
                 .path
                 .to_str()
                 .filter(|path| !path.chars().any(char::is_control))
-                .ok_or_else(|| io::Error::other("Vault 경로를 저장할 수 없습니다."))?;
+                .ok_or_else(|| io::Error::other("Space 경로를 저장할 수 없습니다."))?;
             text.push_str(path);
             text.push('\n');
         }
@@ -293,7 +293,7 @@ mod tests {
     use super::*;
     fn fixture() -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "edot-vault-{}-{}",
+            "edot-space-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -304,39 +304,40 @@ mod tests {
         root
     }
     #[test]
-    fn chooses_cli_then_environment_then_remembered_vault() {
+    fn chooses_cli_then_environment_then_remembered_space() {
         let root = fixture();
         let config = root.join("config");
-        let default_vault = root.join("vaults/Default");
+        let default_space = root.join("spaces/Default");
         let env = root.join("env");
         let cli = root.join("cli 한글");
         let choose =
-            |args, preferred| Paths::select(args, config.clone(), preferred, default_vault.clone());
+            |args, preferred| Paths::select(args, config.clone(), preferred, default_space.clone());
+        assert_eq!(choose(vec![], None).unwrap().space, default_space);
         let selected = choose(
-            vec!["--vault".into(), cli.clone().into_os_string()],
+            vec!["--space".into(), cli.clone().into_os_string()],
             Some(env.clone()),
         )
         .unwrap();
-        assert_eq!(selected.vault, cli);
+        assert_eq!(selected.space, cli);
         std::fs::create_dir(&cli).unwrap();
         selected.remember().unwrap();
-        assert_eq!(choose(vec![], Some(env.clone())).unwrap().vault, env);
+        assert_eq!(choose(vec![], Some(env.clone())).unwrap().space, env);
         assert_eq!(
-            choose(vec![], None).unwrap().vault,
+            choose(vec![], None).unwrap().space,
             std::fs::canonicalize(&cli).unwrap()
         );
-        assert!(choose(vec!["--vault".into()], None).is_err());
+        assert!(choose(vec!["--space".into()], None).is_err());
         std::fs::write(
-            config.join("last-vault.txt"),
+            config.join("last-space.txt"),
             root.join("missing").to_str().unwrap(),
         )
         .unwrap();
         assert!(choose(vec![], None).is_err());
-        assert_eq!(choose(vec![], Some(cli.clone())).unwrap().vault, cli);
+        assert_eq!(choose(vec![], Some(cli.clone())).unwrap().space, cli);
     }
 
     #[test]
-    fn vault_names_live_in_the_vault_and_registry_removal_preserves_data() {
+    fn space_names_live_in_the_space_and_registry_removal_preserves_data() {
         let root = fixture();
         let first = root.join("first");
         let second = root.join("second");
@@ -345,6 +346,7 @@ mod tests {
         std::fs::create_dir(&second).unwrap();
         std::fs::write(first.join("memo.txt"), "keep me").unwrap();
         initialize_metadata(&first).unwrap();
+        assert!(first.join("space.ini").is_file());
         std::fs::write(
             first.join(METADATA_FILE),
             "# keep\r\nversion = 1\r\nname = \"first\" # label\r\ncustom = yes\r\n",
@@ -352,6 +354,11 @@ mod tests {
         .unwrap();
         let original = Registry::initialize(&config, &first).unwrap();
         assert_eq!(original.entries.len(), 1);
+        assert!(
+            std::fs::read_to_string(config.join("spaces.tsv"))
+                .unwrap()
+                .starts_with("EDOTSPACES1\n")
+        );
         Registry::register(&config, &second).unwrap();
         Registry::register(&config, &first.join(".")).unwrap();
         let label = r#"한글 \ "이름" # ; 🙂"#;
