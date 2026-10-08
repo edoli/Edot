@@ -252,6 +252,13 @@ impl Edot {
             )
             .child(list)
             .child(
+                div()
+                    .w_full()
+                    .h(px(1.))
+                    .flex_shrink_0()
+                    .bg(cx.theme().border),
+            )
+            .child(
                 Button::new("space-add")
                     .icon(IconName::Plus)
                     .label("Space 추가")

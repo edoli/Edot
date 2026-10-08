@@ -3,6 +3,53 @@ use crate::space;
 use crate::widgets::WindowExt;
 use std::collections::HashSet;
 
+#[test]
+fn space_open_initializes_binary_but_defers_legacy_migration_until_save() {
+    let dir = std::env::temp_dir().join(format!(
+        "edot-session-space-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut paths = space::Paths {
+        space: dir.join("new"),
+        config: dir.join("config"),
+    };
+    let loaded = LoadedSpace::open(&paths).unwrap();
+    assert_eq!(
+        fs::metadata(paths.space.join("session.bin")).unwrap().len(),
+        24
+    );
+    assert!(!paths.space.join("session.tsv").exists());
+    drop(loaded);
+
+    paths.space = dir.join("legacy");
+    let mut book = Notebook::load(&paths.space).unwrap();
+    let root = book.add(0, "root".into()).unwrap();
+    let child = book.add(root, "child".into()).unwrap();
+    book.save(&paths.space).unwrap();
+    let legacy = format!("EDOTSESSION1\n0\t300\t{child}\n{root}\n{child}\nexpanded\t{root}\n");
+    fs::write(paths.space.join("session.tsv"), &legacy).unwrap();
+    let loaded = LoadedSpace::open(&paths).unwrap();
+    assert_eq!(loaded.session.tabs, [root, child]);
+    assert_eq!(loaded.session.active, Some(child));
+    assert_eq!(loaded.session.expanded, HashSet::from([root]));
+    assert!(!paths.space.join("session.bin").exists());
+    loaded.session.save(&paths.space).unwrap();
+    assert_eq!(
+        fs::read_to_string(paths.space.join("session.tsv")).unwrap(),
+        legacy
+    );
+    let expected = loaded.session.clone();
+    drop(loaded);
+    let loaded = LoadedSpace::open(&paths).unwrap();
+    assert_eq!(loaded.session, expected);
+    drop(loaded);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[gpui::test]
 fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);

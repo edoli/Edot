@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// A stable numeric identity; tree IDs use base64url, sessions and file names use decimal.
+/// A stable numeric identity; tree IDs use base64url, sessions use binary, file names use decimal.
 pub type NoteId = u64;
 
 // Unpadded base64url of exactly eight big-endian bytes: ten full sextets

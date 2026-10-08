@@ -391,6 +391,7 @@ mod native {
             std::thread::sleep(Duration::from_millis(30));
             let _ = events.take();
             std::fs::write(dir.join("session.tsv"), "session").unwrap();
+            std::fs::write(dir.join("session.bin"), "session").unwrap();
             std::fs::write(dir.join("settings.ini"), "settings").unwrap();
             std::thread::sleep(Duration::from_millis(50));
             assert!(events.take().is_none());
