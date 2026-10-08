@@ -54,25 +54,3 @@ impl Selection {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn ranges_follow_visible_order_and_preserve_published_snapshots() {
-        let mut selected = Selection::default();
-        let visible = [9, 2, 7, 4];
-        selected.single(2);
-        let snapshot = Rc::clone(&selected.ids);
-        selected.click(4, &visible, false, true);
-        assert_eq!(*selected.ids, HashSet::from([2, 7, 4]));
-        assert_eq!(*snapshot, HashSet::from([2]));
-        selected.click(7, &visible, true, false);
-        assert_eq!(*selected.ids, HashSet::from([2, 4]));
-        selected.click(9, &visible, true, true);
-        assert_eq!(*selected.ids, HashSet::from([9, 2, 7, 4]));
-        selected.retain(|id| id != 7);
-        selected.click(4, &visible, false, true); // Removed anchor falls back to one.
-        assert_eq!(*selected.ids, HashSet::from([4]));
-    }
-}

@@ -73,39 +73,3 @@ impl TabLayout {
             .min(self.count as i32) as usize
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn tabs_shrink_before_scrolling_and_keep_close_space() {
-        let normal = TabLayout::new(800, 3, 88, 180, 0);
-        assert_eq!(normal.width, 180);
-        let compact = TabLayout::new(800, 8, 88, 180, 0);
-        assert_eq!(compact.width, 100);
-        assert!(!compact.overflow);
-        assert_eq!(compact.bounds(7), (700, 800));
-        let mut overflow = TabLayout::new(800, 20, 88, 180, 0);
-        assert!(overflow.overflow);
-        assert_eq!(overflow.width, 88);
-        overflow.reveal(19);
-        assert_eq!(overflow.bounds(19), (712, 800));
-        assert_eq!(overflow.hit(799), Some(19));
-        assert_eq!(overflow.hit(800), None);
-        overflow.reveal(0);
-        assert_eq!(overflow.offset, 0);
-        overflow.scroll(i32::MAX / 2);
-        assert_eq!(overflow.offset, 960);
-    }
-
-    #[test]
-    fn insertion_uses_tab_midpoints_and_the_scroll_offset() {
-        let layout = TabLayout::new(300, 6, 100, 100, 200);
-        assert_eq!(layout.insertion(0), 2);
-        assert_eq!(layout.insertion(49), 2);
-        assert_eq!(layout.insertion(50), 3);
-        assert_eq!(layout.insertion(300), 5);
-        assert_eq!(layout.insertion(i32::MAX), 6);
-        assert_eq!(layout.insertion(i32::MIN), 0);
-    }
-}

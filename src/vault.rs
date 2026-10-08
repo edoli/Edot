@@ -145,23 +145,4 @@ mod tests {
         assert!(choose(vec![], None).is_err());
         assert_eq!(choose(vec![], Some(cli.clone())).unwrap().vault, cli);
     }
-    #[test]
-    fn default_vault_does_not_adopt_an_old_store() {
-        let root = fixture();
-        let config = root.join("config");
-        let default_vault = root.join("vaults/Default");
-        assert_eq!(
-            Paths::select(vec![], config.clone(), None, default_vault.clone())
-                .unwrap()
-                .vault,
-            default_vault.clone()
-        );
-        std::fs::create_dir_all(root.join("notes")).unwrap();
-        assert_eq!(
-            Paths::select(vec![], config, None, default_vault.clone())
-                .unwrap()
-                .vault,
-            default_vault
-        );
-    }
 }

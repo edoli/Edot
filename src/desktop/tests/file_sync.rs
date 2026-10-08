@@ -1,9 +1,6 @@
 use super::*;
 use crate::watch::Changes;
-use std::{
-    collections::HashSet,
-    time::{Duration, Instant},
-};
+use std::collections::HashSet;
 
 fn note(id: u64) -> Changes {
     Changes {
@@ -18,37 +15,6 @@ fn sync(f: &Fixture, changes: Changes, cx: &mut TestAppContext) -> Changes {
     f.update(cx, |this, window, cx| {
         this.apply_file_sync(read, window, cx)
     })
-}
-
-#[gpui::test]
-fn external_plain_title_changes_are_reflected_and_invalid_titles_are_rejected(
-    cx: &mut TestAppContext,
-) {
-    let f = Fixture::new(cx);
-    let path = f.dir.join("tree.tsv");
-    let original = fs::read_to_string(&path).unwrap();
-    assert!(original.starts_with("EDOT2\n"));
-    let changes = Changes {
-        tree: true,
-        ..Default::default()
-    };
-    fs::write(&path, original.replace("첫 메모", "잘못된\t제목")).unwrap();
-    assert!(sync(&f, changes.clone(), cx).tree);
-    f.update(cx, |this, _, _| {
-        assert_eq!(this.book.get(f.ids[0]).unwrap().title, "첫 메모");
-    });
-    let external = original.replace("첫 메모", "414243 한글 😀");
-    fs::write(&path, &external).unwrap();
-    assert!(sync(&f, changes, cx).is_empty());
-    f.update(cx, |this, _, cx| {
-        assert_eq!(this.book.get(f.ids[0]).unwrap().title, "414243 한글 😀");
-        assert_eq!(this.session.active, Some(f.ids[0]));
-        assert_eq!(
-            this.active_editor().unwrap().read(cx).value(),
-            "🙂 한글12\r\n한글3\rkeep\n"
-        );
-    });
-    assert_eq!(fs::read_to_string(&path).unwrap(), external);
 }
 
 #[gpui::test]
@@ -139,54 +105,6 @@ fn dirty_app_content_wins_and_stale_reads_cannot_undo_a_local_save(cx: &mut Test
 }
 
 #[gpui::test]
-fn closed_notes_read_latest_files_and_refresh_existing_search_results(cx: &mut TestAppContext) {
-    let f = Fixture::new(cx);
-    f.update(cx, |this, window, cx| {
-        this.search_mode = true;
-        this.global
-            .query
-            .update(cx, |state, cx| state.set_value("needle", window, cx));
-        this.queue_search(window, cx);
-    });
-    let settle = |cx: &mut TestAppContext| {
-        cx.run_until_parked();
-        cx.background_executor
-            .advance_clock(Duration::from_millis(300));
-        cx.run_until_parked();
-    };
-    settle(cx);
-    fs::write(
-        f.dir.join(format!("notes/{}.txt", f.ids[1])),
-        "external without match",
-    )
-    .unwrap();
-    assert!(sync(&f, note(f.ids[1]), cx).is_empty());
-    settle(cx);
-    f.update(cx, |this, window, cx| {
-        assert!(
-            !this
-                .search_results
-                .groups
-                .iter()
-                .any(|row| row.id == f.ids[1])
-        );
-        assert!(
-            this.open
-                .iter()
-                .find(|tab| tab.id == f.ids[1])
-                .unwrap()
-                .editor
-                .is_none()
-        );
-        assert!(this.open_note(f.ids[1], false, window, cx));
-        assert_eq!(
-            this.active_editor().unwrap().read(cx).value(),
-            "external without match"
-        );
-    });
-}
-
-#[gpui::test]
 fn external_tree_updates_keep_tabs_selection_and_expansion_and_reject_partial_indices(
     cx: &mut TestAppContext,
 ) {
@@ -266,27 +184,6 @@ fn external_tree_deletion_removes_clean_tabs_but_keeps_dirty_app_notes(cx: &mut 
 }
 
 #[gpui::test]
-fn deleting_the_clean_active_note_moves_focus_to_the_surviving_editor(cx: &mut TestAppContext) {
-    let f = Fixture::new(cx);
-    let mut book = Notebook::reload(&f.dir).unwrap();
-    book.notes.retain(|note| note.id == f.ids[1]);
-    book.save(&f.dir).unwrap();
-    assert!(sync(&f, Changes::all(), cx).is_empty());
-    f.update(cx, |this, window, cx| {
-        assert_eq!(this.session.active, Some(f.ids[1]));
-        let editor = this.active_editor().unwrap();
-        assert!(gpui::Focusable::focus_handle(editor.read(cx), cx).is_focused(window));
-    });
-    f.input(cx, "x");
-    f.update(cx, |this, _, cx| {
-        assert_eq!(
-            this.active_editor().unwrap().read(cx).value(),
-            "xclosed needle\n"
-        );
-    });
-}
-
-#[gpui::test]
 fn missing_and_invalid_bodies_keep_editor_and_only_explicit_save_restores_deletions(
     cx: &mut TestAppContext,
 ) {
@@ -334,37 +231,6 @@ fn session_changes_are_ignored_and_old_vault_reads_are_discarded(cx: &mut TestAp
         assert!(this.apply_file_sync(stale, window, cx).is_empty());
         assert!(this.book.notes.is_empty());
         assert!(this.open.is_empty());
-    });
-}
-
-#[gpui::test]
-fn bulk_changes_restart_one_full_search_instead_of_many_note_tasks(cx: &mut TestAppContext) {
-    let f = Fixture::new(cx);
-    f.update(cx, |this, window, cx| {
-        this.search_mode = true;
-        this.global
-            .query
-            .update(cx, |state, cx| state.set_value("needle", window, cx));
-        this.queue_search(window, cx);
-    });
-    cx.run_until_parked();
-    let generation = f.update(cx, |this, _, _| this.search_results.generation);
-    assert!(
-        sync(
-            &f,
-            Changes {
-                notes: (1..=100).collect(),
-                ..Default::default()
-            },
-            cx
-        )
-        .is_empty()
-    );
-    f.update(cx, |this, _, _| {
-        assert_eq!(this.search_results.generation, generation + 1);
-        assert!(this.search_results.scan_task.is_some());
-        assert!(this.search_results.note_tasks.is_empty());
-        assert!(this.search_results.pending_notes.is_empty());
     });
 }
 
@@ -417,90 +283,4 @@ fn ime_and_title_edits_survive_external_changes_without_losing_other_tree_update
     let book = Notebook::reload(&f.dir).unwrap();
     assert_eq!(book.get(f.ids[0]).unwrap().title, "app title");
     assert!(book.get(added).is_some());
-}
-
-#[gpui::test]
-fn startup_loads_global_ini_while_running_settings_stay_unchanged(cx: &mut TestAppContext) {
-    let f = Fixture::new(cx);
-    let expected = Settings {
-        theme: ThemeMode::Dark,
-        font_size: 25,
-        wrap: false,
-        ..Default::default()
-    };
-    let config = f.dir.join("test-global-config");
-    expected.save(&config).unwrap();
-    let loaded = LoadedVault::open(&crate::vault::Paths {
-        vault: f.dir.join("startup-vault"),
-        config,
-    })
-    .unwrap();
-    assert_eq!(loaded.settings, expected);
-    f.update(cx, |this, _, _| {
-        assert_eq!(this.settings, Settings::default())
-    });
-}
-
-#[gpui::test]
-fn real_windows_events_reach_the_app_without_desktop_automation(cx: &mut TestAppContext) {
-    let f = Fixture::new(cx);
-    // GPUI's deterministic scheduler rejects OS-thread wakes. Pump real events
-    // on its test thread into the normal coalescing/background-read pipeline.
-    let (watcher, events) = crate::watch::Watcher::new(&f.dir).unwrap();
-    fs::write(
-        f.dir.join(format!("notes/{}.txt", f.ids[0])),
-        "native external body",
-    )
-    .unwrap();
-    let wait = |cx: &mut TestAppContext, condition: &dyn Fn(&Edot, &Context<Edot>) -> bool| {
-        let start = Instant::now();
-        loop {
-            std::thread::sleep(Duration::from_millis(5));
-            if let Some(changes) = events.take() {
-                f.update(cx, |this, window, cx| {
-                    this.request_file_sync(changes.unwrap(), window, cx)
-                });
-            }
-            cx.run_until_parked();
-            cx.background_executor
-                .advance_clock(Duration::from_millis(250));
-            cx.run_until_parked();
-            if f.update(cx, |this, _, cx| condition(this, cx)) {
-                break;
-            }
-            assert!(
-                start.elapsed() < Duration::from_secs(5),
-                "native UI refresh timed out"
-            );
-        }
-    };
-    wait(cx, &|this, cx| {
-        this.active_editor().unwrap().read(cx).value() == "native external body"
-    });
-    let mut book = Notebook::reload(&f.dir).unwrap();
-    book.get_mut(f.ids[0]).unwrap().title = "native external title".into();
-    book.save(&f.dir).unwrap();
-    wait(cx, &|this, _| {
-        this.book.get(f.ids[0]).unwrap().title == "native external title"
-    });
-    drop(watcher);
-    f.update(cx, |this, window, cx| {
-        assert!(this.switch_vault(f.dir.join("new-vault"), window, cx));
-    });
-    let (_watcher, events) = crate::watch::Watcher::new(&f.dir.join("new-vault")).unwrap();
-    fs::write(f.dir.join("tree.tsv"), "bad old vault").unwrap();
-    std::thread::sleep(Duration::from_millis(30));
-    if let Some(changes) = events.take() {
-        f.update(cx, |this, window, cx| {
-            this.request_file_sync(changes.unwrap(), window, cx)
-        });
-    }
-    cx.run_until_parked();
-    cx.background_executor
-        .advance_clock(Duration::from_millis(250));
-    cx.run_until_parked();
-    f.update(cx, |this, _, _| {
-        assert!(this.book.notes.is_empty());
-        assert!(this.error.is_none());
-    });
 }

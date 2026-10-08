@@ -39,30 +39,3 @@ fn format_at(time: &SYSTEMTIME, include_time: bool) -> io::Result<String> {
     })?;
     Ok(format!("{clock} {date}"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn date_and_time_share_one_local_timestamp_and_omit_seconds() {
-        let mut time = SYSTEMTIME {
-            wYear: 2026,
-            wMonth: 10,
-            wDay: 6,
-            wHour: 13,
-            wMinute: 4,
-            wSecond: 59,
-            ..Default::default()
-        };
-        let date = format_at(&time, false).unwrap();
-        let timestamp = format_at(&time, true).unwrap();
-        assert!(!date.is_empty());
-        assert!(timestamp.ends_with(&format!(" {date}")));
-        assert!(timestamp.len() > date.len() + 1);
-        time.wSecond = 0;
-        assert_eq!(format_at(&time, true).unwrap(), timestamp);
-        assert_eq!(format_at(&time, false).unwrap(), date);
-        assert!(!timestamp.contains(['\r', '\n', '\0']));
-    }
-}

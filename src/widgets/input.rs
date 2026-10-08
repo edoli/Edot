@@ -75,8 +75,6 @@ pub struct InputState {
     scroll: Point<Pixels>,
     bounds: Bounds<Pixels>,
     content_padding: Edges<Pixels>,
-    #[cfg(test)]
-    paint_clip: Bounds<Pixels>,
     lines: Vec<Paragraph>,
     layout_key: Option<(u64, Pixels, Pixels, Font, Hsla)>,
     line_height: Pixels,
@@ -155,8 +153,6 @@ impl InputState {
             scroll: point(px(0.), px(0.)),
             bounds: Bounds::default(),
             content_padding: Edges::default(),
-            #[cfg(test)]
-            paint_clip: Bounds::default(),
             lines: vec![],
             layout_key: None,
             line_height: px(24.),

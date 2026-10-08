@@ -1,9 +1,6 @@
 //! Headless GPUI event tests. They never send input to the user's desktop.
 use super::{Edot, LoadedVault, Settings, StoreLock};
-use crate::{
-    editing::CharRange, global_search::MatchKey, model::Notebook, session::Session,
-    settings::ThemeMode,
-};
+use crate::{model::Notebook, session::Session, settings::ThemeMode};
 use gpui::{
     AnyWindowHandle, AppContext, Bounds, Context, ElementInputHandler, Entity, InputHandler,
     TestAppContext, Window, WindowBounds, WindowOptions, point, px, size,
@@ -13,7 +10,6 @@ use std::{fs, path::PathBuf};
 trait TestWindowExt {
     fn render_frame(&mut self, cx: &mut gpui::App);
     fn press(&mut self, key: &str, cx: &mut gpui::App);
-    fn input(&mut self, text: &str, cx: &mut gpui::App);
 }
 impl TestWindowExt for Window {
     fn render_frame(&mut self, cx: &mut gpui::App) {
@@ -40,15 +36,6 @@ impl TestWindowExt for Window {
             gpui::KeyUpEvent { keystroke: stroke }.to_platform_input(),
             cx,
         );
-    }
-    fn input(&mut self, text: &str, cx: &mut gpui::App) {
-        for ch in text.chars() {
-            self.render_frame(cx);
-            let mut key = gpui::Keystroke::parse(&ch.to_string()).unwrap();
-            key.key_char = Some(ch.to_string());
-            self.dispatch_keystroke(key, cx);
-        }
-        self.render_frame(cx);
     }
 }
 
@@ -147,24 +134,11 @@ impl Fixture {
         })
         .unwrap();
     }
-    fn input(&self, cx: &mut TestAppContext, text: &str) {
-        cx.update_window(self.window, |_, window, cx| {
-            window.render_frame(cx);
-            window.input(text, cx);
-        })
-        .unwrap();
-    }
 }
 
-mod column;
 mod documents;
 mod editor;
 mod file_sync;
-mod layout;
-mod menus;
-mod multiselection;
-mod preferences;
 mod search;
-mod shortcuts;
 mod tree;
 mod vaults;

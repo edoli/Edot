@@ -183,15 +183,7 @@ impl InputState {
         }
         self.clamp_scroll();
     }
-    #[cfg(test)]
-    pub fn paint_clip(&self) -> Bounds<Pixels> {
-        self.paint_clip
-    }
     pub(super) fn paint(&mut self, window: &mut Window, cx: &mut App) {
-        #[cfg(test)]
-        {
-            self.paint_clip = window.content_mask().bounds;
-        }
         let origin = self.bounds.origin + self.scroll;
         let focused = self.focus.is_focused(window);
         let selection_color = cx.theme().selection;

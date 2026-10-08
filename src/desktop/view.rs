@@ -125,8 +125,6 @@ impl Render for Edot {
             let dragging = self.resizing.is_some();
             let view = cx.entity().downgrade();
             let entity_id = cx.entity_id();
-            #[cfg(test)]
-            let probe = self.splitter_probe.clone();
             root = root.child(
                 div()
                     .id("sidebar-resize")
@@ -170,8 +168,6 @@ impl Render for Edot {
                                         cx.theme().border
                                     },
                                 ));
-                                #[cfg(test)]
-                                probe.replace(Some((hitbox.clone(), highlighted, cursor)));
                                 let move_hitbox = hitbox.clone();
                                 window.on_mouse_event(
                                     move |_: &MouseMoveEvent, phase, window, cx| {

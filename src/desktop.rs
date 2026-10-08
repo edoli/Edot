@@ -83,8 +83,6 @@ pub struct Edot {
     drop_target: Option<DropTarget>,
     tab_drop: Option<usize>,
     resizing: Option<(Pixels, i32)>,
-    #[cfg(test)]
-    splitter_probe: Rc<std::cell::RefCell<Option<(Hitbox, bool, CursorStyle)>>>,
     tree_auto: component::scroll::AutoScroll,
     tab_auto: component::scroll::AutoScroll,
     dragging_notes: Vec<u64>,
@@ -160,8 +158,6 @@ impl Edot {
             drop_target: None,
             tab_drop: None,
             resizing: None,
-            #[cfg(test)]
-            splitter_probe: Default::default(),
             tree_auto: Default::default(),
             tab_auto: Default::default(),
             dragging_notes: vec![],

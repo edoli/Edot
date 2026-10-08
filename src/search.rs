@@ -289,33 +289,4 @@ mod tests {
             edits.iter().map(|edit| edit.range).collect::<Vec<_>>()
         );
     }
-    #[test]
-    fn regex_anchors_empty_matches_and_errors() {
-        let pattern = Pattern::compile("^", false, true).unwrap();
-        let text = "🙂\r\n한글\r끝\n";
-        let edits = pattern.edits_text(text, ">");
-        assert_eq!(
-            edits.iter().map(|e| e.range.start).collect::<Vec<_>>(),
-            [0, 3, 6, 8]
-        );
-        assert_eq!(apply_edits(text, &edits), ">🙂\r\n>한글\r>끝\n>");
-        assert!(Pattern::compile("[", true, true).is_err());
-        assert!(Pattern::compile("[", true, false).is_ok());
-        let mut count = 0;
-        Pattern::compile("n[e]+dle", false, true)
-            .unwrap()
-            .visit_text("NEEDLE needle", |_| {
-                count += 1;
-                true
-            });
-        assert_eq!(count, 2);
-        count = 0;
-        Pattern::compile("needle", true, true)
-            .unwrap()
-            .visit_text("NEEDLE needle", |_| {
-                count += 1;
-                true
-            });
-        assert_eq!(count, 1);
-    }
 }

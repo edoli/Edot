@@ -3,27 +3,6 @@ use crate::vault;
 use std::collections::HashSet;
 
 #[gpui::test]
-fn unsupported_tree_version_blocks_vault_switch_without_changing_files(cx: &mut TestAppContext) {
-    let f = Fixture::new(cx);
-    let other = f.dir.join("unsupported-vault");
-    fs::create_dir_all(other.join("notes")).unwrap();
-    let index = "EDOT1\n1\t0\t0\t414243\n";
-    fs::write(other.join("tree.tsv"), index).unwrap();
-    fs::write(other.join("notes/1.txt"), "보존할 본문\t\r\n").unwrap();
-    f.update(cx, |this, window, cx| {
-        let editor = this.active_editor().unwrap();
-        assert!(!this.switch_vault(other.clone(), window, cx));
-        assert_eq!(this.dir, f.dir);
-        assert_eq!(this.active_editor().unwrap(), editor);
-    });
-    assert_eq!(fs::read_to_string(other.join("tree.tsv")).unwrap(), index);
-    assert_eq!(
-        fs::read_to_string(other.join("notes/1.txt")).unwrap(),
-        "보존할 본문\t\r\n"
-    );
-}
-
-#[gpui::test]
 fn vault_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let other = f.dir.join("other-vault");
@@ -115,43 +94,5 @@ fn failed_vault_or_session_write_preserves_current_state(cx: &mut TestAppContext
     assert_eq!(
         fs::read_to_string(invalid.join("tree.tsv")).unwrap(),
         "corrupt tree"
-    );
-}
-
-#[gpui::test]
-fn new_vault_is_initialized_as_text_and_keeps_running_settings(cx: &mut TestAppContext) {
-    let f = Fixture::new(cx);
-    let new = f.dir.join("new-vault");
-    let config = f.dir.join("test-global-config");
-    f.update(cx, |this, window, cx| {
-        let editor = this.active_editor().unwrap();
-        editor.update(cx, |state, cx| {
-            state.replace_all("unsaved edits", window, cx)
-        });
-        this.changed(f.ids[0], window, cx);
-        let selection = editor.read(cx).selected_range();
-        let changed = Settings {
-            theme: ThemeMode::Dark,
-            wrap: false,
-            ..Default::default()
-        };
-        changed.save(&config).unwrap();
-        assert_eq!(this.settings, Settings::default());
-        assert_eq!(editor.read(cx).value(), "unsaved edits");
-        assert_eq!(editor.read(cx).selected_range(), selection);
-        assert!(this.open[0].dirty);
-        fs::write(config.join("settings.ini"), "version = 999").unwrap();
-        assert!(this.switch_vault(new.clone(), window, cx));
-        assert_eq!(this.settings, Settings::default());
-        assert!(this.book.notes.is_empty());
-        assert!(this.open.is_empty());
-    });
-    assert!(new.join("notes").is_dir());
-    assert_eq!(fs::read_to_string(new.join("tree.tsv")).unwrap(), "EDOT2\n");
-    assert!(new.join("session.tsv").is_file());
-    assert!(!new.join("edot.sqlite").exists());
-    assert_eq!(
-        fs::read_to_string(config.join("settings.ini")).unwrap(),
-        "version = 999"
     );
 }

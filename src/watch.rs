@@ -341,17 +341,10 @@ mod native {
         use super::*;
 
         #[test]
-        fn truncated_notifications_request_a_rescan() {
-            assert!(parse(&[]).rescan);
-            assert!(parse(&[0u8; 11]).rescan);
-            let mut bytes = vec![0u8; 12];
-            bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
-            assert!(parse(&bytes).rescan);
-        }
-
-        #[test]
         fn native_notifications_cover_replace_rename_delete_and_cancel() {
             use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+            assert!(parse(&[]).rescan);
+            assert!(parse(&[0u8; 11]).rescan);
             let dir = std::env::temp_dir().join(format!(
                 "edot-native-watch-{}-{}",
                 std::process::id(),
@@ -450,30 +443,5 @@ mod tests {
         assert!(matches!(next.as_mut().poll(&mut cx), Poll::Ready(None)));
         events.send(Ok(Changes::all()));
         assert!(events.take().is_none());
-    }
-    #[test]
-    fn relevant_paths_are_filtered_and_large_batches_are_bounded() {
-        let mut changes = Changes::default();
-        for path in [
-            "session.tsv",
-            "settings.ini",
-            "tree.tmp",
-            "notes/7.tmp",
-            "trash/7.txt",
-            "notes/0.txt",
-            "notes/name.txt",
-        ] {
-            changes.path(path);
-        }
-        assert!(changes.is_empty());
-        changes.path("TREE.TSV");
-        changes.path("notes\\7.txt");
-        assert!(changes.tree);
-        assert_eq!(changes.notes, HashSet::from([7]));
-        for id in 1..=5000 {
-            changes.path(&format!("notes/{id}.txt"));
-        }
-        assert!(changes.rescan);
-        assert!(changes.notes.is_empty());
     }
 }

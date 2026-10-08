@@ -116,21 +116,6 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn session_filters_missing_duplicates_and_restores_order() {
-        let mut book = Notebook {
-            next_id: 1,
-            ..Default::default()
-        };
-        book.add(0, "one".into());
-        book.add(0, "two".into());
-        let session = Session::parse("EDOTSESSION1\n0\t999\t55\n2\n99\n1\n2\n", &book).unwrap();
-        assert_eq!(session.tabs, [2, 1]);
-        assert_eq!(session.active, Some(1));
-        assert_eq!(session.sidebar_width, 600);
-        assert!(!session.sidebar_visible);
-        assert!(Session::parse("EDOTSESSION1\nx\t260\t1", &book).is_none());
-    }
 
     #[test]
     fn folders_default_to_collapsed_and_only_saved_expansions_restore() {

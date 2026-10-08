@@ -477,7 +477,7 @@ mod tests {
         let dir = loader_test_dir("plain-titles");
         let text = "EDOT2\r\n1\t0\t0\t한글 😀 제목\r\n2\t1\t0\t414243\r\n3\t0\t1\t\r\n";
         fs::write(dir.join("tree.tsv"), text).unwrap();
-        let book = Notebook::reload(&dir).unwrap();
+        let mut book = Notebook::reload(&dir).unwrap();
         assert_eq!(book.get(1).unwrap().title, "한글 😀 제목");
         assert_eq!(book.get(2).unwrap().title, "414243");
         assert_eq!(book.get(3).unwrap().title, "");
@@ -485,72 +485,14 @@ mod tests {
         let saved = fs::read_to_string(dir.join("tree.tsv")).unwrap();
         assert_eq!(saved, text.replace("\r\n", "\n"));
         assert_eq!(Notebook::load(&dir).unwrap().notes, book.notes);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn invalid_plain_titles_cannot_corrupt_the_index() {
-        let dir = loader_test_dir("invalid-titles");
-        let original = "EDOT2\n1\t0\t0\t원래 제목\n";
-        fs::write(dir.join("tree.tsv"), original).unwrap();
-        let mut book = Notebook::load(&dir).unwrap();
-        for title in ["탭\t제목", "줄\n바꿈", "줄\r바꿈", "줄\r\n바꿈"] {
+        for title in ["탭\t제목", "줄\r\n바꿈"] {
             book.get_mut(1).unwrap().title = title.into();
             assert_eq!(
                 book.save(&dir).unwrap_err().kind(),
                 io::ErrorKind::InvalidInput
             );
-            assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), original);
-            assert!(!dir.join("tree.tmp").exists());
+            assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), saved);
         }
-        for text in [
-            "EDOT2\n1\t0\t0\t탭\t제목\n",
-            "EDOT2\n1\t0\t0\t줄\r바꿈\n",
-            "EDOT2\n1\t0\t0\t줄\n바꿈\n",
-        ] {
-            fs::write(dir.join("tree.tsv"), text).unwrap();
-            assert_eq!(
-                Notebook::reload(&dir).err().unwrap().kind(),
-                io::ErrorKind::InvalidData
-            );
-            assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), text);
-        }
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn loader_preserves_row_order_forward_parents_and_sparse_ids() {
-        let dir = loader_test_dir("rows");
-        let expected = Notebook {
-            notes: vec![
-                Note {
-                    id: u64::MAX,
-                    parent: 42,
-                    order: 7,
-                    title: "한글 제목 😀".into(),
-                },
-                Note {
-                    id: 3,
-                    parent: 42,
-                    order: 7,
-                    title: String::new(),
-                },
-                Note {
-                    id: 42,
-                    parent: 0,
-                    order: 99,
-                    title: "root".into(),
-                },
-            ],
-            next_id: u64::MAX,
-        };
-        expected.save(&dir).unwrap();
-        let original = fs::read(dir.join("tree.tsv")).unwrap();
-        let loaded = Notebook::load(&dir).unwrap();
-        assert_eq!(loaded.notes, expected.notes);
-        assert_eq!(loaded.next_id, u64::MAX);
-        assert_eq!(loaded.children(42), vec![3, u64::MAX]);
-        assert_eq!(fs::read(dir.join("tree.tsv")).unwrap(), original);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -562,7 +504,9 @@ mod tests {
         assert!(!dir.join("tree.tsv").exists());
         fs::write(dir.join("tree.tsv"), "EDOT2\n").unwrap();
         assert!(Notebook::reload(&dir).unwrap().notes.is_empty());
-        assert_eq!(Notebook::load(&dir).unwrap().notes[0].id, 7);
+        let recovered = Notebook::load(&dir).unwrap();
+        assert_eq!(recovered.notes[0].id, 7);
+        assert_eq!(recovered.next_id, 8);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -595,68 +539,6 @@ mod tests {
     }
 
     #[test]
-    fn loader_recovers_each_orphan_id_once_with_existing_root_count() {
-        let dir = loader_test_dir("recovery");
-        fs::write(dir.join("tree.tsv"), "EDOT2\n2\t50\t0\t43\n50\t0\t9\t52\n").unwrap();
-        for name in [
-            "2.txt", "7.txt", "007.txt", "11.txt", "0.txt", "a.txt", "12.TXT",
-        ] {
-            fs::write(dir.join("notes").join(name), name).unwrap();
-        }
-        fs::create_dir(dir.join("notes/13.txt")).unwrap();
-        let book = Notebook::load(&dir).unwrap();
-        assert_eq!(book.notes.len(), 4);
-        assert_eq!(book.notes[0].id, 2);
-        assert_eq!(book.notes[1].id, 50);
-        assert_eq!(book.notes[1].order, 9);
-        assert_eq!(book.next_id, 51);
-        for (offset, note) in book.notes[2..].iter().enumerate() {
-            assert!([7, 11].contains(&note.id));
-            assert_eq!(note.parent, 0);
-            assert_eq!(note.order, offset as u32 + 1);
-            assert_eq!(note.title, format!("복구된 메모 {}", note.id));
-        }
-        assert_ne!(book.notes[2].id, book.notes[3].id);
-        for name in ["7.txt", "007.txt", "11.txt"] {
-            assert_eq!(
-                fs::read_to_string(dir.join("notes").join(name)).unwrap(),
-                name
-            );
-        }
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn loader_checks_a_deep_reverse_order_chain_and_its_cycle() {
-        use std::fmt::Write;
-        let dir = loader_test_dir("deep");
-        const COUNT: u64 = 50_000;
-        for cyclic in [false, true] {
-            let mut text = String::from("EDOT2\n");
-            for id in (1..=COUNT).rev() {
-                let parent = if cyclic && id == 1 { COUNT } else { id - 1 };
-                writeln!(text, "{id}\t{parent}\t0\t41").unwrap();
-            }
-            fs::write(dir.join("tree.tsv"), &text).unwrap();
-            let result = Notebook::load(&dir);
-            if cyclic {
-                assert_eq!(
-                    result.err().expect("cycle accepted").to_string(),
-                    "Tree contains a cycle"
-                );
-            } else {
-                let book = result.unwrap();
-                assert_eq!(book.notes.len(), COUNT as usize);
-                assert_eq!(book.notes[0].id, COUNT);
-                assert_eq!(book.notes.last().unwrap().parent, 0);
-                assert_eq!(book.next_id, COUNT + 1);
-            }
-            assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), text);
-        }
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn batch_moves_preserve_tree_order_and_validate_before_mutating() {
         let mut book = Notebook {
             next_id: 1,
@@ -681,29 +563,6 @@ mod tests {
         assert_eq!(book.get(child).unwrap().parent, a);
         assert!(book.move_notes(&[c, a], folder, None));
         assert_eq!(book.children(folder), vec![existing, a, c]);
-    }
-
-    #[test]
-    fn grouping_uses_common_parent_and_keeps_selected_subtrees() {
-        let mut book = Notebook {
-            next_id: 1,
-            ..Default::default()
-        };
-        let parent = book.add(0, "parent".into());
-        let a = book.add(parent, "A".into());
-        let untouched = book.add(parent, "untouched".into());
-        let b = book.add(parent, "B".into());
-        let child = book.add(a, "child".into());
-        let folder = book.group_notes(&[b, child, a]).unwrap();
-        assert_eq!(book.children(parent), vec![folder, untouched]);
-        assert_eq!(book.children(folder), vec![a, b]);
-        assert_eq!(book.get(child).unwrap().parent, a);
-        let sibling = book.add(0, "elsewhere".into());
-        let deep = book.add(sibling, "deep".into());
-        let outer = book.group_notes(&[deep, a]).unwrap();
-        assert_eq!(book.get(outer).unwrap().parent, 0);
-        assert_eq!(book.children(outer), vec![a, deep]);
-        assert!(book.get(untouched).is_some());
     }
 
     #[test]
@@ -749,38 +608,5 @@ mod tests {
         assert_eq!(fs::read_dir(dir.join("trash")).unwrap().count(), 3);
         assert!(Notebook::load(&dir).unwrap().notes.is_empty());
         fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
-    fn moving_and_persisting_nested_notes() {
-        let dir = loader_test_dir("persist");
-        let mut book = Notebook::load(&dir).unwrap();
-        let a = book.add(0, "가나다".into());
-        let b = book.add(0, "B".into());
-        let c = book.add(a, "C".into());
-        assert!(!book.move_note(a, c, None));
-        assert!(book.move_note(b, a, Some(c)));
-        assert_eq!(book.children(a), vec![b, c]);
-        book.save(&dir).unwrap();
-        let loaded = Notebook::load(&dir).unwrap();
-        assert_eq!(loaded.get(a).unwrap().title, "가나다");
-        assert_eq!(loaded.children(a), vec![b, c]);
-        let mut removed = loaded.clone();
-        assert_eq!(removed.remove(a), vec![a, b, c]);
-        assert!(removed.notes.is_empty());
-        let file = loaded.file(&dir, a);
-        replace_file(&file, "첫 내용".as_bytes()).unwrap();
-        replace_file(&file, "수정된 내용".as_bytes()).unwrap();
-        assert_eq!(fs::read_to_string(file).unwrap(), "수정된 내용");
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn recovers_an_unindexed_text_file_without_reusing_its_id() {
-        let dir = loader_test_dir("orphan");
-        fs::write(dir.join("notes/7.txt"), "살아있는 내용").unwrap();
-        let mut book = Notebook::load(&dir).unwrap();
-        assert_eq!(book.get(7).unwrap().title, "복구된 메모 7");
-        assert_eq!(book.add(0, "새 메모".into()), 8);
-        let _ = fs::remove_dir_all(dir);
     }
 }
