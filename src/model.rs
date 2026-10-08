@@ -4,8 +4,46 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// A stable numeric identity, stored as decimal text in TSV and file names.
+/// A stable numeric identity; tree IDs use base64url, sessions and file names use decimal.
 pub type NoteId = u64;
+
+// Unpadded base64url of exactly eight big-endian bytes: ten full sextets
+// followed by the remaining four bits and two zero padding bits.
+fn encode_note_id(id: NoteId) -> [u8; 11] {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut encoded = [0; 11];
+    for (index, byte) in encoded[..10].iter_mut().enumerate() {
+        *byte = ALPHABET[((id >> (58 - index * 6)) & 63) as usize];
+    }
+    encoded[10] = ALPHABET[((id & 15) << 2) as usize];
+    encoded
+}
+
+fn decode_note_id(text: &str) -> Option<NoteId> {
+    if text.len() != 11 {
+        return None;
+    }
+    let mut id = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return None,
+        };
+        if index == 10 {
+            // Reject alternate spellings with nonzero unused padding bits.
+            if value & 3 != 0 {
+                return None;
+            }
+            return Some((id << 4) | NoteId::from(value >> 2));
+        }
+        id = (id << 6) | NoteId::from(value);
+    }
+    None
+}
 
 fn random_note_id() -> io::Result<NoteId> {
     let mut bytes = [0u8; 8];
@@ -44,12 +82,12 @@ impl Notebook {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) if recover && error.kind() == io::ErrorKind::NotFound => {
-                String::from("EDOT2\n")
+                String::from("EDOT4\n")
             }
             Err(error) => return Err(error),
         };
         let mut lines = text.lines();
-        if lines.next() != Some("EDOT2") {
+        if lines.next() != Some("EDOT4") {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Unsupported tree index",
@@ -60,16 +98,8 @@ impl Notebook {
         for line in lines {
             let mut parts = line.split('\t');
             let invalid = || io::Error::new(io::ErrorKind::InvalidData, "Invalid tree index");
-            let id = parts
-                .next()
-                .ok_or_else(invalid)?
-                .parse()
-                .map_err(|_| invalid())?;
-            let parent = parts
-                .next()
-                .ok_or_else(invalid)?
-                .parse()
-                .map_err(|_| invalid())?;
+            let id = decode_note_id(parts.next().ok_or_else(invalid)?).ok_or_else(invalid)?;
+            let parent = decode_note_id(parts.next().ok_or_else(invalid)?).ok_or_else(invalid)?;
             let order = parts
                 .next()
                 .ok_or_else(invalid)?
@@ -164,7 +194,7 @@ impl Notebook {
     }
 
     pub fn save(&self, dir: &Path) -> io::Result<()> {
-        let mut text = String::from("EDOT2\n");
+        let mut text = String::from("EDOT4\n");
         for n in &self.notes {
             if n.title.contains(['\t', '\r', '\n']) {
                 return Err(io::Error::new(
@@ -172,10 +202,13 @@ impl Notebook {
                     "Titles cannot contain tabs or newlines",
                 ));
             }
-            text.push_str(&format!(
-                "{}\t{}\t{}\t{}\n",
-                n.id, n.parent, n.order, n.title
-            ));
+            // The encoder emits only ASCII; conversion does not allocate.
+            let id = encode_note_id(n.id);
+            let parent = encode_note_id(n.parent);
+            text.push_str(std::str::from_utf8(&id).expect("base64url is ASCII"));
+            text.push('\t');
+            text.push_str(std::str::from_utf8(&parent).expect("base64url is ASCII"));
+            text.push_str(&format!("\t{}\t{}\n", n.order, n.title));
         }
         replace_file(&dir.join("tree.tsv"), text.as_bytes())
     }
@@ -498,10 +531,47 @@ mod tests {
     }
 
     #[test]
+    fn base64url_ids_match_standard_vectors_and_reject_invalid_encodings() {
+        for (id, expected) in [
+            (0, "AAAAAAAAAAA"),
+            (1, "AAAAAAAAAAE"),
+            (0x0123_4567_89ab_cdef, "ASNFZ4mrze8"),
+            (0xfb00_0000_0000_0000, "-wAAAAAAAAA"),
+            (NoteId::MAX, "__________8"),
+        ] {
+            assert_eq!(encode_note_id(id).as_slice(), expected.as_bytes());
+            assert_eq!(decode_note_id(expected), Some(id));
+        }
+        for bit in 0..64 {
+            for id in [1 << bit, !(1 << bit)] {
+                let encoded = encode_note_id(id);
+                assert_eq!(
+                    decode_note_id(std::str::from_utf8(&encoded).unwrap()),
+                    Some(id)
+                );
+            }
+        }
+        for invalid in [
+            "",
+            "AAAAAAAAAA",
+            "AAAAAAAAAAAA",
+            "AAAAAAAAAAE=",
+            "AAAAAAAAAA+",
+            "AAAAAAAAAA/",
+            "AAAAAAAAAAé",
+            "AAAAAAAAA E",
+            "AAAAAAAAAAF",
+            "___________",
+        ] {
+            assert_eq!(decode_note_id(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
     fn random_ids_survive_reload_and_reject_collisions_without_mutation() {
         let dir = loader_test_dir("random-ids");
-        let original = format!("EDOT2\n7\t0\t0\told\n{}\t0\t1\tmax\n", NoteId::MAX);
-        fs::write(dir.join("tree.tsv"), &original).unwrap();
+        let original = "EDOT4\nAAAAAAAAAAc\tAAAAAAAAAAA\t0\told\nAAAAAAAAAAo\tAAAAAAAAAAA\t1\tten\n__________8\tAAAAAAAAAAo\t0\tmax\n";
+        fs::write(dir.join("tree.tsv"), original).unwrap();
         fs::write(dir.join("notes/7.txt"), "existing body").unwrap();
         let mut book = Notebook::load(&dir).unwrap();
         let high = (1u64 << 63) + 7;
@@ -520,7 +590,7 @@ mod tests {
         assert_eq!(book.notes, before);
         // Equal snapshots represent independent devices with no shared counter.
         let mut other = book.clone();
-        let mut ids = std::collections::HashSet::from([7, NoteId::MAX, high]);
+        let mut ids = std::collections::HashSet::from([7, 10, NoteId::MAX, high]);
         for _ in 0..64 {
             for book in [&mut book, &mut other] {
                 let id = book.add(0, "new".into()).unwrap();
@@ -530,6 +600,11 @@ mod tests {
         }
         assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), original);
         book.save(&dir).unwrap();
+        let saved = fs::read_to_string(dir.join("tree.tsv")).unwrap();
+        assert!(saved.starts_with("EDOT4\n"));
+        assert!(saved.contains("AAAAAAAAAAo\tAAAAAAAAAAA\t1\tten\n"));
+        assert!(saved.contains("__________8\tAAAAAAAAAAo\t0\tmax\n"));
+        assert!(saved.contains("gAAAAAAAAAc\tAAAAAAAAAAc\t0\tchild\n"));
         assert_eq!(Notebook::reload(&dir).unwrap().notes, book.notes);
         assert_eq!(book.file(&dir, high), dir.join(format!("notes/{high}.txt")));
         assert_eq!(
@@ -545,20 +620,25 @@ mod tests {
     }
 
     #[test]
-    fn plain_titles_round_trip_without_hex_guessing() {
+    fn plain_titles_and_decimal_order_round_trip() {
         let dir = loader_test_dir("plain-titles");
-        let text = "EDOT2\r\n1\t0\t0\t한글 😀 제목\r\n2\t1\t0\t414243\r\n3\t0\t1\t\r\n";
+        let text = "EDOT4\r\nAAAAAAAAABA\tAAAAAAAAAAA\t10\t한글 😀 제목\r\nAAAAAAAAAAI\tAAAAAAAAABA\t0\t414243\r\nAAAAAAAAAAM\tAAAAAAAAAAA\t1\t\r\n";
         fs::write(dir.join("tree.tsv"), text).unwrap();
         let mut book = Notebook::reload(&dir).unwrap();
-        assert_eq!(book.get(1).unwrap().title, "한글 😀 제목");
+        assert_eq!(book.get(16).unwrap().title, "한글 😀 제목");
+        assert_eq!(book.get(16).unwrap().order, 10);
+        assert_eq!(book.get(2).unwrap().parent, 16);
+        assert!(book.get(10).is_none());
+        assert_eq!(book.file(&dir, 16), dir.join("notes/16.txt"));
         assert_eq!(book.get(2).unwrap().title, "414243");
         assert_eq!(book.get(3).unwrap().title, "");
+        assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), text);
         book.save(&dir).unwrap();
-        let saved = fs::read_to_string(dir.join("tree.tsv")).unwrap();
-        assert_eq!(saved, text.replace("\r\n", "\n"));
+        let saved = text.replace("\r\n", "\n");
+        assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), saved);
         assert_eq!(Notebook::load(&dir).unwrap().notes, book.notes);
         for title in ["탭\t제목", "줄\r\n바꿈"] {
-            book.get_mut(1).unwrap().title = title.into();
+            book.get_mut(16).unwrap().title = title.into();
             assert_eq!(
                 book.save(&dir).unwrap_err().kind(),
                 io::ErrorKind::InvalidInput
@@ -574,7 +654,7 @@ mod tests {
         fs::write(dir.join("notes/7.txt"), "leftover body").unwrap();
         assert!(Notebook::reload(&dir).is_err());
         assert!(!dir.join("tree.tsv").exists());
-        fs::write(dir.join("tree.tsv"), "EDOT2\n").unwrap();
+        fs::write(dir.join("tree.tsv"), "EDOT4\n").unwrap();
         assert!(Notebook::reload(&dir).unwrap().notes.is_empty());
         let recovered = Notebook::load(&dir).unwrap();
         assert_eq!(recovered.notes[0].id, 7);
@@ -588,14 +668,19 @@ mod tests {
         for text in [
             "WRONG\n",
             "EDOT1\n1\t0\t0\t414243\n",
-            "EDOT2\n1\t0\t0\tbad\rtitle\n",
-            "EDOT2\n1\t0\t0",
-            "EDOT2\n0\t0\t0\t41\n",
-            "EDOT2\n1\t0\t0\t41\n1\t0\t1\t42\n",
-            "EDOT2\n1\t0\t0\t41\textra\n",
-            "EDOT2\n1\t9\t0\t41\n", // An orphan file cannot repair a missing parent.
-            "EDOT2\n1\t1\t0\t41\n",
-            "EDOT2\n3\t1\t0\t43\n4\t0\t0\t44\n1\t2\t0\t41\n2\t1\t0\t42\n",
+            "EDOT2\n1\t0\t0\tplain title\n",
+            "EDOT3\n1\t0\t0\tplain title\n",
+            "EDOT4\n1\t0\t0\tdecimal IDs\n",
+            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAA\t0\tbad\rtitle\n",
+            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAA\t0",
+            "EDOT4\nAAAAAAAAAAA\tAAAAAAAAAAA\t0\t41\n",
+            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAA\t0\t41\nAAAAAAAAAAE\tAAAAAAAAAAA\t1\t42\n",
+            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAA\t0\t41\textra\n",
+            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAk\t0\t41\n", // An orphan file cannot repair a missing parent.
+            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAE\t0\t41\n",
+            "EDOT4\nAAAAAAAAAAM\tAAAAAAAAAAE\t0\t43\nAAAAAAAAAAQ\tAAAAAAAAAAA\t0\t44\nAAAAAAAAAAE\tAAAAAAAAAAI\t0\t41\nAAAAAAAAAAI\tAAAAAAAAAAE\t0\t42\n",
+            "EDOT4\nAAAAAAAAAAF\tAAAAAAAAAAA\t0\tinvalid padding bits\n",
+            "EDOT4\nAAAAAAAAAAE\t___________\t0\tinvalid parent\n",
         ] {
             fs::write(dir.join("tree.tsv"), text).unwrap();
             let error = Notebook::load(&dir).err().expect("invalid tree accepted");

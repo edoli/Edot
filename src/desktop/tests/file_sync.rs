@@ -138,7 +138,7 @@ fn external_tree_updates_keep_tabs_selection_and_expansion_and_reject_partial_in
             vec![f.ids[0], f.ids[1]]
         );
     });
-    fs::write(f.dir.join("tree.tsv"), "EDOT2\n1\t").unwrap();
+    fs::write(f.dir.join("tree.tsv"), "EDOT4\nAAAAAAAAAAE\t").unwrap();
     f.update(cx, |this, window, cx| {
         this.request_file_sync(Changes::all(), window, cx);
     });
@@ -183,7 +183,7 @@ fn external_tree_deletion_removes_clean_tabs_but_keeps_dirty_app_notes(cx: &mut 
         });
         this.changed(f.ids[0], window, cx);
     });
-    fs::write(f.dir.join("tree.tsv"), "EDOT2\n").unwrap();
+    fs::write(f.dir.join("tree.tsv"), "EDOT4\n").unwrap();
     assert!(sync(&f, Changes::all(), cx).is_empty());
     f.update(cx, |this, _, cx| {
         assert_eq!(this.book.notes.len(), 1);

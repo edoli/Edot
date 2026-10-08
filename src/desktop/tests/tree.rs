@@ -152,7 +152,7 @@ fn rename_pasted_tabs_and_newlines_become_spaces(cx: &mut TestAppContext) {
         assert!(!this.open[0].dirty);
     });
     let index = fs::read_to_string(f.dir.join("tree.tsv")).unwrap();
-    assert!(index.starts_with("EDOT2\n"));
+    assert!(index.starts_with("EDOT4\n"));
     assert!(index.contains("\t한글 제목 새 줄 끝 😀\n"));
     assert_eq!(
         fs::read_to_string(f.dir.join(format!("notes/{}.txt", f.ids[0]))).unwrap(),

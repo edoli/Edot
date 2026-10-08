@@ -385,7 +385,7 @@ mod native {
             wait(&|changes| changes.notes.contains(&7) && changes.notes.contains(&8));
             std::fs::remove_file(dir.join("notes/8.txt")).unwrap();
             wait(&|changes| changes.notes.contains(&8));
-            std::fs::write(dir.join("tree.tmp"), "EDOT2\n").unwrap();
+            std::fs::write(dir.join("tree.tmp"), "EDOT4\n").unwrap();
             std::fs::rename(dir.join("tree.tmp"), dir.join("tree.tsv")).unwrap();
             wait(&|changes| changes.tree);
             std::thread::sleep(Duration::from_millis(30));
