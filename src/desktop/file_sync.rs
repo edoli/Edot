@@ -393,6 +393,11 @@ impl Edot {
         self.open.retain(|tab| valid.contains(&tab.id));
         self.closed_tabs.retain(|tab| valid.contains(&tab.id));
         self.selection.retain(|id| valid.contains(&id));
+        if self.context_note.is_some_and(|id| !valid.contains(&id)) {
+            self.keyboard_menu = None;
+            self.context_note = None;
+            self.menu_subscription = None;
+        }
         self.file_sync.missing.retain(|id| valid.contains(id));
         if self.caret.is_some_and(|id| !valid.contains(&id)) {
             self.caret = None;

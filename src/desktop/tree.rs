@@ -2,6 +2,21 @@
 use super::*;
 
 impl Edot {
+    pub(super) fn select_active_note(&mut self) {
+        if let Some(id) = self
+            .session
+            .active
+            .filter(|id| self.book.get(*id).is_some())
+        {
+            self.selection.single(id);
+            self.caret = Some(id);
+        } else {
+            self.selection = Selection::default();
+            self.caret = None;
+        }
+        self.pressed = None;
+    }
+
     pub(super) fn set_collapsed(&mut self, id: u64, collapsed: bool, cx: &mut Context<Self>) {
         let was_collapsed = self.collapsed.contains(&id);
         if was_collapsed == collapsed {
@@ -66,12 +81,21 @@ impl Edot {
         }
     }
     pub(super) fn begin_rename(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename.is_none() && self.session.sidebar_visible && self.selection.ids.len() > 1 {
+            return;
+        }
+        self.begin_rename_note(id, window, cx);
+    }
+
+    pub(super) fn begin_rename_note(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.rename.is_some() {
             self.title_input
                 .update(cx, |state, cx| state.focus(window, cx));
-            return;
-        }
-        if self.session.sidebar_visible && self.selection.ids.len() > 1 {
             return;
         }
         let Some(note) = self.book.get(id) else {
@@ -171,16 +195,38 @@ impl Edot {
     }
     pub(super) fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected: Vec<_> = self.selection.ids.iter().copied().collect();
+        self.confirm_delete_notes(selected, window, cx);
+    }
+
+    pub(super) fn confirm_delete_notes(
+        &mut self,
+        selected: Vec<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let count = self.book.selected_subtrees(&selected).len();
         if count == 0 {
             return;
         }
         let weak = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |dialog, _, _| {
-            let weak = weak.clone(); let selected = selected.clone();
-            dialog.title("메모 삭제").description(format!("선택한 항목과 하위 메모 {count}개를 삭제할까요?\n파일은 휴지통 폴더에 보관됩니다.")).confirm()
-                .button_props(DialogButtonProps::default().ok_text("삭제").cancel_text("취소"))
-                .on_ok(move |_, window, cx| weak.update(cx, |this, cx| this.delete_confirmed(&selected, window, cx)).unwrap_or(false))
+            let weak = weak.clone();
+            let selected = selected.clone();
+            dialog
+                .title("메모 삭제")
+                .description(format!(
+                    "메모와 하위 메모 {count}개를 삭제할까요?\n파일은 휴지통 폴더에 보관됩니다."
+                ))
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("삭제")
+                        .cancel_text("취소"),
+                )
+                .on_ok(move |_, window, cx| {
+                    weak.update(cx, |this, cx| this.delete_confirmed(&selected, window, cx))
+                        .unwrap_or(false)
+                })
         });
     }
     pub(super) fn delete_confirmed(
@@ -228,13 +274,12 @@ impl Edot {
         cx.notify();
         true
     }
-    pub(super) fn group_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selection.ids.len() < 2 {
+    pub(super) fn group_notes(&mut self, ids: &[u64], window: &mut Window, cx: &mut Context<Self>) {
+        if ids.len() < 2 {
             return;
         }
-        let ids: Vec<_> = self.selection.ids.iter().copied().collect();
         let previous = self.book.clone();
-        let Some(id) = self.book.group_notes(&ids) else {
+        let Some(id) = self.book.group_notes(ids) else {
             return;
         };
         let file = self.book.file(&self.dir, id);

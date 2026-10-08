@@ -176,8 +176,7 @@ impl Edot {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
-                    this.selection = Selection::default();
-                    this.caret = None;
+                    this.select_active_note();
                     this.tree_focus.focus(window, cx);
                     cx.notify();
                 }),
@@ -201,6 +200,9 @@ impl Edot {
         let folder = !self.book.children(id).is_empty();
         let expanded = !self.collapsed.contains(&id);
         let selected = self.selection.ids.contains(&id);
+        let active = self.session.active == Some(id);
+        let context = self.context_note == Some(id);
+        let multiple = selected && self.selection.ids.len() > 1;
         let renaming = self.rename.as_ref().is_some_and(|(note, _)| *note == id);
         let ids = if selected {
             self.book
@@ -223,13 +225,26 @@ impl Edot {
             .pr_2()
             .pl(px(4. + depth as f32 * TREE_INDENT))
             .rounded(px(4.))
+            .border_1()
+            .border_color(if context {
+                cx.theme().primary
+            } else {
+                transparent_black()
+            })
             .text_sm()
             .cursor_pointer()
-            .when(selected, |row| row.bg(cx.theme().selection))
-            .when(!selected && self.dragging_notes.is_empty(), |row| {
-                row.hover(|row| row.bg(cx.theme().accent))
+            .when(selected || active, |row| {
+                row.bg(if multiple {
+                    cx.theme().multi_selection
+                } else {
+                    cx.theme().selection
+                })
             })
-            .when(self.caret == Some(id), |row| {
+            .when(
+                !selected && !active && !context && self.dragging_notes.is_empty(),
+                |row| row.hover(|row| row.bg(cx.theme().accent)),
+            )
+            .when(active || self.caret == Some(id), |row| {
                 row.child(
                     div()
                         .absolute()
@@ -237,7 +252,11 @@ impl Edot {
                         .top_0()
                         .bottom_0()
                         .w(px(2.))
-                        .bg(cx.theme().primary),
+                        .bg(if active {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().muted_foreground
+                        }),
                 )
             })
             .when(
@@ -362,13 +381,9 @@ impl Edot {
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, _, window, cx| {
-                    if !this.selection.ids.contains(&id) {
-                        this.selection.single(id);
-                    }
-                    this.caret = Some(id);
-                    this.tree_focus.focus(window, cx);
-                    cx.notify();
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.show_tree_menu(id, event.position, window, cx);
+                    cx.stop_propagation();
                 }),
             )
             .when(!renaming, |row| {
@@ -383,7 +398,6 @@ impl Edot {
                 this.finish_tree_drag(&drag.ids, window, cx);
                 cx.stop_propagation();
             }))
-            .context_menu(move |menu, _, cx| menus::tree_menu(menu, weak.clone(), id, cx))
             .into_any_element()
     }
 }

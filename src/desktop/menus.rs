@@ -2,16 +2,18 @@
 use super::*;
 use component::menu::PopupMenu;
 
-pub(super) fn tree_menu(menu: PopupMenu, weak: WeakEntity<Edot>, id: u64, cx: &App) -> PopupMenu {
-    let Some(view) = weak.upgrade() else {
-        return menu;
-    };
-    view.read(cx).note_menu(menu, weak, id)
-}
-
 impl Edot {
+    pub(super) fn note_menu_targets(&self, id: u64) -> Vec<u64> {
+        if self.selection.ids.contains(&id) {
+            self.selection.ids.iter().copied().collect()
+        } else {
+            vec![id]
+        }
+    }
+
     fn note_menu(&self, mut menu: PopupMenu, view: WeakEntity<Edot>, id: u64) -> PopupMenu {
-        let multiple = self.selection.ids.len() > 1;
+        let targets = self.note_menu_targets(id);
+        let multiple = targets.len() > 1;
         let nested = self.book.get(id).is_some_and(|note| note.parent != 0);
         if !multiple {
             let weak = view.clone();
@@ -23,7 +25,7 @@ impl Edot {
             let weak = view.clone();
             menu = menu.item(PopupMenuItem::new("이름 바꾸기").shortcut("F2").on_click(
                 move |_, window, cx| {
-                    let _ = weak.update(cx, |this, cx| this.begin_rename(id, window, cx));
+                    let _ = weak.update(cx, |this, cx| this.begin_rename_note(id, window, cx));
                 },
             ));
             let weak = view.clone();
@@ -34,12 +36,25 @@ impl Edot {
                         let _ = weak.update(cx, |this, cx| this.outdent(id, cx));
                     }),
             );
+            let weak = view.clone();
+            menu = menu
+                .separator()
+                .item(
+                    PopupMenuItem::new("다른 프로그램으로 열기").on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            if let Some(path) = this.prepare_external_note(id, cx) {
+                                cx.open_with_system(&path);
+                            }
+                        });
+                    }),
+                );
         } else {
             let weak = view.clone();
+            let targets = targets.clone();
             menu = menu.item(
                 PopupMenuItem::new("선택한 항목과 함께 새 폴더 만들기").on_click(
                     move |_, window, cx| {
-                        let _ = weak.update(cx, |this, cx| this.group_selected(window, cx));
+                        let _ = weak.update(cx, |this, cx| this.group_notes(&targets, window, cx));
                     },
                 ),
             );
@@ -50,7 +65,9 @@ impl Edot {
                 .shortcut("Delete")
                 .destructive()
                 .on_click(move |_, window, cx| {
-                    let _ = weak.update(cx, |this, cx| this.confirm_delete(window, cx));
+                    let _ = weak.update(cx, |this, cx| {
+                        this.confirm_delete_notes(targets.clone(), window, cx)
+                    });
                 }),
         );
         menu
@@ -121,6 +138,74 @@ pub(super) fn editor_menu(
 }
 
 impl Edot {
+    pub(super) fn prepare_external_note(
+        &mut self,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) -> Option<PathBuf> {
+        if self.book.get(id).is_none() || self.startup_failed {
+            return None;
+        }
+        if let Some(tab) = self.open.iter_mut().find(|tab| tab.id == id)
+            && let Some(editor) = &tab.editor
+        {
+            tab.dirty = editor.read(cx).value().as_ref() != tab.saved;
+        }
+        if !self.save_all(cx) {
+            return None;
+        }
+        let path = self.book.file(&self.dir, id);
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => Some(path),
+            result => {
+                let error = result
+                    .err()
+                    .unwrap_or_else(|| io::Error::other("본문 파일이 아닙니다"));
+                self.fail("다른 프로그램으로 열지 못했습니다", error, cx);
+                None
+            }
+        }
+    }
+
+    fn install_menu(
+        &mut self,
+        menu: Entity<PopupMenu>,
+        note: Option<u64>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_subscription = Some(cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
+            this.keyboard_menu = None;
+            this.context_note = None;
+            cx.notify();
+        }));
+        self.menu_position = position;
+        self.context_note = note;
+        menu.read(cx).focus_handle(cx).focus(window, cx);
+        self.keyboard_menu = Some(menu);
+        cx.notify();
+    }
+
+    pub(super) fn show_tree_menu(
+        &mut self,
+        id: u64,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.book.get(id).is_none() {
+            return;
+        }
+        self.pressed = None;
+        self.tree_focus.focus(window, cx);
+        let weak = cx.entity().downgrade();
+        let menu = PopupMenu::build(window, cx, |menu, _, _| {
+            self.note_menu(menu.action_context(self.tree_focus.clone()), weak, id)
+        });
+        self.install_menu(menu, Some(id), position, window, cx);
+    }
+
     pub(super) fn show_keyboard_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use component::menu::PopupMenu;
         let weak = cx.entity().downgrade();
@@ -134,9 +219,6 @@ impl Edot {
         let Some(id) = id else {
             return;
         };
-        if tree && !self.selection.ids.contains(&id) {
-            self.selection.single(id);
-        }
         let menu = PopupMenu::build(window, cx, |menu, _, _| {
             if tree {
                 self.note_menu(menu.action_context(focus), weak, id)
@@ -144,11 +226,7 @@ impl Edot {
                 editing_menu(menu, focus, true)
             }
         });
-        self.menu_subscription = Some(cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
-            this.keyboard_menu = None;
-            cx.notify();
-        }));
-        self.menu_position = if tree {
+        let position = if tree {
             let index = self
                 .visible_tree()
                 .iter()
@@ -172,8 +250,6 @@ impl Edot {
                 px(70.),
             )
         };
-        menu.read(cx).focus_handle(cx).focus(window, cx);
-        self.keyboard_menu = Some(menu);
-        cx.notify();
+        self.install_menu(menu, tree.then_some(id), position, window, cx);
     }
 }

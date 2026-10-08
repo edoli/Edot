@@ -88,6 +88,7 @@ pub struct Edot {
     dragging_notes: Vec<u64>,
     tab_width: i32,
     keyboard_menu: Option<Entity<component::menu::PopupMenu>>,
+    context_note: Option<u64>,
     menu_subscription: Option<Subscription>,
     menu_position: Point<Pixels>,
 }
@@ -163,6 +164,7 @@ impl Edot {
             dragging_notes: vec![],
             tab_width: TAB_PREFERRED_WIDTH,
             keyboard_menu: None,
+            context_note: None,
             menu_subscription: None,
             menu_position: Point::default(),
         };
@@ -237,6 +239,12 @@ impl Edot {
             .push(cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() && !this.startup_failed {
                     this.request_file_sync(crate::watch::Changes::all(), window, cx);
+                }
+                if !window.is_window_active() && this.context_note.is_some() {
+                    this.keyboard_menu = None;
+                    this.context_note = None;
+                    this.menu_subscription = None;
+                    cx.notify();
                 }
                 if !window.is_window_active() && !this.dragging_notes.is_empty() {
                     cx.stop_active_drag(window);
