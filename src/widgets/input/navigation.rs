@@ -112,6 +112,46 @@ impl InputState {
             _ => None,
         }
     }
+    fn insert_newline(&mut self, below: bool, cx: &mut Context<Self>) {
+        self.finish_composition();
+        let mut ranges: Vec<_> = self.selected_ranges().collect();
+        let mut texts = Vec::with_capacity(ranges.len());
+        for (index, range) in ranges.iter_mut().enumerate() {
+            let at = if below {
+                self.extra.get(index).map_or_else(
+                    || self.cursor(),
+                    |selection| {
+                        if selection.reversed {
+                            selection.range.start
+                        } else {
+                            selection.range.end
+                        }
+                    },
+                )
+            } else {
+                range.start
+            };
+            let start = self.content[..at].rfind(['\r', '\n']).map_or(0, |i| i + 1);
+            let end = if below {
+                self.content[at..]
+                    .find(['\r', '\n'])
+                    .map_or(self.content.len(), |i| at + i)
+            } else {
+                at
+            };
+            let prefix = &self.content[start..end];
+            let indent_len = prefix.len() - prefix.trim_start_matches([' ', '\t']).len();
+            texts.push(format!("\n{}", &prefix[..indent_len]));
+            if below {
+                *range = end..end;
+            }
+        }
+        if self.extra.is_empty() {
+            self.commit(ranges.pop().unwrap(), &texts[0], !below, cx);
+        } else {
+            self.commit_multiple(ranges, texts, !below, cx);
+        }
+    }
     pub(super) fn key(
         &mut self,
         event: &KeyDownEvent,
@@ -187,7 +227,7 @@ impl InputState {
             }
             "enter" => {
                 if self.multiline {
-                    self.replace("\n", window, cx);
+                    self.insert_newline(ctrl && !shift, cx);
                 } else {
                     cx.emit(InputEvent::PressEnter { shift });
                 }

@@ -1,6 +1,81 @@
 use super::*;
 
 #[gpui::test]
+fn newline_keeps_indentation_and_ctrl_enter_inserts_below(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, window, cx| {
+        this.focus_editor(window, cx);
+        this.active_editor().unwrap()
+    });
+    cx.update_window(f.window, |_, window, cx| {
+        window.render_frame(cx);
+        for (source, selection, key, expected, cursor) in [
+            ("    alpha", 9..9, "enter", "    alpha\n    ", 14),
+            ("  hello", 4..4, "enter", "  he\n  llo", 7),
+            ("    text", 2..2, "enter", "  \n    text", 5),
+            (" \t한글", 8..8, "enter", " \t한글\n \t", 11),
+            (" \talpha\n beta", 2..7, "enter", " \t\n \t\n beta", 5),
+            ("  hello\nnext", 4..4, "ctrl-enter", "  hello\n  \nnext", 10),
+            ("  hello\nnext", 2..5, "ctrl-enter", "  hello\n  \nnext", 10),
+            ("  hello", 4..4, "ctrl-enter", "  hello\n  ", 10),
+            ("  hi\r\nnext", 3..3, "ctrl-enter", "  hi\n  \r\nnext", 7),
+            ("  \t", 1..1, "ctrl-enter", "  \t\n  \t", 7),
+            ("", 0..0, "ctrl-enter", "\n", 1),
+        ] {
+            editor.update(cx, |s, cx| {
+                s.set_value(source, window, cx);
+                s.set_selected_range(selection.clone(), cx);
+            });
+            window.press(key, cx);
+            assert_eq!(editor.read(cx).value(), expected, "{key}: {source:?}");
+            assert_eq!(editor.read(cx).cursor(), cursor);
+            window.press("ctrl-z", cx);
+            assert_eq!(editor.read(cx).value(), source);
+            assert_eq!(editor.read(cx).selected_range(), selection);
+            window.press("ctrl-y", cx);
+            assert_eq!(editor.read(cx).value(), expected);
+            assert_eq!(editor.read(cx).cursor(), cursor);
+        }
+        for (source, key, expected, cursors) in [
+            ("  one\n\tone", "enter", "  \n  \n\t\n\t", vec![5..5, 9..9]),
+            (
+                "  one\n\tone",
+                "ctrl-enter",
+                "  one\n  \n\tone\n\t",
+                vec![8..8, 15..15],
+            ),
+            (
+                "  one one",
+                "ctrl-enter",
+                "  one one\n  ",
+                std::iter::once(12..12).collect(),
+            ),
+        ] {
+            editor.update(cx, |s, cx| {
+                s.set_value(source, window, cx);
+                s.set_selected_range(2..5, cx);
+            });
+            window.press("ctrl-d", cx);
+            let before: Vec<_> = editor.read(cx).selected_ranges().collect();
+            assert_eq!(before.len(), 2);
+            window.press(key, cx);
+            assert_eq!(editor.read(cx).value(), expected);
+            assert_eq!(
+                editor.read(cx).selected_ranges().collect::<Vec<_>>(),
+                cursors
+            );
+            window.press("ctrl-z", cx);
+            assert_eq!(editor.read(cx).value(), source);
+            assert_eq!(
+                editor.read(cx).selected_ranges().collect::<Vec<_>>(),
+                before
+            );
+        }
+    })
+    .unwrap();
+}
+
+#[gpui::test]
 fn korean_ime_protocol_and_emoji_selection_are_atomic(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let editor = f.update(cx, |this, window, cx| {
