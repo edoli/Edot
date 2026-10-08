@@ -1,4 +1,5 @@
 use crate::storage::replace_file;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,7 @@ impl Notebook {
             ));
         }
         let mut notes = Vec::new();
+        let mut indices = HashMap::new();
         for line in lines {
             let mut parts = line.split('\t');
             let invalid = || io::Error::new(io::ErrorKind::InvalidData, "Invalid tree index");
@@ -54,7 +56,7 @@ impl Notebook {
                 .map_err(|_| invalid())?;
             let title = String::from_utf8(decode_hex(parts.next().ok_or_else(invalid)?)?)
                 .map_err(|_| invalid())?;
-            if parts.next().is_some() || id == 0 || notes.iter().any(|n: &Note| n.id == id) {
+            if parts.next().is_some() || id == 0 || indices.insert(id, notes.len()).is_some() {
                 return Err(invalid());
             }
             notes.push(Note {
@@ -65,7 +67,7 @@ impl Notebook {
             });
         }
         for note in &notes {
-            if note.parent != 0 && !notes.iter().any(|n| n.id == note.parent) {
+            if note.parent != 0 && !indices.contains_key(&note.parent) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "Missing parent note",
@@ -73,6 +75,7 @@ impl Notebook {
             }
         }
         // If a previous write stopped after creating a text file, keep that file visible.
+        let mut root_count = notes.iter().filter(|n| n.parent == 0).count();
         for entry in fs::read_dir(dir.join("notes"))? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
@@ -86,10 +89,12 @@ impl Notebook {
             else {
                 continue;
             };
-            if id == 0 || notes.iter().any(|n| n.id == id) {
+            if id == 0 || indices.contains_key(&id) {
                 continue;
             }
-            let order = notes.iter().filter(|n| n.parent == 0).count() as u32;
+            let order = root_count as u32;
+            root_count += 1;
+            indices.insert(id, notes.len());
             notes.push(Note {
                 id,
                 parent: 0,
@@ -103,14 +108,36 @@ impl Notebook {
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        let book = Self { notes, next_id };
-        if book.notes.iter().any(|n| book.is_descendant(n.id, n.id)) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Tree contains a cycle",
-            ));
+        // 0 = unseen, 1 = on this parent chain, 2 = checked. Each note is
+        // visited at most twice, without recursion even for very deep trees.
+        let mut states = vec![0u8; notes.len()];
+        for start in 0..notes.len() {
+            let mut current = Some(start);
+            while let Some(index) = current {
+                match states[index] {
+                    1 => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Tree contains a cycle",
+                        ));
+                    }
+                    2 => break,
+                    _ => states[index] = 1,
+                }
+                let parent = notes[index].parent;
+                current = (parent != 0).then(|| indices[&parent]);
+            }
+            current = Some(start);
+            while let Some(index) = current {
+                if states[index] != 1 {
+                    break;
+                }
+                states[index] = 2;
+                let parent = notes[index].parent;
+                current = (parent != 0).then(|| indices[&parent]);
+            }
         }
-        Ok(book)
+        Ok(Self { notes, next_id })
     }
 
     pub fn save(&self, dir: &Path) -> io::Result<()> {
@@ -426,6 +453,147 @@ fn decode_hex(text: &str) -> io::Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn loader_test_dir(label: &str) -> PathBuf {
+        static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "edot-model-{label}-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(dir.join("notes")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn loader_preserves_row_order_forward_parents_and_sparse_ids() {
+        let dir = loader_test_dir("rows");
+        let expected = Notebook {
+            notes: vec![
+                Note {
+                    id: u64::MAX,
+                    parent: 42,
+                    order: 7,
+                    title: "한글\t제목\n😀".into(),
+                },
+                Note {
+                    id: 3,
+                    parent: 42,
+                    order: 7,
+                    title: String::new(),
+                },
+                Note {
+                    id: 42,
+                    parent: 0,
+                    order: 99,
+                    title: "root".into(),
+                },
+            ],
+            next_id: u64::MAX,
+        };
+        expected.save(&dir).unwrap();
+        let original = fs::read(dir.join("tree.tsv")).unwrap();
+        let loaded = Notebook::load(&dir).unwrap();
+        assert_eq!(loaded.notes, expected.notes);
+        assert_eq!(loaded.next_id, u64::MAX);
+        assert_eq!(loaded.children(42), vec![3, u64::MAX]);
+        assert_eq!(fs::read(dir.join("tree.tsv")).unwrap(), original);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn loader_rejects_invalid_trees_without_rewriting_files() {
+        let dir = loader_test_dir("invalid");
+        fs::write(dir.join("notes/9.txt"), "unchanged orphan").unwrap();
+        for text in [
+            "WRONG\n",
+            "EDOT1\n0\t0\t0\t41\n",
+            "EDOT1\n1\t0\t0\t41\n1\t0\t1\t42\n",
+            "EDOT1\n1\t0\t0\t41\textra\n",
+            "EDOT1\n1\t0\t0\tg0\n",
+            "EDOT1\n1\t0\t0\tf\n",
+            "EDOT1\n1\t0\t0\tff\n",
+            "EDOT1\n1\t9\t0\t41\n", // An orphan file cannot repair a missing parent.
+            "EDOT1\n1\t1\t0\t41\n",
+            "EDOT1\n3\t1\t0\t43\n4\t0\t0\t44\n1\t2\t0\t41\n2\t1\t0\t42\n",
+        ] {
+            fs::write(dir.join("tree.tsv"), text).unwrap();
+            let error = Notebook::load(&dir).err().expect("invalid tree accepted");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{text}");
+            assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), text);
+            assert_eq!(
+                fs::read_to_string(dir.join("notes/9.txt")).unwrap(),
+                "unchanged orphan"
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn loader_recovers_each_orphan_id_once_with_existing_root_count() {
+        let dir = loader_test_dir("recovery");
+        fs::write(dir.join("tree.tsv"), "EDOT1\n2\t50\t0\t43\n50\t0\t9\t52\n").unwrap();
+        for name in [
+            "2.txt", "7.txt", "007.txt", "11.txt", "0.txt", "a.txt", "12.TXT",
+        ] {
+            fs::write(dir.join("notes").join(name), name).unwrap();
+        }
+        fs::create_dir(dir.join("notes/13.txt")).unwrap();
+        let book = Notebook::load(&dir).unwrap();
+        assert_eq!(book.notes.len(), 4);
+        assert_eq!(book.notes[0].id, 2);
+        assert_eq!(book.notes[1].id, 50);
+        assert_eq!(book.notes[1].order, 9);
+        assert_eq!(book.next_id, 51);
+        for (offset, note) in book.notes[2..].iter().enumerate() {
+            assert!([7, 11].contains(&note.id));
+            assert_eq!(note.parent, 0);
+            assert_eq!(note.order, offset as u32 + 1);
+            assert_eq!(note.title, format!("복구된 메모 {}", note.id));
+        }
+        assert_ne!(book.notes[2].id, book.notes[3].id);
+        for name in ["7.txt", "007.txt", "11.txt"] {
+            assert_eq!(
+                fs::read_to_string(dir.join("notes").join(name)).unwrap(),
+                name
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn loader_checks_a_deep_reverse_order_chain_and_its_cycle() {
+        use std::fmt::Write;
+        let dir = loader_test_dir("deep");
+        const COUNT: u64 = 50_000;
+        for cyclic in [false, true] {
+            let mut text = String::from("EDOT1\n");
+            for id in (1..=COUNT).rev() {
+                let parent = if cyclic && id == 1 { COUNT } else { id - 1 };
+                writeln!(text, "{id}\t{parent}\t0\t41").unwrap();
+            }
+            fs::write(dir.join("tree.tsv"), &text).unwrap();
+            let result = Notebook::load(&dir);
+            if cyclic {
+                assert_eq!(
+                    result.err().expect("cycle accepted").to_string(),
+                    "Tree contains a cycle"
+                );
+            } else {
+                let book = result.unwrap();
+                assert_eq!(book.notes.len(), COUNT as usize);
+                assert_eq!(book.notes[0].id, COUNT);
+                assert_eq!(book.notes.last().unwrap().parent, 0);
+                assert_eq!(book.next_id, COUNT + 1);
+            }
+            assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), text);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn batch_moves_preserve_tree_order_and_validate_before_mutating() {
         let mut book = Notebook {
@@ -522,8 +690,7 @@ mod tests {
     }
     #[test]
     fn moving_and_persisting_nested_notes() {
-        let dir = std::env::temp_dir().join(format!("edot-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = loader_test_dir("persist");
         let mut book = Notebook::load(&dir).unwrap();
         let a = book.add(0, "가나다".into());
         let b = book.add(0, "B".into());
@@ -547,9 +714,7 @@ mod tests {
 
     #[test]
     fn recovers_an_unindexed_text_file_without_reusing_its_id() {
-        let dir = std::env::temp_dir().join(format!("edot-orphan-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("notes")).unwrap();
+        let dir = loader_test_dir("orphan");
         fs::write(dir.join("notes/7.txt"), "살아있는 내용").unwrap();
         let mut book = Notebook::load(&dir).unwrap();
         assert_eq!(book.get(7).unwrap().title, "복구된 메모 7");
