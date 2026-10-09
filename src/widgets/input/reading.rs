@@ -723,9 +723,9 @@ fn render_block(
     let row = div()
         .h_flex()
         .items_start()
-        .gap_2()
+        .gap(px(4.))
         .when(!block.prefix.is_empty(), |d| {
-            d.child(div().min_w(px(24.)).child(render_text(
+            d.child(div().flex_shrink_0().child(render_text(
                 &block.prefix,
                 &[],
                 block.offset,
@@ -739,7 +739,11 @@ fn render_block(
         .id(("reading-block", index))
         .debug_selector(move || format!("reading-block-{index}"))
         .px_4()
-        .py_2()
+        .py(if block.prefix.is_empty() {
+            px(8.)
+        } else {
+            px(2.)
+        })
         .w_full()
         .child(
             div()
