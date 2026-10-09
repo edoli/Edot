@@ -358,6 +358,9 @@ pub fn run() {
     gpui_platform::application()
         .with_assets(component::Assets)
         .run(move |cx| {
+            cx.set_http_client(std::sync::Arc::new(
+                crate::image_http::ImageHttpClient::new(cx.background_executor().clone()),
+            ));
             component::init(cx);
 
             cx.on_window_closed(|cx, _| {

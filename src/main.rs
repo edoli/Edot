@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod desktop;
+mod image_http;
 mod platform;
 mod startup;
 mod widgets;
