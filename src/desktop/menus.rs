@@ -206,6 +206,25 @@ impl Edot {
         self.install_menu(menu, Some(id), position, window, cx);
     }
 
+    pub(super) fn show_tree_background_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pressed = None;
+        self.tree_focus.focus(window, cx);
+        let weak = cx.entity().downgrade();
+        let menu = PopupMenu::build(window, cx, |menu, _, _| {
+            menu.action_context(self.tree_focus.clone()).item(
+                PopupMenuItem::new("새 노트").on_click(move |_, window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.create_note(Some(0), window, cx));
+                }),
+            )
+        });
+        self.install_menu(menu, None, position, window, cx);
+    }
+
     pub(super) fn show_keyboard_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use component::menu::PopupMenu;
         let weak = cx.entity().downgrade();

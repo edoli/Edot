@@ -2,6 +2,53 @@ use super::*;
 use crate::widgets::WindowExt;
 
 #[gpui::test]
+fn tree_background_menu_creates_root_notes_with_a_nested_caret_and_an_empty_tree(
+    cx: &mut TestAppContext,
+) {
+    let f = Fixture::new(cx);
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    for empty in [false, true] {
+        f.update(cx, |this, window, cx| {
+            if empty {
+                let ids: Vec<_> = this.book.notes.iter().map(|note| note.id).collect();
+                assert!(this.delete_confirmed(&ids, window, cx));
+                assert!(this.book.notes.is_empty());
+            } else {
+                this.tree_click(f.ids[2], Default::default(), window, cx);
+            }
+        });
+        visual.update(|window, cx| window.render_frame(cx));
+        let host = visual.debug_bounds("tree-host").unwrap();
+        let blank = point(host.left() + px(35.), host.bottom() - px(20.));
+        visual.simulate_mouse_down(blank, gpui::MouseButton::Right, Default::default());
+        f.update(cx, |this, _, _| {
+            assert!(this.keyboard_menu.is_some());
+            assert!(this.context_note.is_none());
+            if !empty {
+                assert_eq!(this.caret, Some(f.ids[2]));
+                assert_eq!(this.session.active, Some(f.ids[2]));
+                assert_eq!(
+                    this.selection.ids.as_ref(),
+                    &std::collections::HashSet::from([f.ids[2]])
+                );
+            }
+        });
+        f.press(cx, "enter");
+        f.update(cx, |this, _, _| {
+            assert!(this.keyboard_menu.is_none());
+            let id = this.session.active.unwrap();
+            let note = this.book.get(id).unwrap();
+            assert_eq!(note.parent, 0);
+            assert_eq!(note.title, "새 노트");
+            assert_eq!(this.book.notes.len(), if empty { 1 } else { 4 });
+            assert_eq!(this.rename.as_ref().map(|(id, _)| *id), Some(id));
+            assert!(this.book.file(&this.dir, id).is_file());
+        });
+        f.press(cx, "escape");
+    }
+}
+
+#[gpui::test]
 fn delete_dialog_keeps_controls_inline_and_warns_only_for_nonempty_folders(
     cx: &mut TestAppContext,
 ) {

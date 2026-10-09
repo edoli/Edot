@@ -186,6 +186,13 @@ impl Edot {
                 this.finish_tree_drag(&drag.ids, window, cx);
                 cx.stop_propagation();
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.show_tree_background_menu(event.position, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .into_any_element()
     }
     pub(in crate::desktop) fn tree_row(
