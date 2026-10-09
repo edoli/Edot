@@ -1,7 +1,7 @@
 //! Rendered Markdown data, independent of GPUI and the source editor.
 use super::markdown::{CODE, EMPHASIS, LINK, STRIKE, STRONG, Span};
-use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
-use std::ops::Range;
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use std::{ops::Range, sync::Arc};
 
 #[derive(Default)]
 pub(super) struct Inline {
@@ -35,6 +35,7 @@ pub(super) enum Kind {
     Paragraph,
     Heading(u8),
     Code,
+    Mermaid(Result<Arc<super::mermaid::Graph>, &'static str>),
     Rule,
     TableRow { header: bool, alignment: Vec<Align> },
 }
@@ -141,7 +142,11 @@ struct Builder {
 }
 impl Builder {
     fn flush(&mut self) {
-        if let Some(block) = self.current.take() {
+        if let Some(mut block) = self.current.take() {
+            if matches!(block.kind, Kind::Mermaid(_)) {
+                block.kind =
+                    Kind::Mermaid(super::mermaid::parse(&block.content.text).map(Arc::new));
+            }
             if let Some(row) = &mut self.row {
                 row.cells.push(block.content);
             } else {
@@ -224,6 +229,14 @@ pub(super) fn parse(text: &str) -> Document {
                     }
                 }
                 Tag::Heading { level, .. } => b.start(Kind::Heading(level as u8), range),
+                Tag::CodeBlock(CodeBlockKind::Fenced(info))
+                    if info
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|s| s.eq_ignore_ascii_case("mermaid")) =>
+                {
+                    b.start(Kind::Mermaid(Err("")), range);
+                }
                 Tag::CodeBlock(_) | Tag::HtmlBlock => b.start(Kind::Code, range),
                 Tag::BlockQuote(_) => {
                     b.flush();
@@ -380,6 +393,20 @@ mod tests {
         assert_eq!(table[1].cells[1].text, "1");
         assert!(doc.blocks.iter().any(|b| b.content.images == ["image.png"]));
         assert!(doc.text().contains("<script>alert(1)</script>"));
+        let diagrams = parse(
+            "```Mermaid\nflowchart TB\n A[한글] --> B[끝]\n```\n\n```rust\nmermaid\n```\n\n    mermaid\n",
+        );
+        assert!(matches!(diagrams.blocks[0].kind, Kind::Mermaid(Ok(_))));
+        assert_eq!(
+            diagrams.blocks[0].content.text,
+            "flowchart TB\n A[한글] --> B[끝]\n"
+        );
+        assert!(
+            diagrams.blocks[1..]
+                .iter()
+                .all(|b| matches!(b.kind, Kind::Code))
+        );
+        assert!(diagrams.text().contains("A[한글] --> B[끝]"));
         for block in &doc.blocks {
             for inline in std::iter::once(&block.content).chain(&block.cells) {
                 assert!(

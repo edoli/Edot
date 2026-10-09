@@ -347,6 +347,8 @@ mod ime;
 mod layout;
 mod links;
 mod markdown;
+mod mermaid;
+mod mermaid_view;
 mod navigation;
 mod reading;
 mod reading_document;

@@ -125,7 +125,7 @@ impl Element for SelectableText {
 }
 
 pub(super) struct Reading {
-    document: Arc<Document>,
+    pub(super) document: Arc<Document>,
     revision: Option<u64>,
     task: Option<Task<()>>,
     list: ListState,
@@ -482,13 +482,14 @@ impl InputState {
                 .size_full(),
             )
             .child(
-                list(self.reading.list.clone(), move |i, _, cx| {
+                list(self.reading.list.clone(), move |i, window, cx| {
                     render_block(
                         &document.blocks[i],
                         i,
                         font_size,
                         &directory,
                         &selection,
+                        window,
                         cx,
                     )
                 })
@@ -606,6 +607,7 @@ fn render_block(
     font_size: Pixels,
     directory: &std::path::Path,
     selection: &ReadingSelection,
+    window: &Window,
     cx: &App,
 ) -> AnyElement {
     let mut body = div().v_flex().min_w_0().flex_1();
@@ -625,7 +627,21 @@ fn render_block(
                 .font_weight(FontWeight::BOLD)
                 .child(render_inline(&block.content, selection, cx));
         }
-        Kind::Code => {
+        Kind::Mermaid(Ok(graph)) => {
+            body = body.child(
+                div()
+                    .id(("mermaid-diagram", index))
+                    .debug_selector(move || format!("mermaid-diagram-{index}"))
+                    .w_full()
+                    .child(super::mermaid_view::render(
+                        graph.clone(),
+                        font_size,
+                        window,
+                        cx,
+                    )),
+            );
+        }
+        Kind::Code | Kind::Mermaid(Err(_)) => {
             body = body
                 .p_3()
                 .rounded_md()
@@ -638,6 +654,15 @@ fn render_block(
                     selection,
                     cx,
                 ));
+            if let Kind::Mermaid(Err(error)) = &block.kind {
+                body = body.child(
+                    div()
+                        .mt_2()
+                        .text_sm()
+                        .text_color(cx.theme().warning)
+                        .child(*error),
+                );
+            }
         }
         Kind::TableRow { header, alignment } => {
             let mut row = div()
