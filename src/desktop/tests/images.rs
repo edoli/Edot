@@ -250,6 +250,38 @@ fn browser_image_drops_show_positions_and_import_downloaded_images(cx: &mut Test
     );
     let data = native::html(&html);
     let mut effect = DROPEFFECT_COPY;
+    f.update(cx, |_, _, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_text_mode(crate::widgets::TextMode::PlainText, cx)
+        })
+    });
+    cx.update_window(f.window, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    for data in [&data, &native::url(&url)] {
+        unsafe {
+            target
+                .DragEnter(data, MODIFIERKEYS_FLAGS(0), p, &mut effect)
+                .unwrap();
+            target
+                .Drop(data, MODIFIERKEYS_FLAGS(0), p, &mut effect)
+                .unwrap();
+        }
+        cx.run_until_parked();
+        assert!(!f.dir.join("images").exists());
+        f.update(cx, |this, _, cx| {
+            assert!(this.error.is_none());
+            assert_eq!(editor.read(cx).value(), "AB🙂CD\n");
+            assert_eq!(editor.read(cx).selected_range(), 0..9);
+            assert!(editor.read(cx).image_drop_feedback().is_none());
+        });
+    }
+    f.update(cx, |_, _, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_text_mode(crate::widgets::TextMode::Markdown, cx)
+        })
+    });
+    cx.update_window(f.window, |_, window, cx| window.render_frame(cx))
+        .unwrap();
     unsafe {
         target
             .DragEnter(&data, MODIFIERKEYS_FLAGS(0), p, &mut effect)
@@ -439,7 +471,31 @@ fn image_drops_use_space_paths_preserve_files_and_follow_edits(cx: &mut TestAppC
         })
         .unwrap();
 
-    // Read-only and non-image drops must not create an images directory.
+    // Plain Text, read-only and non-image drops must not create an images directory.
+    f.update(cx, |_, _, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_text_mode(crate::widgets::TextMode::PlainText, cx)
+        })
+    });
+    drop_files(&f, cx, std::slice::from_ref(&first), position);
+    f.update(cx, |this, window, cx| {
+        // The app-side guard also rejects calls that bypass GPUI's drop hitbox.
+        this.drop_images(
+            editor.clone(),
+            std::slice::from_ref(&first),
+            position,
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(!f.dir.join("images").exists());
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).value(), "AB🙂CD\n");
+        editor.update(cx, |state, cx| {
+            state.set_text_mode(crate::widgets::TextMode::Markdown, cx)
+        });
+    });
     f.update(cx, |_, _, cx| {
         editor.update(cx, |state, cx| state.set_read_only(true, cx))
     });
@@ -601,6 +657,21 @@ fn image_drops_use_space_paths_preserve_files_and_follow_edits(cx: &mut TestAppC
     cx.run_until_parked();
     let composed = "A한![second](<images/second-2.png>)B";
     f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), composed));
+
+    // Switching to Plain Text while copying must not insert a Markdown tag.
+    drop_files(&f, cx, std::slice::from_ref(&second), position);
+    f.update(cx, |_, _, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_text_mode(crate::widgets::TextMode::PlainText, cx)
+        })
+    });
+    cx.run_until_parked();
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).value(), composed);
+        editor.update(cx, |state, cx| {
+            state.set_text_mode(crate::widgets::TextMode::Markdown, cx)
+        });
+    });
 
     // Closing the owning tab while a copy is queued must not edit another note.
     drop_files(&f, cx, std::slice::from_ref(&second), position);

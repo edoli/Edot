@@ -197,7 +197,7 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.startup_failed || editor.read(cx).is_read_only() {
+        if self.startup_failed || !editor.read(cx).can_insert_images() {
             return;
         }
         let Some(id) = self
@@ -246,7 +246,7 @@ impl Edot {
                         return false;
                     }
                     if result.as_ref().is_some_and(Result::is_ok)
-                        && !editor.read(cx).is_read_only() && editor.read(cx).is_composing() {
+                        && editor.read(cx).can_insert_images() && editor.read(cx).is_composing() {
                         return true;
                     }
                     match result.take().unwrap() {

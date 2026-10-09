@@ -209,7 +209,7 @@ impl Render for InputState {
             .cursor_text()
             .when(self.multiline, |div| {
                 div.can_drop(move |drag, _, cx| {
-                    !drop_entity.read(cx).is_read_only()
+                    drop_entity.read(cx).can_insert_images()
                         && drag.downcast_ref::<ExternalPaths>().is_some_and(|paths| {
                             paths
                                 .paths()

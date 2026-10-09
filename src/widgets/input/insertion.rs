@@ -5,14 +5,16 @@ use std::cell::Cell;
 pub struct DropInsertion(Rc<Cell<Option<usize>>>);
 
 impl InputState {
+    pub fn can_insert_images(&self) -> bool {
+        self.multiline && self.text_mode == TextMode::Markdown && !self.is_read_only()
+    }
     #[cfg(test)]
     pub(crate) fn image_drop_feedback(&self) -> Option<usize> {
         self.drop_position
             .map(|position| self.mouse_index(position))
     }
     pub fn accepts_image_drop(&self, position: Point<Pixels>, window: &Window) -> bool {
-        self.multiline
-            && !self.is_read_only()
+        self.can_insert_images()
             && self
                 .drop_hitbox
                 .as_ref()
@@ -81,7 +83,7 @@ impl InputState {
         text: &str,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.is_read_only() || self.is_composing() {
+        if !self.can_insert_images() || self.is_composing() {
             return false;
         }
         let Some(index) = anchor.0.take() else {
