@@ -136,6 +136,9 @@ impl Edot {
                 },
                 metrics.total
             );
+            if state.is_read_only() {
+                position = format!("읽기 전용   {}자", metrics.total);
+            }
         }
         div()
             .h_flex()

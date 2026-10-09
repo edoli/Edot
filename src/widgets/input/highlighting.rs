@@ -20,10 +20,15 @@ impl InputState {
             return;
         }
         self.text_mode = mode;
+        self.stop_preview_drag();
+        if self.is_read_only() {
+            self.finish_composition();
+        }
         self.highlighting.spans = Vec::new();
         self.highlighting.revision = None;
         self.layout_key = None;
         self.ensure_highlighting(cx);
+        self.ensure_preview(cx);
         cx.notify();
     }
 

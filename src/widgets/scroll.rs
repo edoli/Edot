@@ -55,22 +55,63 @@ impl AutoScroll {
 }
 #[derive(IntoElement)]
 pub struct Scrollbar {
-    handle: ScrollHandle,
+    handle: Handle,
     horizontal: bool,
 }
+#[derive(Clone)]
+enum Handle {
+    Scroll(ScrollHandle),
+    List(ListState),
+}
+impl Handle {
+    fn max_offset(&self) -> Point<Pixels> {
+        match self {
+            Self::Scroll(h) => h.max_offset(),
+            Self::List(h) => h.max_offset_for_scrollbar(),
+        }
+    }
+    fn offset(&self) -> Point<Pixels> {
+        match self {
+            Self::Scroll(h) => h.offset(),
+            Self::List(h) => h.scroll_px_offset_for_scrollbar(),
+        }
+    }
+    fn set_offset(&self, value: Point<Pixels>) {
+        match self {
+            Self::Scroll(h) => h.set_offset(value),
+            Self::List(h) => h.set_offset_from_scrollbar(value),
+        }
+    }
+    fn drag_started(&self) {
+        if let Self::List(h) = self {
+            h.scrollbar_drag_started();
+        }
+    }
+    fn drag_ended(&self) {
+        if let Self::List(h) = self {
+            h.scrollbar_drag_ended();
+        }
+    }
+}
 impl Scrollbar {
+    pub fn vertical_list(handle: &ListState) -> Self {
+        Self {
+            handle: Handle::List(handle.clone()),
+            horizontal: false,
+        }
+    }
     pub fn vertical(handle: &UniformListScrollHandle) -> Self {
         Self::vertical_handle(&handle.0.borrow().base_handle)
     }
     pub fn vertical_handle(handle: &ScrollHandle) -> Self {
         Self {
-            handle: handle.clone(),
+            handle: Handle::Scroll(handle.clone()),
             horizontal: false,
         }
     }
     pub fn horizontal(handle: &ScrollHandle) -> Self {
         Self {
-            handle: handle.clone(),
+            handle: Handle::Scroll(handle.clone()),
             horizontal: true,
         }
     }
@@ -204,6 +245,7 @@ impl RenderOnce for Scrollbar {
                                 -(extent * ((at - origin - length / 2.) / available))
                                     .clamp(px(0.), extent)
                             };
+                            down_handle.drag_started();
                             let mut offset = down_handle.offset();
                             if horizontal {
                                 offset.x = value;
@@ -251,11 +293,13 @@ impl RenderOnce for Scrollbar {
                             });
                         });
                         let up_state = state.clone();
+                        let up_handle = handle.clone();
                         window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
                             if phase == DispatchPhase::Capture
                                 && e.button == MouseButton::Left
                                 && up_state.read(cx).drag.is_some()
                             {
+                                up_handle.drag_ended();
                                 up_state.update(cx, |s, cx| {
                                     s.drag = None;
                                     cx.notify();

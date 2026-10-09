@@ -1,6 +1,113 @@
 use super::*;
 
 #[gpui::test]
+fn markdown_preview_renders_links_and_blocks_edits_without_losing_source_history(
+    cx: &mut TestAppContext,
+) {
+    use crate::widgets::TextMode;
+    let f = Fixture::new(cx);
+    let source = "# 제목\r\n\r\n[문서 링크](https://example.org/docs)\r\n\r\n**굵게** *기울임*\r\n\r\n- 목록\r\n\r\n> 인용\r\n\r\n~~~\r\ncode\r\n~~~\r\n\r\n| A | B |\r\n|---|---|\r\n| a | b |\r\n";
+    let editor = f.update(cx, |this, window, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| {
+            s.set_value(source, window, cx);
+            s.set_selected_range(source.len()..source.len(), cx);
+            s.replace("추가", window, cx);
+            s.set_selected_range(2..8, cx);
+        });
+        this.focus_editor(window, cx);
+        editor
+    });
+    let original = editor.read_with(cx, |s, _| s.value());
+    let revision = editor.read_with(cx, |s, _| s.revision);
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|window, cx| window.render_frame(cx));
+    let trigger = visual.debug_bounds("text-mode-control").unwrap();
+    visual.simulate_mouse_down(
+        trigger.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    visual.simulate_mouse_up(
+        trigger.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    f.press(cx, "down");
+    f.press(cx, "enter");
+    visual.update(|window, cx| window.render_frame(cx));
+    assert!(visual.debug_bounds("markdown-preview").is_some());
+    let block = visual.debug_bounds("preview-block-1").unwrap();
+    let link = point(block.left() + px(32.), block.center().y);
+    visual.simulate_mouse_down(link, gpui::MouseButton::Left, Default::default());
+    visual.simulate_mouse_up(link, gpui::MouseButton::Left, Default::default());
+    assert_eq!(cx.opened_url().as_deref(), Some("https://example.org/docs"));
+    for key in [
+        "backspace",
+        "delete",
+        "enter",
+        "ctrl-enter",
+        "tab",
+        "ctrl-v",
+        "ctrl-x",
+        "ctrl-z",
+        "ctrl-y",
+        "f5",
+        "f6",
+    ] {
+        f.press(cx, key);
+    }
+    cx.update_window(f.window, |_, window, cx| {
+        let mut handler = ElementInputHandler::new(Bounds::default(), editor.clone());
+        handler.replace_text_in_range(None, "키보드 입력", window, cx);
+        handler.replace_and_mark_text_in_range(None, "한글 조합", Some(1..1), window, cx);
+    })
+    .unwrap();
+    f.update(cx, |this, window, cx| {
+        assert!(editor.read(cx).is_read_only());
+        assert_eq!(editor.read(cx).value(), original);
+        assert_eq!(editor.read(cx).revision, revision);
+        assert_eq!(editor.read(cx).selected_range(), 2..8);
+        assert!(!editor.read(cx).is_composing());
+        this.replace_local(true, window, cx);
+        editor.update(cx, |s, cx| s.set_text_mode(TextMode::Markdown, cx));
+        this.focus_editor(window, cx);
+    });
+    f.press(cx, "ctrl-z");
+    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), source));
+    f.press(cx, "ctrl-y");
+    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), original));
+    f.press(cx, "ctrl-s");
+    let external = "# 외부 변경\n\n**새 본문**";
+    fs::write(f.dir.join(format!("notes/{}.txt", f.ids[0])), external).unwrap();
+    f.update(cx, |this, window, cx| {
+        editor.update(cx, |s, cx| s.set_text_mode(TextMode::MarkdownPreview, cx));
+        this.request_file_sync(
+            crate::watch::Changes {
+                notes: std::collections::HashSet::from([f.ids[0]]),
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    f.update(cx, |this, _, cx| {
+        assert_eq!(editor.read(cx).value(), external);
+        assert!(editor.read(cx).is_read_only());
+        assert!(!this.open[0].dirty);
+    });
+    f.press(cx, "ctrl-a");
+    f.press(cx, "ctrl-c");
+    cx.update(|cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "외부 변경\n\n새 본문"
+        )
+    });
+}
+
+#[gpui::test]
 fn status_text_mode_menu_changes_only_the_current_editor(cx: &mut TestAppContext) {
     use crate::widgets::TextMode;
     use gpui::Focusable;

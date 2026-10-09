@@ -158,6 +158,9 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_read_only() {
+            return;
+        }
         let key = event.keystroke.key.as_str();
         let ctrl = event.keystroke.modifiers.control;
         let shift = event.keystroke.modifiers.shift;

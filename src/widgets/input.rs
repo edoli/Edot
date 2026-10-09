@@ -18,12 +18,14 @@ pub enum TextMode {
     PlainText,
     #[default]
     Markdown,
+    MarkdownPreview,
 }
 impl TextMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::PlainText => "Plain Text",
             Self::Markdown => "Markdown",
+            Self::MarkdownPreview => "Markdown (preview)",
         }
     }
 }
@@ -94,6 +96,7 @@ pub struct InputState {
     content_padding: Edges<Pixels>,
     lines: Vec<Paragraph>,
     highlighting: highlighting::Highlighting,
+    preview: preview::Preview,
     layout_key: Option<(u64, Pixels, Pixels, Font, Hsla, Hsla)>,
     line_height: Pixels,
     content_size: Size<Pixels>,
@@ -134,7 +137,7 @@ impl InputState {
                 cx.background_executor().timer(CARET_BLINK_INTERVAL).await;
                 if entity
                     .update(cx, |s, cx| {
-                        if s.focused {
+                        if s.focused && !s.is_read_only() {
                             s.blink = !s.blink;
                             cx.notify();
                         }
@@ -175,6 +178,7 @@ impl InputState {
             content_padding: Edges::default(),
             lines: vec![],
             highlighting: highlighting::Highlighting::default(),
+            preview: preview::Preview::default(),
             layout_key: None,
             line_height: px(24.),
             content_size: Size::default(),
@@ -330,6 +334,7 @@ impl InputState {
     fn moved(&mut self, cx: &mut Context<Self>) {
         self.blink = true;
         self.reveal = true;
+        self.reveal_preview();
         cx.notify();
     }
 }
@@ -343,5 +348,7 @@ mod layout;
 mod links;
 mod markdown;
 mod navigation;
+mod preview;
+mod preview_document;
 mod selection;
 pub use element::{Input, Textarea};

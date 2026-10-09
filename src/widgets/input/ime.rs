@@ -43,6 +43,9 @@ impl EntityInputHandler for InputState {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        if self.is_read_only() {
+            return None;
+        }
         Some(UTF16Selection {
             range: self.to_utf16(&self.selection),
             reversed: self.reversed,
@@ -62,6 +65,9 @@ impl EntityInputHandler for InputState {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_read_only() {
+            return;
+        }
         if !self.extra.is_empty() {
             let ranges = self.input_ranges(r.as_ref().map(|r| self.range_from_utf16(r)));
             let texts = vec![text.to_owned(); ranges.len()];
@@ -112,6 +118,9 @@ impl EntityInputHandler for InputState {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_read_only() {
+            return;
+        }
         if self.composition.is_none() {
             self.composition = Some(Composition {
                 before: self.content.clone(),

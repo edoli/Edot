@@ -71,6 +71,7 @@ impl Edot {
                         bottom: px(0.),
                     })
                     .soft_wrap(self.settings.wrap)
+                    .source_directory(self.dir.join("notes"))
                     .default_value(text.clone())
             });
             let subscription =

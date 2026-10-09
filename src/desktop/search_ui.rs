@@ -194,6 +194,11 @@ impl Edot {
         let Some(editor) = self.active_editor() else {
             return;
         };
+        if editor.read(cx).is_read_only() {
+            self.local.message = "미리보기는 읽기 전용입니다".into();
+            cx.notify();
+            return;
+        }
         let pattern = match self.local.pattern(cx) {
             Ok(Some(pattern)) => pattern,
             Ok(None) => return,

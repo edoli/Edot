@@ -171,7 +171,10 @@ impl Element for EditorElement {
     }
 }
 impl Render for InputState {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.is_read_only() {
+            return self.preview_view(window, cx);
+        }
         div()
             .id("text-input")
             .debug_selector(|| "text-input".into())
@@ -237,6 +240,7 @@ impl Render for InputState {
                 }
             }))
             .child(EditorElement(cx.entity()))
+            .into_any_element()
     }
 }
 

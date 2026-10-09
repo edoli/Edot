@@ -136,6 +136,10 @@ impl Edot {
                         .update(cx, |state, cx| state.replace(text, window, cx)),
                     Ok(text) => {
                         if let Some(editor) = self.active_editor() {
+                            if editor.read(cx).is_read_only() {
+                                cx.stop_propagation();
+                                return;
+                            }
                             editor.update(cx, |state, cx| {
                                 state.replace(text, window, cx);
                                 state.focus(window, cx);

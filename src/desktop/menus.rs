@@ -125,8 +125,17 @@ pub(super) fn editor_menu(
     weak: WeakEntity<Edot>,
     cx: &App,
 ) -> PopupMenu {
-    let mut menu = editing_menu(menu, editor.read(cx).focus_handle(cx), false).separator();
+    let read_only = editor.read(cx).is_read_only();
+    let mut menu = if read_only {
+        preview_menu(menu, editor.read(cx).focus_handle(cx))
+    } else {
+        editing_menu(menu, editor.read(cx).focus_handle(cx), false)
+    }
+    .separator();
     for (label, shortcut, replace) in [("찾기", "Ctrl+F", false), ("바꾸기", "Ctrl+H", true)] {
+        if read_only && replace {
+            continue;
+        }
         let weak = weak.clone();
         menu = menu.item(PopupMenuItem::new(label).shortcut(shortcut).on_click(
             move |_, window, cx| {
@@ -135,6 +144,12 @@ pub(super) fn editor_menu(
         ));
     }
     menu
+}
+
+fn preview_menu(menu: PopupMenu, focus: FocusHandle) -> PopupMenu {
+    menu.action_context(focus)
+        .menu("복사", "Ctrl+C", Box::new(component::input::Copy))
+        .menu("전체 선택", "Ctrl+A", Box::new(component::input::SelectAll))
 }
 
 impl Edot {
@@ -201,7 +216,12 @@ impl Edot {
         let focus = editor.read(cx).focus_handle(cx);
         let weak = editor.downgrade();
         let menu = PopupMenu::build(window, cx, |mut menu, _, _| {
-            for mode in [TextMode::PlainText, TextMode::Markdown] {
+            let modes = [
+                TextMode::PlainText,
+                TextMode::Markdown,
+                TextMode::MarkdownPreview,
+            ];
+            for mode in modes {
                 let weak = weak.clone();
                 let mut item = PopupMenuItem::new(mode.label()).on_click(move |_, _, cx| {
                     let _ = weak.update(cx, |s, cx| s.set_text_mode(mode, cx));
@@ -212,7 +232,7 @@ impl Edot {
                 menu = menu.item(item);
             }
             menu.action_context(focus)
-                .selected(usize::from(current == TextMode::Markdown))
+                .selected(modes.iter().position(|mode| *mode == current).unwrap_or(0))
         });
         self.install_menu(menu, None, position, window, cx);
         self.menu_anchor = Anchor::BottomRight;
@@ -261,6 +281,9 @@ impl Edot {
         let weak = cx.entity().downgrade();
         let focus = window.focused(cx).unwrap_or_else(|| self.focus.clone());
         let tree = self.tree_focus.is_focused(window);
+        let read_only = self
+            .active_editor()
+            .is_some_and(|e| e.read(cx).is_read_only());
         let id = if tree {
             self.caret
         } else {
@@ -272,6 +295,8 @@ impl Edot {
         let menu = PopupMenu::build(window, cx, |menu, _, _| {
             if tree {
                 self.note_menu(menu.action_context(focus), weak, id)
+            } else if read_only {
+                preview_menu(menu, focus)
             } else {
                 editing_menu(menu, focus, true)
             }

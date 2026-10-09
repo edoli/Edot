@@ -82,6 +82,9 @@ impl InputState {
         self.extra_marked.clear();
     }
     pub(super) fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
         self.finish_composition();
         self.last_edit = None;
         if let Some(edit) = self.undo.pop() {
@@ -109,6 +112,9 @@ impl InputState {
         }
     }
     pub(super) fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
         self.last_edit = None;
         if let Some(edit) = self.redo.pop() {
             let undo = Edit {
@@ -181,6 +187,9 @@ impl InputState {
         cx.write_to_clipboard(item);
     }
     pub(super) fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
         if !self.extra.is_empty() {
             self.finish_composition();
             let text = self.multiple_clipboard_text();
@@ -210,6 +219,9 @@ impl InputState {
         }
     }
     pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
         if let Some(item) = cx.read_from_clipboard()
             && let Some(text) = item.text()
         {
