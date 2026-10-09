@@ -193,6 +193,12 @@ impl InputState {
             copied = change.start + change.before.len();
         }
         value.push_str(&self.content[copied..]);
+        for change in &changes {
+            self.rebase_insertions(
+                &(change.start..change.start + change.before.len()),
+                change.after.len(),
+            );
+        }
         self.content = value.into();
         self.selection = selections.pop().unwrap();
         self.reversed = false;

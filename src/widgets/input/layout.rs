@@ -232,6 +232,26 @@ impl InputState {
         let origin = self.bounds.origin + self.scroll;
         let focused = self.focus.is_focused(window);
         let selection_color = cx.theme().selection;
+        let drop_caret = self
+            .drop_caret()
+            .filter(|_| !self.is_read_only())
+            .map(|at| origin + at);
+        if let Some(at) = drop_caret {
+            // A quiet row guide sits behind the text and existing selections.
+            window.paint_quad(
+                fill(
+                    Bounds::new(
+                        point(self.bounds.left() + px(4.), at.y + px(1.)),
+                        size(
+                            (self.bounds.size.width - px(8.)).max(px(0.)),
+                            (self.line_height - px(2.)).max(px(0.)),
+                        ),
+                    ),
+                    cx.theme().primary.opacity(0.06),
+                )
+                .corner_radii(px(3.)),
+            );
+        }
         let first = self
             .lines
             .partition_point(|l| l.top + l.line.size(self.line_height).height < -self.scroll.y);
@@ -304,7 +324,26 @@ impl InputState {
                 }
             }
         }
-        if focused && self.blink && !self.is_read_only() {
+        if let Some(at) = drop_caret {
+            let at = at + point(px(0.), px(2.));
+            let height = (self.line_height - px(4.)).max(px(2.));
+            let color = cx.theme().primary;
+            window.paint_quad(
+                fill(
+                    Bounds::new(at - point(px(3.), px(0.)), size(px(6.), height)),
+                    color.opacity(0.12),
+                )
+                .corner_radii(px(3.)),
+            );
+            window.paint_quad(
+                fill(
+                    Bounds::new(at - point(px(1.), px(0.)), size(px(2.), height)),
+                    color,
+                )
+                .corner_radii(px(1.)),
+            );
+        }
+        if self.drop_position.is_none() && focused && self.blink && !self.is_read_only() {
             for selection in &self.extra {
                 let at = if selection.reversed {
                     selection.range.start

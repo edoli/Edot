@@ -542,6 +542,9 @@ impl InputState {
 }
 
 fn render_inline(inline: &Inline, selection: &ReadingSelection, cx: &App) -> AnyElement {
+    if inline.text.is_empty() && !inline.images.is_empty() {
+        return div().into_any_element();
+    }
     render_text(
         &inline.text,
         &inline.spans,
@@ -641,6 +644,39 @@ fn render_text(
     .into_any_element()
 }
 
+fn render_image(image: &ReadingImage, directory: &std::path::Path) -> AnyElement {
+    let source = &image.source;
+    let alt = image.alt.clone();
+    let fallback = move || {
+        div()
+            .debug_selector(|| "reading-image-fallback".into())
+            .v_flex()
+            .gap_1()
+            .when(!alt.is_empty(), |d| {
+                d.child(
+                    div()
+                        .debug_selector(|| "reading-image-alt".into())
+                        .child(alt.clone()),
+                )
+            })
+            .child("이미지를 불러올 수 없습니다")
+            .into_any_element()
+    };
+    let image: ImageSource = if web_url(source) {
+        source.clone().into()
+    } else if source.contains("://") || source.starts_with("data:") {
+        return fallback();
+    } else {
+        directory.join(source).into()
+    };
+    img(image)
+        .w_full()
+        .h(px(240.))
+        .object_fit(ObjectFit::Contain)
+        .with_fallback(fallback)
+        .into_any_element()
+}
+
 fn render_block(
     block: &Block,
     index: usize,
@@ -738,7 +774,13 @@ fn render_block(
                         .when(alignment.get(column) == Some(&Align::Center), |d| {
                             d.text_center()
                         })
-                        .child(render_inline(cell, selection, cx)),
+                        .when(!cell.images.is_empty(), |d| d.v_flex())
+                        .child(render_inline(cell, selection, cx))
+                        .children(
+                            cell.images
+                                .iter()
+                                .map(|image| render_image(image, directory)),
+                        ),
                 );
             }
             body = body.child(row);
@@ -747,26 +789,13 @@ fn render_block(
             body = body.child(render_inline(&block.content, selection, cx));
         }
     }
-    for source in &block.content.images {
-        let image: ImageSource = if web_url(source) {
-            source.clone().into()
-        } else if source.contains("://") || source.starts_with("data:") {
-            continue;
-        } else {
-            directory.join(source).into()
-        };
-        body = body.child(
-            img(image)
-                .w_full()
-                .h(px(240.))
-                .object_fit(ObjectFit::Contain)
-                .with_fallback(|| {
-                    div()
-                        .child("이미지를 불러올 수 없습니다")
-                        .into_any_element()
-                }),
-        );
-    }
+    body = body.children(
+        block
+            .content
+            .images
+            .iter()
+            .map(|image| render_image(image, directory)),
+    );
     let row = div()
         .h_flex()
         .items_start()
@@ -823,6 +852,86 @@ fn web_url(target: &str) -> bool {
 mod tests {
     use super::{Copy, InputState, SelectAll, TextMode};
     use gpui::{AppContext, MouseButton, point, px};
+
+    #[gpui::test]
+    fn images_hide_descriptions_until_loading_fails(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::widgets::init);
+        let window = cx.add_window(|w, cx| {
+            let mut state = InputState::new(w, cx)
+                .source_directory(std::env::current_dir().unwrap())
+                .default_value("![스크린샷 **설명**](assets/app-icon/edot.png)".into());
+            state.set_read_only(true, cx);
+            state
+        });
+        let editor = window.root(cx).unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |visual: &mut gpui::VisualTestContext| {
+            visual.update(|w, cx| {
+                w.refresh();
+                w.draw(cx).clear(cx);
+            });
+        };
+        draw(&mut visual);
+        cx.run_until_parked();
+        draw(&mut visual);
+        assert!(visual.debug_bounds("reading-image-alt").is_none());
+        assert!(visual.debug_bounds("reading-image-fallback").is_none());
+        let block = visual.debug_bounds("reading-block-0").unwrap();
+        assert_eq!(
+            block.size.height,
+            px(256.),
+            "image-only paragraphs must have no caption row"
+        );
+        editor.read_with(cx, |state, _| {
+            assert_eq!(
+                state.reading.document.blocks[0].content.images[0].alt,
+                "스크린샷 설명"
+            );
+            assert!(state.reading.document.text().is_empty());
+            assert!(state.reading.layouts.borrow().is_empty());
+        });
+        visual.update(|w, cx| {
+            editor.update(cx, |state, cx| {
+                state.set_value("![없는 이미지](images/edot-test-missing-image.png)", w, cx)
+            });
+        });
+        draw(&mut visual);
+        cx.run_until_parked();
+        draw(&mut visual);
+        assert!(visual.debug_bounds("reading-image-alt").is_some());
+        assert!(visual.debug_bounds("reading-image-fallback").is_some());
+        visual.update(|w, cx| {
+            editor.update(cx, |state, cx| {
+                state.set_value("![](images/edot-test-missing-image.png)", w, cx)
+            });
+        });
+        draw(&mut visual);
+        assert!(visual.debug_bounds("reading-image-alt").is_none());
+        assert!(visual.debug_bounds("reading-image-fallback").is_some());
+        visual.update(|w, cx| {
+            editor.update(cx, |state, cx| {
+                state.set_value("![지원하지 않는 이미지](blob:example)", w, cx)
+            });
+        });
+        draw(&mut visual);
+        cx.run_until_parked();
+        draw(&mut visual);
+        assert!(visual.debug_bounds("reading-image-alt").is_some());
+        visual.update(|w, cx| {
+            editor.update(cx, |state, cx| {
+                state.set_value(
+                    "| 이미지 |\n| --- |\n| ![설명](assets/app-icon/edot.png) |",
+                    w,
+                    cx,
+                )
+            });
+        });
+        draw(&mut visual);
+        assert!(visual.debug_bounds("reading-image-alt").is_none());
+        assert!(visual.debug_bounds("reading-image-fallback").is_none());
+        let cell = visual.debug_bounds("reading-table-cell-1-0").unwrap();
+        assert!(cell.size.height >= px(240.));
+    }
 
     #[gpui::test]
     fn tables_keep_rows_connected_columns_aligned_and_hits_on_painted_text(

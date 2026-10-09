@@ -139,6 +139,7 @@ impl Fixture {
 mod documents;
 mod editor;
 mod file_sync;
+mod images;
 mod search;
 mod spaces;
 mod tree;

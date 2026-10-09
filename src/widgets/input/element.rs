@@ -40,6 +40,7 @@ impl Element for EditorElement {
     ) -> Self::PrepaintState {
         self.0.update(cx, |s, cx| {
             s.layout(bounds, window, cx);
+            s.drop_hitbox = Some(window.insert_hitbox(bounds, HitboxBehavior::Normal));
             let modifiers = window.modifiers();
             s.link_hover = !s.selecting
                 && s.scroll_drag.is_none()
@@ -101,12 +102,21 @@ impl Element for EditorElement {
             }
         });
         let entity = self.0.clone();
+        window.on_mouse_event(move |_: &FileDropEvent, _, window, cx| {
+            entity.update(cx, |s, cx| s.show_image_drop(None, window, cx));
+        });
+        let entity = self.0.clone();
         let hitboxes = bars.0.clone();
         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
             if phase != DispatchPhase::Capture {
                 return;
             }
             entity.update(cx, |s, cx| {
+                if s.drop_position.is_some()
+                    && (!cx.has_active_drag() || !s.accepts_image_drop(e.position, window))
+                {
+                    s.show_image_drop(None, window, cx);
+                }
                 let hover = hitboxes
                     .iter()
                     .find(|(_, h)| h.is_hovered(window))
@@ -141,6 +151,7 @@ impl Element for EditorElement {
         window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
             if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
                 entity.update(cx, |s, cx| {
+                    s.show_image_drop(None, window, cx);
                     if s.scroll_drag.is_some() || s.selecting {
                         // Use the release position even if no move event preceded it.
                         if s.scroll_drag.is_some()
@@ -177,6 +188,7 @@ impl Render for InputState {
         if self.is_markdown_reading() {
             return self.reading_view(window, cx);
         }
+        let drop_entity = cx.entity();
         div()
             .id("text-input")
             .debug_selector(|| "text-input".into())
@@ -195,6 +207,33 @@ impl Render for InputState {
             .tab_index(0)
             .tab_stop(true)
             .cursor_text()
+            .when(self.multiline, |div| {
+                div.can_drop(move |drag, _, cx| {
+                    !drop_entity.read(cx).is_read_only()
+                        && drag.downcast_ref::<ExternalPaths>().is_some_and(|paths| {
+                            paths
+                                .paths()
+                                .iter()
+                                .any(|path| Self::supports_image_path(path))
+                        })
+                })
+                .on_drag_move(
+                    cx.listener(|s, event: &DragMoveEvent<ExternalPaths>, window, cx| {
+                        let supported = event
+                            .drag(cx)
+                            .paths()
+                            .iter()
+                            .any(|path| Self::supports_image_path(path));
+                        s.show_image_drop(supported.then_some(event.event.position), window, cx);
+                    }),
+                )
+                .on_drop(cx.listener(|_, paths: &ExternalPaths, window, cx| {
+                    cx.emit(InputEvent::DropImages {
+                        paths: paths.paths().to_vec(),
+                        position: window.mouse_position(),
+                    });
+                }))
+            })
             .on_key_down(cx.listener(Self::key))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))

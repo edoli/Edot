@@ -11,8 +11,14 @@ pub use commands::{Copy, Cut, EDIT_COMMANDS, Paste, Redo, SelectAll, Undo, init}
 
 pub enum InputEvent {
     Change,
-    PressEnter { shift: bool },
+    PressEnter {
+        shift: bool,
+    },
     Blur,
+    DropImages {
+        paths: Vec<std::path::PathBuf>,
+        position: Point<Pixels>,
+    },
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextMode {
@@ -82,6 +88,9 @@ pub struct InputState {
     undo: Vec<Edit>,
     redo: Vec<Edit>,
     last_edit: Option<std::time::Instant>,
+    pending_insertions: Vec<std::rc::Weak<std::cell::Cell<Option<usize>>>>,
+    drop_hitbox: Option<Hitbox>,
+    drop_position: Option<Point<Pixels>>,
     focused: bool,
     scroll_drag: Option<(bool, Pixels, Pixels)>,
     scroll_hover: Option<bool>,
@@ -172,6 +181,9 @@ impl InputState {
             undo: vec![],
             redo: vec![],
             last_edit: None,
+            pending_insertions: vec![],
+            drop_hitbox: None,
+            drop_position: None,
             focused: false,
             scroll_drag: None,
             scroll_hover: None,
@@ -261,6 +273,13 @@ impl InputState {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        for anchor in self
+            .pending_insertions
+            .drain(..)
+            .filter_map(|anchor| anchor.upgrade())
+        {
+            anchor.set(None);
+        }
         self.content = value.into();
         self.selection = 0..0;
         self.clear_extra_selections();
@@ -352,6 +371,7 @@ mod element;
 mod highlighting;
 mod history;
 mod ime;
+mod insertion;
 mod layout;
 mod links;
 mod markdown;

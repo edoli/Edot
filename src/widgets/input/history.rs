@@ -5,6 +5,7 @@ const LINE_COPY_METADATA: &str = "edot-line-copy:1";
 
 impl InputState {
     pub(super) fn apply(&mut self, range: Range<usize>, text: &str) {
+        self.rebase_insertions(&range, text.len());
         let mut value = String::with_capacity(self.content.len() - range.len() + text.len());
         value.push_str(&self.content[..range.start]);
         value.push_str(text);

@@ -23,6 +23,59 @@ use windows_sys::Win32::Networking::WinHttp::*;
 const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST_TIME: Duration = Duration::from_secs(30);
 
+pub async fn image_bytes(client: &dyn HttpClient, url: &str) -> Result<Vec<u8>> {
+    if let Some(data) = url.strip_prefix("data:image/") {
+        let (header, body) = data
+            .split_once(',')
+            .ok_or_else(|| anyhow!("잘못된 이미지 주소입니다"))?;
+        if !header.ends_with(";base64") || body.len() > MAX_IMAGE_BYTES * 4 / 3 + 4 {
+            return Err(anyhow!("지원하지 않거나 너무 큰 이미지 데이터입니다"));
+        }
+        let mut bytes = Vec::with_capacity(body.len() * 3 / 4);
+        let mut bits = 0u32;
+        let mut count = 0u32;
+        let mut padded = false;
+        for byte in body.bytes() {
+            if byte == b'=' {
+                padded = true;
+                continue;
+            }
+            if byte.is_ascii_whitespace() {
+                continue;
+            }
+            if padded {
+                return Err(anyhow!("잘못된 이미지 데이터입니다"));
+            }
+            let value = match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => return Err(anyhow!("잘못된 이미지 데이터입니다")),
+            };
+            bits = (bits << 6) | u32::from(value);
+            count += 6;
+            if count >= 8 {
+                count -= 8;
+                bytes.push((bits >> count) as u8);
+            }
+        }
+        if count >= 6 || bits & ((1 << count) - 1) != 0 || bytes.len() > MAX_IMAGE_BYTES {
+            return Err(anyhow!("잘못된 이미지 데이터입니다"));
+        }
+        return Ok(bytes);
+    }
+    let response = client.get(url, AsyncBody::empty(), true).await?;
+    if !response.status().is_success() {
+        return Err(anyhow!("이미지 서버 응답: {}", response.status()));
+    }
+    match response.into_body().0 {
+        gpui::http_client::Inner::Bytes(bytes) => Ok(bytes.into_inner().to_vec()),
+        _ => Err(anyhow!("이미지 응답을 읽을 수 없습니다")),
+    }
+}
+
 #[cfg(test)]
 mod tests;
 

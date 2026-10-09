@@ -24,6 +24,8 @@ use std::{
 
 mod documents;
 mod file_sync;
+mod image_drop;
+mod images;
 use documents::{ClosedTab, OpenTab};
 use preferences::Preferences;
 use search_ui::SearchPanel;
@@ -383,7 +385,13 @@ pub fn run() {
                 ..Default::default()
             };
             if let Err(error) = component::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Edot::new(dir, config_dir, loaded, window, cx))
+                let view = cx.new(|cx| Edot::new(dir, config_dir, loaded, window, cx));
+                if let Err(error) = image_drop::install(&view, window, cx) {
+                    view.update(cx, |this, cx| {
+                        this.fail("이미지 드롭을 준비하지 못했습니다", error, cx)
+                    });
+                }
+                view
             }) {
                 eprintln!("창을 열지 못했습니다: {error}");
                 cx.quit();

@@ -71,15 +71,19 @@ impl Edot {
                         bottom: px(0.),
                     })
                     .soft_wrap(self.settings.wrap)
-                    .source_directory(self.dir.join("notes"))
+                    .source_directory(self.dir.clone())
                     .default_value(text.clone());
                 state.set_read_only(self.settings.read_only, cx);
                 state
             });
             let subscription =
-                cx.subscribe_in(&editor, window, move |this, _, event, window, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.changed(id, window, cx);
+                cx.subscribe_in(&editor, window, move |this, editor, event, window, cx| {
+                    match event {
+                        InputEvent::Change => this.changed(id, window, cx),
+                        InputEvent::DropImages { paths, position } => {
+                            this.drop_images(editor.clone(), paths, *position, window, cx);
+                        }
+                        _ => {}
                     }
                     cx.notify();
                 });

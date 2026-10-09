@@ -3,6 +3,7 @@ use super::*;
 
 impl InputState {
     pub(super) fn stop_pointer_drag(&mut self) {
+        self.drop_position = None;
         self.selecting = false;
         self.column_anchor = None;
         self.scroll_drag = None;

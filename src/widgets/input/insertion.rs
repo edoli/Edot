@@ -1,0 +1,112 @@
+//! Keep an asynchronous file drop attached to its original text position.
+use super::*;
+use std::cell::Cell;
+
+pub struct DropInsertion(Rc<Cell<Option<usize>>>);
+
+impl InputState {
+    #[cfg(test)]
+    pub(crate) fn image_drop_feedback(&self) -> Option<usize> {
+        self.drop_position
+            .map(|position| self.mouse_index(position))
+    }
+    pub fn accepts_image_drop(&self, position: Point<Pixels>, window: &Window) -> bool {
+        self.multiline
+            && !self.is_read_only()
+            && self
+                .drop_hitbox
+                .as_ref()
+                .is_some_and(|hitbox| hitbox.is_hovered_at(position, window))
+    }
+
+    pub fn show_image_drop(
+        &mut self,
+        position: Option<Point<Pixels>>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let position = position.filter(|position| self.accepts_image_drop(*position, window));
+        if self.drop_position != position {
+            self.drop_position = position;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn drop_caret(&self) -> Option<Point<Pixels>> {
+        let mouse = self.drop_position?;
+        let index = self.mouse_index(mouse);
+        let before = self.position_with_wrap_side(index, false);
+        let after = self.position_with_wrap_side(index, true);
+        let y = mouse.y - self.bounds.top() - self.scroll.y;
+        Some(
+            if (y - (after.y + self.line_height / 2.)).abs()
+                < (y - (before.y + self.line_height / 2.)).abs()
+            {
+                after
+            } else {
+                before
+            },
+        )
+    }
+
+    pub fn supports_image_path(path: &std::path::Path) -> bool {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]
+                    .iter()
+                    .any(|supported| extension.eq_ignore_ascii_case(supported))
+            })
+    }
+
+    pub fn begin_drop(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> DropInsertion {
+        self.finish_composition();
+        self.stop_pointer_drag();
+        let index = self.mouse_index(position);
+        self.set_selected_range(index..index, cx);
+        self.focus(window, cx);
+        let anchor = Rc::new(Cell::new(Some(index)));
+        self.pending_insertions.push(Rc::downgrade(&anchor));
+        DropInsertion(anchor)
+    }
+
+    pub fn finish_drop(
+        &mut self,
+        anchor: &DropInsertion,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.is_read_only() || self.is_composing() {
+            return false;
+        }
+        let Some(index) = anchor.0.take() else {
+            return false;
+        };
+        self.commit(index..index, text, false, cx);
+        true
+    }
+
+    pub(super) fn rebase_insertions(&mut self, range: &Range<usize>, length: usize) {
+        self.pending_insertions.retain(|anchor| {
+            let Some(anchor) = anchor.upgrade() else {
+                return false;
+            };
+            let Some(index) = anchor.get() else {
+                return false;
+            };
+            anchor.set(Some(if index < range.start {
+                index
+            } else if index >= range.end {
+                index - range.len() + length
+            } else {
+                range.start + length
+            }));
+            true
+        });
+    }
+}

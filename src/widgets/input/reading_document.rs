@@ -9,7 +9,11 @@ pub(super) struct Inline {
     pub text: String,
     pub spans: Vec<Span>,
     pub links: Vec<(Range<usize>, String)>,
-    pub images: Vec<String>,
+    pub images: Vec<ReadingImage>,
+}
+pub(super) struct ReadingImage {
+    pub source: String,
+    pub alt: String,
 }
 impl Inline {
     fn push(&mut self, text: &str, style: u16) {
@@ -140,7 +144,7 @@ struct Builder {
     prefix: String,
     counts: [u32; 4],
     link: Option<(usize, String)>,
-    image: Option<(usize, String)>,
+    image: Option<(usize, ReadingImage)>,
     table: Vec<Align>,
     row: Option<Block>,
 }
@@ -223,6 +227,25 @@ pub(super) fn parse(text: &str) -> Document {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
     for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        // Image descriptions belong to the image, not the visible paragraph.
+        // Ignore their formatting so it cannot leak into surrounding text.
+        if let Some((depth, image)) = &mut b.image {
+            match event {
+                Event::Start(Tag::Image { .. }) => *depth += 1,
+                Event::End(TagEnd::Image) => *depth -= 1,
+                Event::Text(value)
+                | Event::Code(value)
+                | Event::Html(value)
+                | Event::InlineHtml(value) => image.alt.push_str(&value),
+                Event::SoftBreak | Event::HardBreak => image.alt.push(' '),
+                _ => {}
+            }
+            if *depth == 0 {
+                let (_, image) = b.image.take().unwrap();
+                b.ensure(range).content.images.push(image);
+            }
+            continue;
+        }
         match event {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {
@@ -271,8 +294,14 @@ pub(super) fn parse(text: &str) -> Document {
                     b.counts[3] += 1;
                 }
                 Tag::Image { dest_url, .. } => {
-                    let start = b.ensure(range).content.text.len();
-                    b.image = Some((start, dest_url.to_string()));
+                    b.ensure(range);
+                    b.image = Some((
+                        1,
+                        ReadingImage {
+                            source: dest_url.to_string(),
+                            alt: String::new(),
+                        },
+                    ));
                 }
                 Tag::Table(alignment) => {
                     b.flush();
@@ -314,15 +343,6 @@ pub(super) fn parse(text: &str) -> Document {
                         inline.links.push((start..inline.text.len(), target));
                     }
                     b.counts[3] -= 1;
-                }
-                TagEnd::Image => {
-                    if let Some((start, target)) = b.image.take() {
-                        let inline = &mut b.ensure(range).content;
-                        if start == inline.text.len() {
-                            inline.push("이미지", 0);
-                        }
-                        inline.images.push(target);
-                    }
                 }
                 TagEnd::TableHead | TagEnd::TableRow => b.finish_row(),
                 TagEnd::Table => {
@@ -403,7 +423,27 @@ mod tests {
         assert_eq!(table.len(), 2);
         assert_eq!(table[0].cells[0].text, "이름");
         assert_eq!(table[1].cells[1].text, "1");
-        assert!(doc.blocks.iter().any(|b| b.content.images == ["image.png"]));
+        let image = doc
+            .blocks
+            .iter()
+            .find(|b| !b.content.images.is_empty())
+            .unwrap();
+        assert_eq!(image.content.images[0].source, "image.png");
+        assert_eq!(image.content.images[0].alt, "그림");
+        assert!(image.content.text.is_empty());
+        assert!(!doc.text().contains("그림"));
+        let images = parse(
+            "앞 **![한글 *설명* `코드` &amp; ![안쪽](inner.png)](<images/공백 이름.png>)뒤**\n\n![](empty.png)",
+        );
+        let paragraph = &images.blocks[0].content;
+        assert_eq!(paragraph.text, "앞 뒤");
+        assert_eq!(paragraph.images.len(), 1);
+        assert_eq!(paragraph.images[0].source, "images/공백 이름.png");
+        assert_eq!(paragraph.images[0].alt, "한글 설명 코드 & 안쪽");
+        assert_eq!(paragraph.spans[0].range, "앞 ".len().."앞 뒤".len());
+        assert_eq!(paragraph.spans[0].style, STRONG);
+        assert!(images.blocks[1].content.text.is_empty());
+        assert!(images.blocks[1].content.images[0].alt.is_empty());
         assert!(doc.text().contains("<script>alert(1)</script>"));
         let diagrams = parse(
             "```Mermaid\nflowchart TB\n A[한글] --> B[끝]\n```\n\n```rust\nmermaid\n```\n\n    mermaid\n",
