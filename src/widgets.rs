@@ -7,7 +7,7 @@ pub mod menu;
 pub mod scroll;
 mod select;
 pub use dialog::{DialogButtonProps, WindowExt};
-pub use input::{Input, InputEvent, InputState, Textarea, TextareaState};
+pub use input::{Input, InputEvent, InputState, TextMode, Textarea, TextareaState};
 pub use menu::{ContextMenuExt, PopupMenuItem};
 pub use select::{Select, SelectEvent, SelectState};
 

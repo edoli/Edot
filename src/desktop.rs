@@ -91,6 +91,7 @@ pub struct Edot {
     context_note: Option<NoteId>,
     menu_subscription: Option<Subscription>,
     menu_position: Point<Pixels>,
+    menu_anchor: Anchor,
 }
 
 impl Edot {
@@ -182,6 +183,7 @@ impl Edot {
             context_note: None,
             menu_subscription: None,
             menu_position: Point::default(),
+            menu_anchor: Anchor::TopLeft,
         };
         if this.error.is_none() {
             this.error = registry_error;

@@ -116,6 +116,10 @@ impl PopupMenu {
         self.items.push(Some(item));
         self
     }
+    pub fn selected(mut self, index: usize) -> Self {
+        self.selected = index.min(self.items.len().saturating_sub(1));
+        self
+    }
     pub fn separator(mut self) -> Self {
         self.items.push(None);
         self

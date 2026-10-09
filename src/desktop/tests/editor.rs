@@ -1,6 +1,81 @@
 use super::*;
 
 #[gpui::test]
+fn status_text_mode_menu_changes_only_the_current_editor(cx: &mut TestAppContext) {
+    use crate::widgets::TextMode;
+    use gpui::Focusable;
+    let f = Fixture::new(cx);
+    let (editor, original, revision) = f.update(cx, |this, window, cx| {
+        this.focus_editor(window, cx);
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| s.set_selected_range(0..4, cx));
+        let state = editor.read(cx);
+        assert_eq!(state.text_mode(), TextMode::Markdown);
+        (editor.clone(), state.value(), state.revision)
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|window, cx| window.render_frame(cx));
+    let trigger = visual.debug_bounds("text-mode-control").unwrap();
+    visual.simulate_mouse_down(
+        trigger.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    visual.simulate_mouse_up(
+        trigger.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    f.update(cx, |this, _, _| {
+        assert!(this.keyboard_menu.is_some());
+        assert!(this.context_note.is_none());
+        assert_eq!(this.menu_anchor, gpui::Anchor::BottomRight);
+    });
+    f.press(cx, "up"); // The selected row initially follows the current Markdown mode.
+    f.press(cx, "enter");
+    f.update(cx, |this, window, cx| {
+        let state = editor.read(cx);
+        assert_eq!(state.text_mode(), TextMode::PlainText);
+        assert_eq!(state.value(), original);
+        assert_eq!(state.revision, revision);
+        assert_eq!(state.selected_range(), 0..4);
+        assert!(!this.open.iter().find(|t| t.id == f.ids[0]).unwrap().dirty);
+        assert!(state.focus_handle(cx).is_focused(window));
+        assert!(this.keyboard_menu.is_none());
+        assert!(this.open_note(f.ids[1], true, window, cx));
+        assert_eq!(
+            this.active_editor().unwrap().read(cx).text_mode(),
+            TextMode::Markdown
+        );
+        assert!(this.open_note(f.ids[0], true, window, cx));
+        assert_eq!(
+            this.active_editor().unwrap().read(cx).text_mode(),
+            TextMode::PlainText
+        );
+    });
+    visual.update(|window, cx| window.render_frame(cx));
+    let trigger = visual.debug_bounds("text-mode-control").unwrap();
+    visual.simulate_mouse_down(
+        trigger.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    visual.simulate_mouse_up(
+        trigger.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    f.press(cx, "down");
+    f.press(cx, "enter");
+    f.update(cx, |this, _, cx| {
+        assert_eq!(editor.read(cx).text_mode(), TextMode::Markdown);
+        assert_eq!(editor.read(cx).value(), original);
+        assert_eq!(editor.read(cx).revision, revision);
+        assert!(this.keyboard_menu.is_none());
+    });
+}
+
+#[gpui::test]
 fn newline_keeps_indentation_and_ctrl_enter_inserts_below(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let editor = f.update(cx, |this, window, cx| {

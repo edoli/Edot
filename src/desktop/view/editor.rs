@@ -170,7 +170,38 @@ impl Edot {
                         cx.notify();
                     })),
             )
-            .child("UTF-8 · Plain Text")
+            .child(self.text_mode_view(cx))
+            .into_any_element()
+    }
+
+    fn text_mode_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(editor) = self.active_editor() else {
+            return div().child(TextMode::default().label()).into_any_element();
+        };
+        let mode = editor.read(cx).text_mode();
+        let bounds = Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default()));
+        let trigger = bounds.clone();
+        div()
+            .id("text-mode-control")
+            .debug_selector(|| "text-mode-control".into())
+            .relative()
+            .flex_shrink_0()
+            .child(
+                canvas(move |rect, _, _| bounds.set(rect), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0(),
+            )
+            .child(
+                Button::new("select-text-mode")
+                    .small()
+                    .label(mode.label())
+                    .icon(IconName::ChevronDown)
+                    .tooltip("텍스트 모드 선택")
+                    .text_xs()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.show_text_mode_menu(trigger.get().top_right(), window, cx);
+                    })),
+            )
             .into_any_element()
     }
 }

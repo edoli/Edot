@@ -13,6 +13,20 @@ pub enum InputEvent {
     PressEnter { shift: bool },
     Blur,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextMode {
+    PlainText,
+    #[default]
+    Markdown,
+}
+impl TextMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PlainText => "Plain Text",
+            Self::Markdown => "Markdown",
+        }
+    }
+}
 #[derive(Clone)]
 struct Edit {
     start: usize,
@@ -73,6 +87,7 @@ pub struct InputState {
     link_hover: bool,
     wheel_gesture: OngoingScroll,
     multiline: bool,
+    text_mode: TextMode,
     wrap: bool,
     scroll: Point<Pixels>,
     bounds: Bounds<Pixels>,
@@ -153,6 +168,7 @@ impl InputState {
             link_hover: false,
             wheel_gesture: OngoingScroll::default(),
             multiline: false,
+            text_mode: TextMode::default(),
             wrap: false,
             scroll: point(px(0.), px(0.)),
             bounds: Bounds::default(),

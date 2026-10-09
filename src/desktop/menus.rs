@@ -181,10 +181,41 @@ impl Edot {
             cx.notify();
         }));
         self.menu_position = position;
+        self.menu_anchor = Anchor::TopLeft;
         self.context_note = note;
         menu.read(cx).focus_handle(cx).focus(window, cx);
         self.keyboard_menu = Some(menu);
         cx.notify();
+    }
+
+    pub(super) fn show_text_mode_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_editor() else {
+            return;
+        };
+        let current = editor.read(cx).text_mode();
+        let focus = editor.read(cx).focus_handle(cx);
+        let weak = editor.downgrade();
+        let menu = PopupMenu::build(window, cx, |mut menu, _, _| {
+            for mode in [TextMode::PlainText, TextMode::Markdown] {
+                let weak = weak.clone();
+                let mut item = PopupMenuItem::new(mode.label()).on_click(move |_, _, cx| {
+                    let _ = weak.update(cx, |s, cx| s.set_text_mode(mode, cx));
+                });
+                if mode == current {
+                    item = item.shortcut("✓");
+                }
+                menu = menu.item(item);
+            }
+            menu.action_context(focus)
+                .selected(usize::from(current == TextMode::Markdown))
+        });
+        self.install_menu(menu, None, position, window, cx);
+        self.menu_anchor = Anchor::BottomRight;
     }
 
     pub(super) fn show_tree_menu(
