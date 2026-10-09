@@ -55,10 +55,10 @@ impl Edot {
                 .map_or(0, |n| n.parent)
         });
         let previous = self.book.clone();
-        let id = match self.book.add(parent, "새 메모".into()) {
+        let id = match self.book.add(parent, "새 노트".into()) {
             Ok(id) => id,
             Err(error) => {
-                self.fail("메모를 만들지 못했습니다", error, cx);
+                self.fail("노트를 만들지 못했습니다", error, cx);
                 return;
             }
         };
@@ -69,13 +69,13 @@ impl Edot {
             .open(&file)
         {
             self.book = previous;
-            self.fail("메모를 만들지 못했습니다", error, cx);
+            self.fail("노트를 만들지 못했습니다", error, cx);
             return;
         }
         if let Err(error) = self.save_tree() {
             self.book = previous;
             let _ = fs::remove_file(file);
-            self.fail("메모 목록을 저장하지 못했습니다", error, cx);
+            self.fail("노트 목록을 저장하지 못했습니다", error, cx);
             return;
         }
         self.collapsed.remove(&parent);
@@ -246,7 +246,7 @@ impl Edot {
                 dialog
             };
             dialog
-                .title("메모 삭제")
+                .title("노트 삭제")
                 .description(format!("{description}\n파일은 휴지통 폴더에 보관됩니다."))
                 .confirm()
                 .default_confirm()
@@ -278,7 +278,7 @@ impl Edot {
         let ids = match self.book.trash_notes(&self.dir, selected) {
             Ok(ids) => ids,
             Err(error) => {
-                self.fail("메모를 삭제하지 못했습니다", error, cx);
+                self.fail("노트를 삭제하지 못했습니다", error, cx);
                 return false;
             }
         };
@@ -364,7 +364,7 @@ impl Edot {
                 self.fail("이동을 저장하지 못했습니다", error, cx);
             } else {
                 self.collapsed.remove(&target.parent);
-                self.status = "메모를 이동했습니다".into();
+                self.status = "노트를 이동했습니다".into();
             }
         }
         self.drop_target = None;

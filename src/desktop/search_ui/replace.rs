@@ -84,9 +84,9 @@ impl Edot {
             let changes = changes.clone();
             let weak = weak.clone();
             dialog
-                .title("전체 메모 바꾸기")
+                .title("전체 노트 바꾸기")
                 .description(format!(
-                    "{}개 메모의 {count}곳을 바꾸고 저장합니다.",
+                    "{}개 노트의 {count}곳을 바꾸고 저장합니다.",
                     changes.len()
                 ))
                 .confirm()
@@ -121,7 +121,7 @@ impl Edot {
                                 tab.dirty = false;
                             }
                         }
-                        this.status = format!("{}개 메모, {count}곳 바꿈", changes.len());
+                        this.status = format!("{}개 노트, {count}곳 바꿈", changes.len());
                         this.queue_search(window, cx);
                         true
                     })

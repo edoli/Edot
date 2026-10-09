@@ -153,8 +153,8 @@ fn double_click_uses_plain_text_word_boundaries(cx: &mut TestAppContext) {
             ("foo.bar", 5, "bar"),
             ("alpha-beta", 2, "alpha"),
             ("name_value", 4, "name_value"),
-            ("한글.메모", 1, "한글"),
-            ("한글.메모", 4, "메모"),
+            ("한글.노트", 1, "한글"),
+            ("한글.노트", 4, "노트"),
             ("-3.14", 2, "-3.14"),
         ] {
             editor.update(cx, |s, cx| s.set_value(text, window, cx));

@@ -58,7 +58,7 @@ impl Edot {
             let text = match fs::read_to_string(self.book.file(&self.dir, id)) {
                 Ok(text) => text,
                 Err(error) => {
-                    self.fail("메모를 열지 못했습니다", error, cx);
+                    self.fail("노트를 열지 못했습니다", error, cx);
                     return false;
                 }
             };
@@ -181,7 +181,7 @@ impl Edot {
             }
             if let Err(error) = replace_file(&path, text.as_bytes()) {
                 self.fail(
-                    "메모를 저장하지 못했습니다. 수정 내용은 편집기에 남아 있습니다",
+                    "노트를 저장하지 못했습니다. 수정 내용은 편집기에 남아 있습니다",
                     error,
                     cx,
                 );

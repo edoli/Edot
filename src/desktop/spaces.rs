@@ -223,7 +223,7 @@ impl Edot {
                 .default_confirm()
                 .dont_ask_again()
                 .description(format!(
-                    "‘{name}’을 목록에서 삭제할까요?\n폴더와 메모 파일은 그대로 보관됩니다."
+                    "‘{name}’을 목록에서 삭제할까요?\n폴더와 노트 파일은 그대로 보관됩니다."
                 ))
                 .button_props(
                     DialogButtonProps::default()
@@ -259,7 +259,7 @@ impl Edot {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("메모 space 폴더 선택".into()),
+            prompt: Some("노트 space 폴더 선택".into()),
         });
         cx.spawn_in(window, async move |this, cx| match prompt.await {
             Ok(Ok(Some(paths))) => {

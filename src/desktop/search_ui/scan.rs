@@ -28,7 +28,7 @@ impl Edot {
             }
         };
         self.search_results.scanning = true;
-        self.global.message = "전체 메모 검색 중…".into();
+        self.global.message = "전체 노트 검색 중…".into();
         self.search_results.scan_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(SEARCH_DELAY).await;
             let Ok(ids) = this.update(cx, |this, _| {
@@ -78,7 +78,7 @@ impl Edot {
                 if index % 16 == 0 {
                     let _ = this.update(cx, |this, cx| {
                         this.global.message =
-                            format!("전체 메모 검색 중… {}/{}", index + 1, ids.len());
+                            format!("전체 노트 검색 중… {}/{}", index + 1, ids.len());
                         cx.notify();
                     });
                 }
@@ -109,7 +109,7 @@ impl Edot {
             .iter()
             .map(|r| r.matches.len())
             .sum();
-        self.global.message = format!("{total}곳 · {}개 메모", self.search_results.groups.len());
+        self.global.message = format!("{total}곳 · {}개 노트", self.search_results.groups.len());
         if self.search_results.errors > 0 {
             self.global
                 .message
@@ -216,7 +216,7 @@ impl Edot {
                             this.queue_note_search(next, window, cx);
                         }
                     }
-                    Err(error) => this.global.message = format!("메모 검색 실패: {error}"),
+                    Err(error) => this.global.message = format!("노트 검색 실패: {error}"),
                 }
                 cx.notify();
             });

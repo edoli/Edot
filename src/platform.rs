@@ -28,7 +28,7 @@ impl StoreLock {
         let lock = Self(handle);
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             return Err(io::Error::other(
-                "같은 메모 저장소가 이미 다른 창에서 열려 있습니다.",
+                "같은 노트 저장소가 이미 다른 창에서 열려 있습니다.",
             ));
         }
         Ok(lock)

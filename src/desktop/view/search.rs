@@ -12,9 +12,9 @@ impl Edot {
             .small()
             .text_size(px(SEARCH_INPUT_FONT_SIZE))
             .aria_label(if global {
-                "전체 메모 검색어"
+                "전체 노트 검색어"
             } else {
-                "현재 메모 검색어"
+                "현재 노트 검색어"
             })
             .suffix(
                 Button::new(if global { "global-case" } else { "local-case" })
@@ -91,7 +91,7 @@ impl Edot {
                             .small()
                             .text_size(px(SEARCH_INPUT_FONT_SIZE))
                             .aria_label(if global {
-                                "전체 메모 바꿀 내용"
+                                "전체 노트 바꿀 내용"
                             } else {
                                 "바꿀 내용"
                             })
@@ -320,7 +320,7 @@ impl Edot {
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(if self.global.query.read(cx).value().is_empty() {
-                                        "메모 본문에서 검색합니다"
+                                        "노트 본문에서 검색합니다"
                                     } else {
                                         "일치하는 텍스트가 없습니다"
                                     }),
@@ -422,7 +422,7 @@ impl Edot {
             let title = self
                 .book
                 .get(id)
-                .map_or("메모", |n| n.title.as_str())
+                .map_or("노트", |n| n.title.as_str())
                 .to_owned();
             item = item
                 .child(

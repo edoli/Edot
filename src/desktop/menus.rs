@@ -17,7 +17,7 @@ impl Edot {
         let nested = self.book.get(id).is_some_and(|note| note.parent != 0);
         if !multiple {
             let weak = view.clone();
-            menu = menu.item(PopupMenuItem::new("하위 메모 추가").on_click(
+            menu = menu.item(PopupMenuItem::new("하위 노트 추가").on_click(
                 move |_, window, cx| {
                     let _ = weak.update(cx, |this, cx| this.create_note(Some(id), window, cx));
                 },

@@ -351,7 +351,7 @@ pub fn run() {
     let loaded = paths
         .and_then(|paths| LoadedSpace::open(&paths))
         .map_err(|error| {
-            format!("메모 저장소를 열지 못했습니다. 파일을 덮어쓰지 않습니다.\n{error}")
+            format!("노트 저장소를 열지 못했습니다. 파일을 덮어쓰지 않습니다.\n{error}")
         });
     gpui_platform::application()
         .with_assets(component::Assets)

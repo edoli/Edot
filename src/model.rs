@@ -48,7 +48,7 @@ fn decode_note_id(text: &str) -> Option<NoteId> {
 fn random_note_id() -> io::Result<NoteId> {
     let mut bytes = [0u8; 8];
     getrandom::fill(&mut bytes)
-        .map_err(|error| io::Error::other(format!("메모 ID를 생성하지 못했습니다 ({error})")))?;
+        .map_err(|error| io::Error::other(format!("노트 ID를 생성하지 못했습니다 ({error})")))?;
     Ok(NoteId::from_le_bytes(bytes))
 }
 
@@ -158,7 +158,7 @@ impl Notebook {
                 id,
                 parent: 0,
                 order,
-                title: format!("복구된 메모 {id}"),
+                title: format!("복구된 노트 {id}"),
             });
         }
         // 0 = unseen, 1 = on this parent chain, 2 = checked. Each note is
@@ -242,7 +242,7 @@ impl Notebook {
             return Ok(id);
         }
         Err(io::Error::other(
-            "중복되지 않는 메모 ID를 생성하지 못했습니다.",
+            "중복되지 않는 노트 ID를 생성하지 못했습니다.",
         ))
     }
 

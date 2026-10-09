@@ -37,7 +37,7 @@ impl Edot {
             let title = self
                 .book
                 .get(id)
-                .map_or("메모", |note| note.title.as_str())
+                .map_or("노트", |note| note.title.as_str())
                 .to_owned();
             let tooltip = title.clone();
             let active = self.session.active == Some(id);
@@ -214,7 +214,7 @@ impl Edot {
                     .child(Scrollbar::horizontal(&self.tab_scroll)),
             )
             .child(
-                tool("new-note", IconName::Plus, "새 메모 · Ctrl+N")
+                tool("new-note", IconName::Plus, "새 노트 · Ctrl+N")
                     .w(px(40.))
                     .h(px(34.))
                     .on_click(

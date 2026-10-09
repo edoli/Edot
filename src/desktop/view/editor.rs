@@ -25,7 +25,7 @@ impl Edot {
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("메모를 선택하거나 Ctrl + N으로 새 메모를 만드세요"),
+                        .child("노트를 선택하거나 Ctrl + N으로 새 노트를 만드세요"),
                 )
                 .into_any_element();
         };
@@ -96,7 +96,7 @@ impl Edot {
                     .font_family(self.settings.font.clone())
                     .text_size(px(font_size))
                     .p_0()
-                    .aria_label("메모 본문"),
+                    .aria_label("노트 본문"),
             )
             .context_menu(move |menu, _, cx| {
                 menus::editor_menu(menu, &editor_menu, weak.clone(), cx)

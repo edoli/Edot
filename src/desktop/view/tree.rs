@@ -28,9 +28,9 @@ impl Edot {
                         Button::new("notes-mode")
                             .small()
                             .label(if width < 220. {
-                                "메모"
+                                "노트"
                             } else {
-                                "메모 목록"
+                                "노트 목록"
                             })
                             .h_full()
                             .flex_1()
@@ -171,7 +171,7 @@ impl Edot {
                         .right_4()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Ctrl + N으로 첫 메모를 만드세요"),
+                        .child("Ctrl + N으로 첫 노트를 만드세요"),
                 )
             })
             .on_mouse_down(

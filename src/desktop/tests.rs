@@ -59,9 +59,9 @@ impl Fixture {
         ));
         let lock = StoreLock::acquire(&dir).unwrap();
         let mut book = Notebook::load(&dir).unwrap();
-        let first = book.add(0, "첫 메모".into()).unwrap();
-        let second = book.add(0, "둘째 메모".into()).unwrap();
-        let third = book.add(first, "하위 메모".into()).unwrap();
+        let first = book.add(0, "첫 노트".into()).unwrap();
+        let second = book.add(0, "둘째 노트".into()).unwrap();
+        let third = book.add(first, "하위 노트".into()).unwrap();
         for (id, text) in [
             (first, "🙂 한글12\r\n한글3\rkeep\n"),
             (second, "closed needle\n"),
