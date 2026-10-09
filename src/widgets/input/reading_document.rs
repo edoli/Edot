@@ -37,7 +37,11 @@ pub(super) enum Kind {
     Code,
     Mermaid(Result<Arc<super::mermaid::Graph>, &'static str>),
     Rule,
-    TableRow { header: bool, alignment: Vec<Align> },
+    TableRow {
+        header: bool,
+        last: bool,
+        alignment: Vec<Align>,
+    },
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Align {
@@ -188,6 +192,7 @@ impl Builder {
         self.start(
             Kind::TableRow {
                 header,
+                last: false,
                 alignment: self.table.clone(),
             },
             range,
@@ -322,6 +327,13 @@ pub(super) fn parse(text: &str) -> Document {
                 TagEnd::TableHead | TagEnd::TableRow => b.finish_row(),
                 TagEnd::Table => {
                     b.finish_row();
+                    if let Some(Block {
+                        kind: Kind::TableRow { last, .. },
+                        ..
+                    }) = b.document.blocks.last_mut()
+                    {
+                        *last = true;
+                    }
                     b.table.clear();
                 }
                 _ => {}

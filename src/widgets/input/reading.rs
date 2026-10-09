@@ -10,9 +10,19 @@ struct Fragment {
     layout: TextLayout,
     offset: usize,
     tabs: Vec<(usize, usize)>,
+    /// Horizontal painting offset for each visual row of aligned text.
+    aligned_rows: Vec<Pixels>,
 }
 impl Fragment {
-    fn index(&self, position: Point<Pixels>) -> (usize, bool) {
+    fn index(&self, mut position: Point<Pixels>) -> (usize, bool) {
+        let row = ((position.y - self.layout.bounds().top()).max(px(0.))
+            / self.layout.line_height())
+        .floor() as usize;
+        if let Some(offset) = self.aligned_rows.get(row) {
+            // GPUI paints text alignment but its TextLayout hit test uses the
+            // unaligned origin. Match each visual row's painted glyph position.
+            position.x -= *offset;
+        }
         let hit = self.layout.index_for_position(position);
         let index = *hit.as_ref().unwrap_or_else(|i| i);
         let mut expansion = 0;
@@ -104,6 +114,32 @@ impl Element for SelectableText {
         self.text.prepaint(id, inspector, bounds, state, w, cx);
         if self.fragment.layout.len() == 0 {
             return;
+        }
+        self.fragment.aligned_rows.clear();
+        let factor = match w.text_style().text_align {
+            TextAlign::Left => 0.,
+            TextAlign::Center => 0.5,
+            TextAlign::Right => 1.,
+        };
+        if factor != 0. {
+            for line in self.fragment.layout.line_layouts() {
+                let mut start = px(0.);
+                for end in line
+                    .wrap_boundaries
+                    .iter()
+                    .map(|b| {
+                        line.unwrapped_layout.runs[b.run_ix].glyphs[b.glyph_ix]
+                            .position
+                            .x
+                    })
+                    .chain(std::iter::once(line.unwrapped_layout.width))
+                {
+                    self.fragment
+                        .aligned_rows
+                        .push((bounds.size.width - (end - start)) * factor);
+                    start = end;
+                }
+            }
         }
         let mut layouts = self.layouts.borrow_mut();
         layouts.retain(|f| f.offset != self.fragment.offset);
@@ -595,6 +631,7 @@ fn render_text(
         layout: text.layout().clone(),
         offset,
         tabs,
+        aligned_rows: Vec::new(),
     };
     SelectableText {
         text,
@@ -667,23 +704,33 @@ fn render_block(
                 );
             }
         }
-        Kind::TableRow { header, alignment } => {
+        Kind::TableRow {
+            header, alignment, ..
+        } => {
             let mut row = div()
+                .id(("reading-table-row", index))
+                .debug_selector(move || format!("reading-table-row-{index}"))
                 .h_flex()
                 .items_stretch()
                 .w_full()
+                .border_x_1()
                 .border_b_1()
                 .border_color(cx.theme().border)
                 .when(*header, |d| {
-                    d.bg(cx.theme().accent).font_weight(FontWeight::BOLD)
+                    d.border_t_1()
+                        .bg(cx.theme().accent)
+                        .font_weight(FontWeight::BOLD)
                 });
             for (column, cell) in block.cells.iter().enumerate() {
                 row = row.child(
                     div()
+                        .id(("reading-table-cell", column))
+                        .debug_selector(move || format!("reading-table-cell-{index}-{column}"))
                         .flex_1()
                         .min_w_0()
+                        .overflow_hidden()
                         .p_2()
-                        .border_l_1()
+                        .when(column > 0, |d| d.border_l_1())
                         .border_color(cx.theme().border)
                         .when(alignment.get(column) == Some(&Align::Right), |d| {
                             d.text_right()
@@ -735,15 +782,20 @@ fn render_block(
             )))
         })
         .child(body);
+    let (top, bottom) = match block.kind {
+        Kind::TableRow { header, last, .. } => (
+            if header { px(8.) } else { px(0.) },
+            if last { px(8.) } else { px(0.) },
+        ),
+        _ if block.prefix.is_empty() => (px(8.), px(8.)),
+        _ => (px(2.), px(2.)),
+    };
     div()
         .id(("reading-block", index))
         .debug_selector(move || format!("reading-block-{index}"))
         .px_4()
-        .py(if block.prefix.is_empty() {
-            px(8.)
-        } else {
-            px(2.)
-        })
+        .pt(top)
+        .pb(bottom)
         .w_full()
         .child(
             div()
@@ -771,6 +823,140 @@ fn web_url(target: &str) -> bool {
 mod tests {
     use super::{Copy, InputState, SelectAll, TextMode};
     use gpui::{AppContext, MouseButton, point, px};
+
+    #[gpui::test]
+    fn tables_keep_rows_connected_columns_aligned_and_hits_on_painted_text(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::widgets::init);
+        let source = format!(
+            "| 이름 | 가운데 | 오른쪽 |\n| :--- | :---: | ---: |\n| 짧게 | 한글 | [문서](https://example.org/docs) |\n| {} | | right aligned text that wraps onto several lines |\n\n표 다음 문단\n",
+            "긴 내용이 줄 바꿈됩니다. ".repeat(12)
+        );
+        let window = cx.add_window(|w, cx| {
+            let mut state = InputState::new(w, cx)
+                .soft_wrap(true)
+                .default_value(source.clone());
+            state.set_read_only(true, cx);
+            state.focus(w, cx);
+            state
+        });
+        let editor = window.root(cx).unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let row_selectors = [
+            "reading-table-row-0",
+            "reading-table-row-1",
+            "reading-table-row-2",
+        ];
+        let cell_selectors = [
+            [
+                "reading-table-cell-0-0",
+                "reading-table-cell-0-1",
+                "reading-table-cell-0-2",
+            ],
+            [
+                "reading-table-cell-1-0",
+                "reading-table-cell-1-1",
+                "reading-table-cell-1-2",
+            ],
+            [
+                "reading-table-cell-2-0",
+                "reading-table-cell-2-1",
+                "reading-table-cell-2-2",
+            ],
+        ];
+        for width in [px(900.), px(420.)] {
+            cx.simulate_window_resize(window.into(), gpui::size(width, px(900.)));
+            visual.update(|w, cx| {
+                w.refresh();
+                w.draw(cx).clear(cx);
+            });
+            let rows = row_selectors.map(|s| visual.debug_bounds(s).unwrap());
+            let cells = cell_selectors.map(|row| row.map(|s| visual.debug_bounds(s).unwrap()));
+            for pair in rows.windows(2) {
+                assert!(
+                    (pair[0].bottom() - pair[1].top()).abs() < px(1.),
+                    "table rows must touch"
+                );
+            }
+            for row in cells.iter().skip(1) {
+                for (header, cell) in cells[0].iter().zip(row) {
+                    assert!((header.left() - cell.left()).abs() < px(1.));
+                    assert!((header.right() - cell.right()).abs() < px(1.));
+                }
+            }
+            assert!(
+                rows[2].size.height > rows[1].size.height,
+                "long cells must wrap and grow the row"
+            );
+            let mut link = None;
+            for column in [1, 2] {
+                let position = editor.read_with(cx, |s, _| {
+                    let cell = &s.reading.document.blocks[1].cells[column];
+                    let layouts = s.reading.layouts.borrow();
+                    let f = layouts.iter().find(|f| f.offset == cell.offset).unwrap();
+                    let text_width = f.layout.line_layouts()[0].unwrapped_layout.width;
+                    let bounds = cells[1][column];
+                    let x = if column == 1 {
+                        bounds.center().x - text_width / 2.
+                    } else {
+                        bounds.right() - px(8.) - text_width
+                    };
+                    let position = point(
+                        x + px(2.),
+                        bounds.top() + px(8.) + f.layout.line_height() / 2.,
+                    );
+                    assert_eq!(
+                        s.reading_selection().hit(position),
+                        Some((cell.offset, true)),
+                        "aligned glyph must hit its first character"
+                    );
+                    position
+                });
+                if column == 2 {
+                    link = Some(position);
+                }
+            }
+            let link = link.unwrap();
+            editor.read_with(cx, |s, _| {
+                let cell = &s.reading.document.blocks[2].cells[2];
+                let layouts = s.reading.layouts.borrow();
+                let f = layouts.iter().find(|f| f.offset == cell.offset).unwrap();
+                let line = &f.layout.line_layouts()[0];
+                if let Some(boundary) = line.wrap_boundaries.last() {
+                    let glyph =
+                        &line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix];
+                    let width = line.unwrapped_layout.width - glyph.position.x;
+                    let bounds = cells[2][2];
+                    let position = point(
+                        bounds.right() - px(8.) - width + px(2.),
+                        bounds.top()
+                            + px(8.)
+                            + f.layout.line_height() * (line.wrap_boundaries.len() as f32 + 0.5),
+                    );
+                    assert_eq!(
+                        s.reading_selection().hit(position),
+                        Some((cell.offset + glyph.index, true)),
+                        "wrapped alignment must also match the painted row"
+                    );
+                }
+            });
+            visual.simulate_mouse_down(link, MouseButton::Left, Default::default());
+            visual.simulate_mouse_up(link, MouseButton::Left, Default::default());
+            assert_eq!(cx.opened_url().as_deref(), Some("https://example.org/docs"));
+            visual.update(|w, cx| {
+                w.dispatch_action(Box::new(SelectAll), cx);
+                w.dispatch_action(Box::new(Copy), cx);
+            });
+            editor.read_with(cx, |s, cx| {
+                assert_eq!(
+                    cx.read_from_clipboard().unwrap().text().unwrap(),
+                    s.reading.document.text()
+                );
+                assert_eq!(s.value(), source);
+            });
+        }
+    }
 
     #[gpui::test]
     fn reading_selection_copies_unicode_across_blocks_and_cells_without_editing(
