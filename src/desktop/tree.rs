@@ -247,7 +247,7 @@ impl Edot {
             };
             dialog
                 .title("메모 삭제")
-                .description(description)
+                .description(format!("{description}\n파일은 휴지통 폴더에 보관됩니다."))
                 .confirm()
                 .default_confirm()
                 .dont_ask_again()
