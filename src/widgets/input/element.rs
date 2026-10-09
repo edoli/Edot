@@ -10,7 +10,7 @@ impl IntoElement for EditorElement {
 }
 impl Element for EditorElement {
     type RequestLayoutState = ();
-    type PrepaintState = (Vec<(bool, Hitbox)>, Option<Hitbox>);
+    type PrepaintState = (Vec<(bool, Hitbox)>, Option<Hitbox>, Option<Hitbox>);
     fn id(&self) -> Option<ElementId> {
         None
     }
@@ -38,7 +38,17 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        self.0.update(cx, |s, _| s.layout(bounds, window));
+        self.0.update(cx, |s, cx| {
+            s.layout(bounds, window, cx);
+            let modifiers = window.modifiers();
+            s.link_hover = !s.selecting
+                && s.scroll_drag.is_none()
+                && modifiers.control
+                && !modifiers.alt
+                && !modifiers.shift
+                && !modifiers.platform
+                && s.link_at(window.mouse_position()).is_some();
+        });
         let state = self.0.read(cx);
         let capture = (state.scroll_drag.is_some()
             || state.selecting && state.column_anchor.is_some())
@@ -59,7 +69,10 @@ impl Element for EditorElement {
                 })
             })
             .collect();
-        (bars, capture)
+        let link = state
+            .link_hover
+            .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal));
+        (bars, capture, link)
     }
     fn paint(
         &mut self,
@@ -77,6 +90,9 @@ impl Element for EditorElement {
             .find(|(_, hitbox)| hitbox.is_hovered(window))
             .map(|(axis, _)| *axis);
         self.0.update(cx, |s, _| s.scroll_hover = hovered);
+        if let Some(hitbox) = &bars.2 {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        }
         for (_, hitbox) in &bars.0 {
             window.set_cursor_style(CursorStyle::Arrow, hitbox);
         }
@@ -88,6 +104,8 @@ impl Element for EditorElement {
             };
             window.set_cursor_style(cursor, hitbox);
         }
+        let entity = self.0.clone();
+        window.on_modifiers_changed(move |_, _, cx| entity.update(cx, |_, cx| cx.notify()));
         let entity = self.0.clone();
         let hitboxes = bars.0.clone();
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
@@ -111,6 +129,17 @@ impl Element for EditorElement {
                     .map(|(axis, _)| *axis);
                 if s.scroll_hover != hover {
                     s.scroll_hover = hover;
+                    cx.notify();
+                }
+                let link_hover = !s.selecting
+                    && s.scroll_drag.is_none()
+                    && e.modifiers.control
+                    && !e.modifiers.alt
+                    && !e.modifiers.shift
+                    && !e.modifiers.platform
+                    && s.link_at(e.position).is_some();
+                if s.link_hover != link_hover {
+                    s.link_hover = link_hover;
                     cx.notify();
                 }
                 if s.scroll_drag.is_some() || s.selecting && s.column_anchor.is_some() {

@@ -68,6 +68,7 @@ const SECTIONS: &[ShortcutSection] = &[
             ("Ctrl+- / Ctrl+숫자패드 -", "본문 축소"),
             ("Ctrl+0", "본문 확대율 100%로 초기화"),
             ("Ctrl+휠", "본문 확대 / 축소"),
+            ("Ctrl+클릭", "본문의 웹 링크를 기본 브라우저에서 열기"),
         ],
     },
     ShortcutSection {

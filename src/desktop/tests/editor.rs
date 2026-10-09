@@ -138,6 +138,88 @@ fn editor_graphemes_crlf_clipboard_and_redo(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn web_link_ctrl_click_opens_exact_urls_after_tabs_wrapping_and_scrolling(cx: &mut TestAppContext) {
+    use gpui::InputEvent as _;
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, window, cx| {
+        this.focus_editor(window, cx);
+        this.active_editor().unwrap()
+    });
+    let control = gpui::Modifiers {
+        control: true,
+        ..Default::default()
+    };
+    let mut click = |text: &str, target: &str, wrap: bool, modifiers: gpui::Modifiers| {
+        cx.update_window(f.window, |_, window, cx| {
+            let byte = text.find(target).unwrap();
+            let character = text[..byte].encode_utf16().count();
+            editor.update(cx, |state, cx| {
+                state.set_value(text, window, cx);
+                state.set_soft_wrap(wrap, window, cx);
+                state.set_selected_range(byte..byte, cx);
+            });
+            window.render_frame(cx);
+            let mut handler = ElementInputHandler::new(Bounds::default(), editor.clone());
+            let bounds = handler
+                .bounds_for_range(character..character + 1, window, cx)
+                .unwrap();
+            let position = point(bounds.left() + bounds.size.width * 0.25, bounds.center().y);
+            let selection = editor.read(cx).selected_range();
+            let revision = editor.read(cx).revision;
+            window.dispatch_event(
+                gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    modifiers,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    modifiers,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert_eq!(editor.read(cx).value(), text);
+            assert_eq!(editor.read(cx).revision, revision);
+            if modifiers.control {
+                assert_eq!(editor.read(cx).selected_range(), selection);
+            }
+        })
+        .unwrap();
+        cx.opened_url()
+    };
+    let text = "한글\t(https://example.com/a_(b)).\r\n";
+    assert!(click(text, "a_(b)", true, Default::default()).is_none());
+    assert!(click(text, ").", true, control).is_none());
+    assert_eq!(
+        click(text, "a_(b)", true, control).as_deref(),
+        Some("https://example.com/a_(b)")
+    );
+    let long = format!("앞\twww.example.org/{}끝", "long-path/".repeat(120));
+    let url = &long[long.find("www.").unwrap()..];
+    assert_eq!(
+        click(&long, "끝", true, control),
+        Some(format!("https://{url}"))
+    );
+    let unwrapped = format!(
+        "{}\r\n앞\tHTTP://localhost:3000/경로",
+        "빈 줄\r\n".repeat(80)
+    );
+    assert_eq!(
+        click(&unwrapped, "경로", false, control).as_deref(),
+        Some("HTTP://localhost:3000/경로")
+    );
+}
+
+#[gpui::test]
 fn double_click_uses_plain_text_word_boundaries(cx: &mut TestAppContext) {
     use gpui::InputEvent as _;
     let f = Fixture::new(cx);

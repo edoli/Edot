@@ -48,6 +48,7 @@ struct Paragraph {
     top: Pixels,
     line: WrappedLine,
     tabs: Vec<(usize, usize, usize)>,
+    links: Vec<Range<usize>>,
 }
 pub struct InputState {
     focus: FocusHandle,
@@ -69,6 +70,7 @@ pub struct InputState {
     focused: bool,
     scroll_drag: Option<(bool, Pixels, Pixels)>,
     scroll_hover: Option<bool>,
+    link_hover: bool,
     wheel_gesture: OngoingScroll,
     multiline: bool,
     wrap: bool,
@@ -76,7 +78,7 @@ pub struct InputState {
     bounds: Bounds<Pixels>,
     content_padding: Edges<Pixels>,
     lines: Vec<Paragraph>,
-    layout_key: Option<(u64, Pixels, Pixels, Font, Hsla)>,
+    layout_key: Option<(u64, Pixels, Pixels, Font, Hsla, Hsla)>,
     line_height: Pixels,
     content_size: Size<Pixels>,
     selecting: bool,
@@ -147,6 +149,7 @@ impl InputState {
             focused: false,
             scroll_drag: None,
             scroll_hover: None,
+            link_hover: false,
             wheel_gesture: OngoingScroll::default(),
             multiline: false,
             wrap: false,
@@ -317,6 +320,7 @@ mod element;
 mod history;
 mod ime;
 mod layout;
+mod links;
 mod navigation;
 mod selection;
 pub use element::{Input, Textarea};

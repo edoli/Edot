@@ -421,6 +421,16 @@ impl InputState {
             cx.stop_propagation();
             return;
         }
+        if e.modifiers.control
+            && !e.modifiers.alt
+            && !e.modifiers.shift
+            && !e.modifiers.platform
+            && self.open_link_at(e.position, cx)
+        {
+            self.selecting = false;
+            cx.stop_propagation();
+            return;
+        }
         if self.multiline
             && e.modifiers.alt
             && e.modifiers.shift

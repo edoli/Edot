@@ -1,14 +1,17 @@
 //! Text shaping, content scrolling, painting and scrollbar geometry.
 use super::*;
 
+pub(super) fn display_index(byte: usize, tabs: &[(usize, usize, usize)]) -> usize {
+    byte + tabs
+        .iter()
+        .filter(|(source, _, _)| *source < byte)
+        .map(|(_, _, spaces)| spaces - 1)
+        .sum::<usize>()
+}
+
 impl Paragraph {
     fn display_index(&self, byte: usize) -> usize {
-        byte + self
-            .tabs
-            .iter()
-            .filter(|(source, _, _)| *source < byte)
-            .map(|(_, _, spaces)| spaces - 1)
-            .sum::<usize>()
+        display_index(byte, &self.tabs)
     }
     pub(super) fn position(&self, byte: usize, height: Pixels) -> Point<Pixels> {
         self.line
@@ -42,7 +45,7 @@ impl Paragraph {
         display.saturating_sub(removed).min(self.end - self.start)
     }
 }
-fn expand_tabs(text: &str) -> (SharedString, Vec<(usize, usize, usize)>) {
+pub(super) fn expand_tabs(text: &str) -> (SharedString, Vec<(usize, usize, usize)>) {
     if !text.contains('\t') {
         return (text.to_owned().into(), vec![]);
     }
@@ -76,7 +79,7 @@ impl InputState {
             .min(px(0.))
             .max(-(self.content_size.height - self.bounds.size.height).max(px(0.)));
     }
-    pub(super) fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window) {
+    pub(super) fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &App) {
         self.bounds = bounds;
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -103,7 +106,15 @@ impl InputState {
         } else {
             style.color
         };
-        let key = (self.revision, width, font_size, style.font(), color);
+        let link_color = cx.theme().primary;
+        let key = (
+            self.revision,
+            width,
+            font_size,
+            style.font(),
+            color,
+            link_color,
+        );
         if self.layout_key.as_ref() != Some(&key) {
             self.lines.clear();
             let mut start = 0;
@@ -114,6 +125,11 @@ impl InputState {
                     .find(['\r', '\n'])
                     .map_or(display.len(), |i| start + i);
                 let (value, tabs) = expand_tabs(&display[start..end]);
+                let links = if self.multiline && !self.content.is_empty() {
+                    links::ranges(&display[start..end])
+                } else {
+                    Vec::new()
+                };
                 let run = TextRun {
                     len: value.len(),
                     font: style.font(),
@@ -122,10 +138,15 @@ impl InputState {
                     underline: None,
                     strikethrough: None,
                 };
+                let runs = links::text_runs(value.len(), &tabs, &links, &run, link_color);
                 if let Ok(lines) = window.text_system().shape_text(
                     value,
                     font_size,
-                    &[run],
+                    if runs.is_empty() {
+                        std::slice::from_ref(&run)
+                    } else {
+                        &runs
+                    },
                     self.wrap.then_some(width),
                     None,
                 ) {
@@ -138,6 +159,7 @@ impl InputState {
                             top,
                             line,
                             tabs: tabs.clone(),
+                            links: links.clone(),
                         });
                         top += height;
                     }
