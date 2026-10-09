@@ -26,7 +26,7 @@ impl Edot {
         {
             editor.update(cx, |state, cx| {
                 if state.is_read_only() {
-                    state.set_text_mode(TextMode::Markdown, cx);
+                    state.set_read_only(false, cx);
                 }
                 state.set_selected_range(editing::byte_range(&text, key.range), cx);
                 state.replace(edit.replacement, window, cx);

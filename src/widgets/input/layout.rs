@@ -304,7 +304,7 @@ impl InputState {
                 }
             }
         }
-        if focused && self.blink {
+        if focused && self.blink && !self.is_read_only() {
             for selection in &self.extra {
                 let at = if selection.reversed {
                     selection.range.start

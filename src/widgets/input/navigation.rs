@@ -158,10 +158,18 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_read_only() {
+        let key = event.keystroke.key.as_str();
+        if self.is_read_only()
+            && !matches!(
+                key,
+                "left" | "right" | "up" | "down" | "home" | "end" | "pageup" | "pagedown"
+            )
+        {
+            if matches!(key, "backspace" | "delete" | "enter") {
+                cx.stop_propagation();
+            }
             return;
         }
-        let key = event.keystroke.key.as_str();
         let ctrl = event.keystroke.modifiers.control;
         let shift = event.keystroke.modifiers.shift;
         if event.keystroke.modifiers.alt || event.keystroke.modifiers.platform {

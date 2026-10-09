@@ -20,7 +20,7 @@ impl InputState {
             return;
         }
         self.text_mode = mode;
-        self.stop_preview_drag();
+        self.stop_reading_drag();
         if self.is_read_only() {
             self.finish_composition();
         }
@@ -28,12 +28,13 @@ impl InputState {
         self.highlighting.revision = None;
         self.layout_key = None;
         self.ensure_highlighting(cx);
-        self.ensure_preview(cx);
+        self.ensure_reading(cx);
         cx.notify();
     }
 
     pub(super) fn ensure_highlighting(&mut self, cx: &mut Context<Self>) {
         if !self.multiline
+            || self.is_read_only()
             || self.text_mode != TextMode::Markdown
             || self.highlighting.revision == Some(self.revision)
         {
@@ -59,7 +60,7 @@ impl InputState {
                     .spawn(async move { markdown::parse(&content) })
                     .await;
                 let Ok(next) = this.update(cx, |s, cx| {
-                    if s.text_mode != TextMode::Markdown {
+                    if s.text_mode != TextMode::Markdown || s.is_read_only() {
                         s.highlighting.task = None;
                         return None;
                     }

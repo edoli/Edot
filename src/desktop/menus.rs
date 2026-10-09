@@ -127,7 +127,7 @@ pub(super) fn editor_menu(
 ) -> PopupMenu {
     let read_only = editor.read(cx).is_read_only();
     let mut menu = if read_only {
-        preview_menu(menu, editor.read(cx).focus_handle(cx))
+        reading_menu(menu, editor.read(cx).focus_handle(cx))
     } else {
         editing_menu(menu, editor.read(cx).focus_handle(cx), false)
     }
@@ -146,7 +146,7 @@ pub(super) fn editor_menu(
     menu
 }
 
-fn preview_menu(menu: PopupMenu, focus: FocusHandle) -> PopupMenu {
+fn reading_menu(menu: PopupMenu, focus: FocusHandle) -> PopupMenu {
     menu.action_context(focus)
         .menu("복사", "Ctrl+C", Box::new(component::input::Copy))
         .menu("전체 선택", "Ctrl+A", Box::new(component::input::SelectAll))
@@ -216,11 +216,7 @@ impl Edot {
         let focus = editor.read(cx).focus_handle(cx);
         let weak = editor.downgrade();
         let menu = PopupMenu::build(window, cx, |mut menu, _, _| {
-            let modes = [
-                TextMode::PlainText,
-                TextMode::Markdown,
-                TextMode::MarkdownPreview,
-            ];
+            let modes = [TextMode::PlainText, TextMode::Markdown];
             for mode in modes {
                 let weak = weak.clone();
                 let mut item = PopupMenuItem::new(mode.label()).on_click(move |_, _, cx| {
@@ -296,7 +292,7 @@ impl Edot {
             if tree {
                 self.note_menu(menu.action_context(focus), weak, id)
             } else if read_only {
-                preview_menu(menu, focus)
+                reading_menu(menu, focus)
             } else {
                 editing_menu(menu, focus, true)
             }

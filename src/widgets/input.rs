@@ -18,14 +18,12 @@ pub enum TextMode {
     PlainText,
     #[default]
     Markdown,
-    MarkdownPreview,
 }
 impl TextMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::PlainText => "Plain Text",
             Self::Markdown => "Markdown",
-            Self::MarkdownPreview => "Markdown (preview)",
         }
     }
 }
@@ -90,13 +88,14 @@ pub struct InputState {
     wheel_gesture: OngoingScroll,
     multiline: bool,
     text_mode: TextMode,
+    read_only: bool,
     wrap: bool,
     scroll: Point<Pixels>,
     bounds: Bounds<Pixels>,
     content_padding: Edges<Pixels>,
     lines: Vec<Paragraph>,
     highlighting: highlighting::Highlighting,
-    preview: preview::Preview,
+    reading: reading::Reading,
     layout_key: Option<(u64, Pixels, Pixels, Font, Hsla, Hsla)>,
     line_height: Pixels,
     content_size: Size<Pixels>,
@@ -172,13 +171,14 @@ impl InputState {
             wheel_gesture: OngoingScroll::default(),
             multiline: false,
             text_mode: TextMode::default(),
+            read_only: false,
             wrap: false,
             scroll: point(px(0.), px(0.)),
             bounds: Bounds::default(),
             content_padding: Edges::default(),
             lines: vec![],
             highlighting: highlighting::Highlighting::default(),
-            preview: preview::Preview::default(),
+            reading: reading::Reading::default(),
             layout_key: None,
             line_height: px(24.),
             content_size: Size::default(),
@@ -334,7 +334,7 @@ impl InputState {
     fn moved(&mut self, cx: &mut Context<Self>) {
         self.blink = true;
         self.reveal = true;
-        self.reveal_preview();
+        self.reveal_reading();
         cx.notify();
     }
 }
@@ -348,7 +348,7 @@ mod layout;
 mod links;
 mod markdown;
 mod navigation;
-mod preview;
-mod preview_document;
+mod reading;
+mod reading_document;
 mod selection;
 pub use element::{Input, Textarea};

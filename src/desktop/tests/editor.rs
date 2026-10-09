@@ -1,10 +1,9 @@
 use super::*;
 
 #[gpui::test]
-fn markdown_preview_renders_links_and_blocks_edits_without_losing_source_history(
+fn markdown_reading_renders_links_and_blocks_edits_without_losing_source_history(
     cx: &mut TestAppContext,
 ) {
-    use crate::widgets::TextMode;
     let f = Fixture::new(cx);
     let source = "# 제목\r\n\r\n[문서 링크](https://example.org/docs)\r\n\r\n**굵게** *기울임*\r\n\r\n- 목록\r\n\r\n> 인용\r\n\r\n~~~\r\ncode\r\n~~~\r\n\r\n| A | B |\r\n|---|---|\r\n| a | b |\r\n";
     let editor = f.update(cx, |this, window, cx| {
@@ -22,7 +21,7 @@ fn markdown_preview_renders_links_and_blocks_edits_without_losing_source_history
     let revision = editor.read_with(cx, |s, _| s.revision);
     let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
     visual.update(|window, cx| window.render_frame(cx));
-    let trigger = visual.debug_bounds("text-mode-control").unwrap();
+    let trigger = visual.debug_bounds("reading-mode-control").unwrap();
     visual.simulate_mouse_down(
         trigger.center(),
         gpui::MouseButton::Left,
@@ -33,11 +32,9 @@ fn markdown_preview_renders_links_and_blocks_edits_without_losing_source_history
         gpui::MouseButton::Left,
         Default::default(),
     );
-    f.press(cx, "down");
-    f.press(cx, "enter");
     visual.update(|window, cx| window.render_frame(cx));
-    assert!(visual.debug_bounds("markdown-preview").is_some());
-    let block = visual.debug_bounds("preview-block-1").unwrap();
+    assert!(visual.debug_bounds("markdown-reading").is_some());
+    let block = visual.debug_bounds("reading-block-1").unwrap();
     let link = point(block.left() + px(32.), block.center().y);
     visual.simulate_mouse_down(link, gpui::MouseButton::Left, Default::default());
     visual.simulate_mouse_up(link, gpui::MouseButton::Left, Default::default());
@@ -70,7 +67,7 @@ fn markdown_preview_renders_links_and_blocks_edits_without_losing_source_history
         assert_eq!(editor.read(cx).selected_range(), 2..8);
         assert!(!editor.read(cx).is_composing());
         this.replace_local(true, window, cx);
-        editor.update(cx, |s, cx| s.set_text_mode(TextMode::Markdown, cx));
+        editor.update(cx, |s, cx| s.set_read_only(false, cx));
         this.focus_editor(window, cx);
     });
     f.press(cx, "ctrl-z");
@@ -81,7 +78,7 @@ fn markdown_preview_renders_links_and_blocks_edits_without_losing_source_history
     let external = "# 외부 변경\n\n**새 본문**";
     fs::write(f.dir.join(format!("notes/{}.txt", f.ids[0])), external).unwrap();
     f.update(cx, |this, window, cx| {
-        editor.update(cx, |s, cx| s.set_text_mode(TextMode::MarkdownPreview, cx));
+        editor.update(cx, |s, cx| s.set_read_only(true, cx));
         this.request_file_sync(
             crate::watch::Changes {
                 notes: std::collections::HashSet::from([f.ids[0]]),
@@ -146,6 +143,7 @@ fn status_text_mode_menu_changes_only_the_current_editor(cx: &mut TestAppContext
         assert_eq!(state.value(), original);
         assert_eq!(state.revision, revision);
         assert_eq!(state.selected_range(), 0..4);
+        assert!(!state.is_read_only());
         assert!(!this.open.iter().find(|t| t.id == f.ids[0]).unwrap().dirty);
         assert!(state.focus_handle(cx).is_focused(window));
         assert!(this.keyboard_menu.is_none());
@@ -159,6 +157,66 @@ fn status_text_mode_menu_changes_only_the_current_editor(cx: &mut TestAppContext
             this.active_editor().unwrap().read(cx).text_mode(),
             TextMode::PlainText
         );
+    });
+    visual.update(|window, cx| window.render_frame(cx));
+    let trigger = visual.debug_bounds("reading-mode-control").unwrap();
+    visual.simulate_mouse_down(
+        trigger.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    visual.simulate_mouse_up(
+        trigger.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    visual.update(|window, cx| window.render_frame(cx));
+    assert!(visual.debug_bounds("text-input").is_some());
+    assert!(visual.debug_bounds("markdown-reading").is_none());
+    for key in [
+        "backspace",
+        "delete",
+        "enter",
+        "ctrl-enter",
+        "ctrl-v",
+        "ctrl-x",
+        "ctrl-z",
+        "ctrl-y",
+        "f5",
+        "f6",
+    ] {
+        f.press(cx, key);
+    }
+    cx.update_window(f.window, |_, window, cx| {
+        let mut handler = ElementInputHandler::new(Bounds::default(), editor.clone());
+        handler.replace_text_in_range(None, "입력", window, cx);
+        handler.replace_and_mark_text_in_range(None, "한글", Some(1..1), window, cx);
+    })
+    .unwrap();
+    f.update(cx, |this, window, cx| {
+        assert!(editor.read(cx).is_read_only());
+        assert_eq!(editor.read(cx).text_mode(), TextMode::PlainText);
+        assert_eq!(editor.read(cx).value(), original);
+        assert_eq!(editor.read(cx).revision, revision);
+        assert_eq!(editor.read(cx).selected_range(), 0..4);
+        assert!(!editor.read(cx).is_composing());
+        assert!(!this.open.iter().find(|t| t.id == f.ids[0]).unwrap().dirty);
+        assert!(this.open_note(f.ids[1], true, window, cx));
+        assert!(!this.active_editor().unwrap().read(cx).is_read_only());
+        assert!(this.open_note(f.ids[0], true, window, cx));
+        assert!(editor.read(cx).is_read_only());
+    });
+    f.press(cx, "ctrl-home");
+    f.press(cx, "shift-right");
+    f.press(cx, "ctrl-c");
+    cx.update(|cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "🙂"));
+    f.press(cx, "ctrl-a");
+    f.press(cx, "ctrl-c");
+    cx.update(|cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            original.as_ref()
+        )
     });
     visual.update(|window, cx| window.render_frame(cx));
     let trigger = visual.debug_bounds("text-mode-control").unwrap();
@@ -176,9 +234,28 @@ fn status_text_mode_menu_changes_only_the_current_editor(cx: &mut TestAppContext
     f.press(cx, "enter");
     f.update(cx, |this, _, cx| {
         assert_eq!(editor.read(cx).text_mode(), TextMode::Markdown);
+        assert!(editor.read(cx).is_read_only());
         assert_eq!(editor.read(cx).value(), original);
         assert_eq!(editor.read(cx).revision, revision);
         assert!(this.keyboard_menu.is_none());
+    });
+    visual.update(|window, cx| window.render_frame(cx));
+    assert!(visual.debug_bounds("markdown-reading").is_some());
+    let trigger = visual.debug_bounds("reading-mode-control").unwrap();
+    visual.simulate_mouse_down(
+        trigger.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    visual.simulate_mouse_up(
+        trigger.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    f.update(cx, |_, window, cx| {
+        assert!(!editor.read(cx).is_read_only());
+        assert_eq!(editor.read(cx).text_mode(), TextMode::Markdown);
+        assert!(editor.read(cx).focus_handle(cx).is_focused(window));
     });
 }
 

@@ -1,6 +1,6 @@
 //! A cached, virtualized GPUI reading view; source editing state stays untouched.
 use super::super::scroll::AutoScroll;
-use super::{markdown::*, preview_document::*, *};
+use super::{markdown::*, reading_document::*, *};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::{cell::RefCell, rc::Rc};
@@ -124,7 +124,7 @@ impl Element for SelectableText {
     }
 }
 
-pub(super) struct Preview {
+pub(super) struct Reading {
     document: Arc<Document>,
     revision: Option<u64>,
     task: Option<Task<()>>,
@@ -139,7 +139,7 @@ pub(super) struct Preview {
     layouts: Rc<RefCell<Vec<Fragment>>>,
     auto_scroll: AutoScroll,
 }
-impl Default for Preview {
+impl Default for Reading {
     fn default() -> Self {
         Self {
             document: Arc::new(Document::default()),
@@ -159,101 +159,122 @@ impl Default for Preview {
     }
 }
 impl InputState {
-    pub(super) fn stop_preview_drag(&mut self) {
-        self.preview.drag = None;
-        self.preview.link = None;
-        self.preview.auto_scroll.stop();
+    pub(super) fn stop_reading_drag(&mut self) {
+        self.reading.drag = None;
+        self.reading.link = None;
+        self.reading.auto_scroll.stop();
     }
     pub fn is_read_only(&self) -> bool {
-        self.text_mode == TextMode::MarkdownPreview
+        self.read_only
+    }
+    pub(super) fn is_markdown_reading(&self) -> bool {
+        self.read_only && self.text_mode == TextMode::Markdown
+    }
+    pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
+        if self.read_only == read_only {
+            return;
+        }
+        if read_only {
+            self.finish_composition();
+        }
+        self.read_only = read_only;
+        self.blink = true;
+        self.selecting = false;
+        self.column_anchor = None;
+        self.scroll_drag = None;
+        self.stop_reading_drag();
+        self.layout_key = None;
+        self.ensure_highlighting(cx);
+        self.ensure_reading(cx);
+        cx.notify();
     }
     pub fn source_directory(mut self, directory: PathBuf) -> Self {
-        self.preview.directory = directory;
+        self.reading.directory = directory;
         self
     }
-    fn install_preview(&mut self, document: Document, revision: u64, cx: &mut Context<Self>) {
-        self.preview.anchor = 0;
-        self.preview.head = 0;
-        self.preview.drag = None;
-        self.preview.link = None;
-        self.preview.auto_scroll.stop();
-        self.preview.layouts.borrow_mut().clear();
-        self.preview.document = Arc::new(document);
-        self.preview.revision = Some(revision);
-        self.preview.list.reset(self.preview.document.blocks.len());
-        self.reveal_preview();
+    fn install_reading(&mut self, document: Document, revision: u64, cx: &mut Context<Self>) {
+        self.reading.anchor = 0;
+        self.reading.head = 0;
+        self.reading.drag = None;
+        self.reading.link = None;
+        self.reading.auto_scroll.stop();
+        self.reading.layouts.borrow_mut().clear();
+        self.reading.document = Arc::new(document);
+        self.reading.revision = Some(revision);
+        self.reading.list.reset(self.reading.document.blocks.len());
+        self.reveal_reading();
         cx.notify();
     }
     fn reading_selection(&self) -> ReadingSelection {
         ReadingSelection {
-            layouts: self.preview.layouts.clone(),
-            range: self.preview.anchor.min(self.preview.head)
-                ..self.preview.anchor.max(self.preview.head),
+            layouts: self.reading.layouts.clone(),
+            range: self.reading.anchor.min(self.reading.head)
+                ..self.reading.anchor.max(self.reading.head),
         }
     }
-    fn preview_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(start) = self.preview.drag else {
+    fn reading_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(start) = self.reading.drag else {
             return;
         };
-        if !self.is_read_only() {
-            self.preview.drag = None;
-            self.preview.auto_scroll.stop();
+        if !self.is_markdown_reading() {
+            self.reading.drag = None;
+            self.reading.auto_scroll.stop();
             return;
         }
-        let previous = (self.preview.dragged, self.preview.head);
-        self.preview.dragged |=
+        let previous = (self.reading.dragged, self.reading.head);
+        self.reading.dragged |=
             (position.x - start.x).abs() > px(3.) || (position.y - start.y).abs() > px(3.);
-        if self.preview.dragged {
+        if self.reading.dragged {
             if let Some((index, _)) = self.reading_selection().hit(position) {
-                self.preview.head = index.min(self.preview.document.len);
+                self.reading.head = index.min(self.reading.document.len);
             }
-            if previous != (self.preview.dragged, self.preview.head) {
+            if previous != (self.reading.dragged, self.reading.head) {
                 cx.notify();
             }
         }
     }
-    pub(super) fn reveal_preview(&self) {
-        if self.is_read_only() {
+    pub(super) fn reveal_reading(&self) {
+        if self.is_markdown_reading() {
             let index = self
-                .preview
+                .reading
                 .document
                 .blocks
                 .partition_point(|b| b.source.end <= self.cursor());
-            if index < self.preview.document.blocks.len() {
-                self.preview.list.scroll_to_reveal_item(index);
+            if index < self.reading.document.blocks.len() {
+                self.reading.list.scroll_to_reveal_item(index);
             }
         }
     }
-    pub(super) fn ensure_preview(&mut self, cx: &mut Context<Self>) {
-        if !self.is_read_only() || self.preview.revision == Some(self.revision) {
+    pub(super) fn ensure_reading(&mut self, cx: &mut Context<Self>) {
+        if !self.is_markdown_reading() || self.reading.revision == Some(self.revision) {
             return;
         }
         if self.content.len() <= 64 * 1024 {
-            self.install_preview(
-                super::preview_document::parse(&self.content),
+            self.install_reading(
+                super::reading_document::parse(&self.content),
                 self.revision,
                 cx,
             );
             return;
         }
-        if self.preview.task.is_some() {
+        if self.reading.task.is_some() {
             return;
         }
         let mut snapshot = (self.revision, self.content.clone());
-        self.preview.task = Some(cx.spawn(async move |this, cx| {
+        self.reading.task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let (revision, content) = snapshot;
                 let document = cx
                     .background_executor()
-                    .spawn(async move { super::preview_document::parse(&content) })
+                    .spawn(async move { super::reading_document::parse(&content) })
                     .await;
                 let Ok(next) = this.update(cx, |s, cx| {
-                    if s.is_read_only() && s.revision == revision {
-                        s.install_preview(document, revision, cx);
-                    } else if s.is_read_only() && s.preview.revision != Some(s.revision) {
+                    if s.is_markdown_reading() && s.revision == revision {
+                        s.install_reading(document, revision, cx);
+                    } else if s.is_markdown_reading() && s.reading.revision != Some(s.revision) {
                         return Some((s.revision, s.content.clone()));
                     }
-                    s.preview.task = None;
+                    s.reading.task = None;
                     None
                 }) else {
                     return;
@@ -265,30 +286,30 @@ impl InputState {
             }
         }));
     }
-    pub(super) fn preview_view(
+    pub(super) fn reading_view(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.ensure_preview(cx);
+        self.ensure_reading(cx);
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let font = (style.font(), font_size);
-        if self.preview.font.as_ref() != Some(&font) {
-            let offset = self.preview.list.logical_scroll_top();
-            self.preview.list.reset(self.preview.document.blocks.len());
-            self.preview.list.scroll_to(offset);
-            self.preview.font = Some(font);
+        if self.reading.font.as_ref() != Some(&font) {
+            let offset = self.reading.list.logical_scroll_top();
+            self.reading.list.reset(self.reading.document.blocks.len());
+            self.reading.list.scroll_to(offset);
+            self.reading.font = Some(font);
         }
-        let document = self.preview.document.clone();
-        let directory = self.preview.directory.clone();
-        self.preview.layouts.borrow_mut().clear();
+        let document = self.reading.document.clone();
+        let directory = self.reading.directory.clone();
+        self.reading.layouts.borrow_mut().clear();
         let selection = self.reading_selection();
         let move_entity = cx.entity();
         let up_entity = cx.entity();
         let reading = div()
-            .id("markdown-preview")
-            .debug_selector(|| "markdown-preview".into())
+            .id("markdown-reading")
+            .debug_selector(|| "markdown-reading".into())
             .relative()
             .size_full()
             .overflow_hidden()
@@ -303,21 +324,21 @@ impl InputState {
                     s.focus(w, cx);
                     if let Some((index, exact)) = s.reading_selection().hit(e.position) {
                         if !e.modifiers.shift {
-                            s.preview.anchor = index;
+                            s.reading.anchor = index;
                         }
-                        s.preview.head = index;
-                        s.preview.drag = Some(e.position);
-                        s.preview.dragged = e.modifiers.shift;
-                        s.preview.link = None;
+                        s.reading.head = index;
+                        s.reading.drag = Some(e.position);
+                        s.reading.dragged = e.modifiers.shift;
+                        s.reading.link = None;
                         if exact && !e.modifiers.shift {
                             let block = s
-                                .preview
+                                .reading
                                 .document
                                 .blocks
                                 .partition_point(|b| b.offset <= index)
                                 .saturating_sub(1);
-                            if let Some(block) = s.preview.document.blocks.get(block) {
-                                s.preview.link = std::iter::once(&block.content)
+                            if let Some(block) = s.reading.document.blocks.get(block) {
+                                s.reading.link = std::iter::once(&block.content)
                                     .chain(&block.cells)
                                     .find_map(|inline| {
                                         inline
@@ -341,45 +362,45 @@ impl InputState {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(|s, _: &Copy, _, cx| {
-                if s.preview.revision != Some(s.revision) {
+                if s.reading.revision != Some(s.revision) {
                     return;
                 }
-                let text = s.preview.document.text_range(s.reading_selection().range);
+                let text = s.reading.document.text_range(s.reading_selection().range);
                 if !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }))
             .on_action(cx.listener(|s, _: &SelectAll, _, cx| {
-                if s.preview.revision != Some(s.revision) {
+                if s.reading.revision != Some(s.revision) {
                     return;
                 }
-                s.preview.anchor = 0;
-                s.preview.head = s.preview.document.len;
-                s.preview.link = None;
+                s.reading.anchor = 0;
+                s.reading.head = s.reading.document.len;
+                s.reading.link = None;
                 cx.notify();
             }))
             .on_key_down(cx.listener(|s, e: &KeyDownEvent, w, cx| {
                 match e.keystroke.key.as_str() {
-                    "up" => s.preview.list.scroll_by(-px(36.)),
-                    "down" => s.preview.list.scroll_by(px(36.)),
-                    "pageup" => s.preview.list.scroll_by(-w.viewport_size().height * 0.8),
+                    "up" => s.reading.list.scroll_by(-px(36.)),
+                    "down" => s.reading.list.scroll_by(px(36.)),
+                    "pageup" => s.reading.list.scroll_by(-w.viewport_size().height * 0.8),
                     "pagedown" | "space" => {
-                        s.preview.list.scroll_by(w.viewport_size().height * 0.8)
+                        s.reading.list.scroll_by(w.viewport_size().height * 0.8)
                     }
-                    "home" => s.preview.list.scroll_to(ListOffset::default()),
-                    "end" => s.preview.list.scroll_to_end(),
+                    "home" => s.reading.list.scroll_to(ListOffset::default()),
+                    "end" => s.reading.list.scroll_to_end(),
                     _ => return,
                 }
                 cx.stop_propagation();
                 cx.notify();
             }));
-        if self.preview.revision != Some(self.revision) {
+        if self.reading.revision != Some(self.revision) {
             return reading
                 .child(
                     div()
                         .p_4()
                         .text_color(cx.theme().muted_foreground)
-                        .child("미리보기 준비 중…"),
+                        .child("읽기 화면 준비 중…"),
                 )
                 .into_any_element();
         }
@@ -389,8 +410,8 @@ impl InputState {
                     |_, _, _| (),
                     move |_, _, window, cx| {
                         move_entity.update(cx, |s, cx| {
-                            if let Some(position) = s.preview.auto_scroll.last_drag_position {
-                                s.preview_drag(position, cx);
+                            if let Some(position) = s.reading.auto_scroll.last_drag_position {
+                                s.reading_drag(position, cx);
                             }
                         });
                         let entity = move_entity.clone();
@@ -399,33 +420,33 @@ impl InputState {
                                 return;
                             }
                             entity.update(cx, |s, cx| {
-                                if s.preview.drag.is_none() {
+                                if s.reading.drag.is_none() {
                                     return;
                                 }
                                 if e.pressed_button != Some(MouseButton::Left) {
-                                    s.preview.drag = None;
-                                    s.preview.link = None;
-                                    s.preview.auto_scroll.stop();
+                                    s.reading.drag = None;
+                                    s.reading.link = None;
+                                    s.reading.auto_scroll.stop();
                                     return;
                                 }
-                                s.preview_drag(e.position, cx);
-                                s.preview.auto_scroll.last_drag_position = Some(e.position);
+                                s.reading_drag(e.position, cx);
+                                s.reading.auto_scroll.last_drag_position = Some(e.position);
                                 let delta = s
-                                    .preview
+                                    .reading
                                     .dragged
                                     .then(|| {
                                         AutoScroll::compute_delta(
                                             e.position.y,
-                                            s.preview.list.viewport_bounds(),
+                                            s.reading.list.viewport_bounds(),
                                         )
                                     })
                                     .flatten();
-                                s.preview.auto_scroll.set(delta, cx, |delta, s, cx| {
-                                    if !s.is_read_only() || s.preview.drag.is_none() {
-                                        s.preview.auto_scroll.stop();
+                                s.reading.auto_scroll.set(delta, cx, |delta, s, cx| {
+                                    if !s.is_markdown_reading() || s.reading.drag.is_none() {
+                                        s.reading.auto_scroll.stop();
                                         return;
                                     }
-                                    s.preview.list.scroll_by(delta);
+                                    s.reading.list.scroll_by(delta);
                                     cx.notify();
                                 });
                             });
@@ -436,15 +457,15 @@ impl InputState {
                                 return;
                             }
                             entity.update(cx, |s, cx| {
-                                if s.preview.drag.is_none() {
+                                if s.reading.drag.is_none() {
                                     return;
                                 }
-                                s.preview_drag(e.position, cx);
-                                s.preview.drag = None;
-                                s.preview.auto_scroll.stop();
-                                if let Some(target) = s.preview.link.take()
-                                    && !s.preview.dragged
-                                    && s.preview.anchor == s.preview.head
+                                s.reading_drag(e.position, cx);
+                                s.reading.drag = None;
+                                s.reading.auto_scroll.stop();
+                                if let Some(target) = s.reading.link.take()
+                                    && !s.reading.dragged
+                                    && s.reading.anchor == s.reading.head
                                     && (web_url(&target)
                                         || target
                                             .get(..7)
@@ -461,7 +482,7 @@ impl InputState {
                 .size_full(),
             )
             .child(
-                list(self.preview.list.clone(), move |i, _, cx| {
+                list(self.reading.list.clone(), move |i, _, cx| {
                     render_block(
                         &document.blocks[i],
                         i,
@@ -474,7 +495,7 @@ impl InputState {
                 .size_full(),
             )
             .child(super::super::scroll::Scrollbar::vertical_list(
-                &self.preview.list,
+                &self.reading.list,
             ))
             .into_any_element()
     }
@@ -687,8 +708,8 @@ fn render_block(
         })
         .child(body);
     div()
-        .id(("preview-block", index))
-        .debug_selector(move || format!("preview-block-{index}"))
+        .id(("reading-block", index))
+        .debug_selector(move || format!("reading-block-{index}"))
         .px_4()
         .py_2()
         .w_full()
@@ -720,7 +741,7 @@ mod tests {
     use gpui::{AppContext, MouseButton, point, px};
 
     #[gpui::test]
-    fn preview_selection_copies_unicode_across_blocks_and_cells_without_editing(
+    fn reading_selection_copies_unicode_across_blocks_and_cells_without_editing(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(crate::widgets::init);
@@ -734,7 +755,8 @@ mod tests {
         cx.update_window(window.into(), |_, w, cx| {
             editor.update(cx, |s, cx| {
                 s.set_selected_range(2..8, cx);
-                s.set_text_mode(TextMode::MarkdownPreview, cx);
+                s.set_text_mode(TextMode::Markdown, cx);
+                s.set_read_only(true, cx);
                 s.focus(w, cx);
             })
         })
@@ -749,16 +771,16 @@ mod tests {
         draw(&mut visual);
         let position = |offset, index, cx: &gpui::TestAppContext| {
             editor.read_with(cx, |s, _| {
-                let layouts = s.preview.layouts.borrow();
+                let layouts = s.reading.layouts.borrow();
                 let f = layouts.iter().find(|f| f.offset == offset).unwrap();
                 f.layout.position_for_index(index).unwrap()
                     + point(px(0.1), f.layout.line_height() / 2.)
             })
         };
         let (paragraph, at, code, cells) = editor.read_with(cx, |s, _| {
-            let p = &s.preview.document.blocks[1].content;
-            let code = &s.preview.document.blocks[3].content;
-            let cells = &s.preview.document.blocks[5].cells;
+            let p = &s.reading.document.blocks[1].content;
+            let code = &s.reading.document.blocks[3].content;
+            let cells = &s.reading.document.blocks[5].cells;
             (
                 p.offset,
                 p.text.find("한글").unwrap(),
@@ -799,7 +821,7 @@ mod tests {
             )
         });
         let (link_start, link_end) = editor.read_with(cx, |s, _| {
-            let range = &s.preview.document.blocks[1].content.links[0].0;
+            let range = &s.reading.document.blocks[1].content.links[0].0;
             (range.start, range.end)
         });
         drag(
@@ -818,8 +840,8 @@ mod tests {
         // Drag beyond the viewport and keep holding to extend the selection into virtualized blocks.
         let (bottom, before) = editor.read_with(cx, |s, _| {
             (
-                s.preview.list.viewport_bounds().bottom(),
-                s.preview.list.logical_scroll_top().item_ix,
+                s.reading.list.viewport_bounds().bottom(),
+                s.reading.list.logical_scroll_top().item_ix,
             )
         });
         let below = point(start.x, bottom + px(50.));
@@ -833,9 +855,9 @@ mod tests {
         }
         visual.simulate_mouse_up(below, MouseButton::Left, Default::default());
         editor.read_with(cx, |s, _| {
-            assert!(s.preview.list.logical_scroll_top().item_ix > before);
+            assert!(s.reading.list.logical_scroll_top().item_ix > before);
             assert!(
-                s.preview
+                s.reading
                     .document
                     .text_range(s.reading_selection().range)
                     .contains("다음 문단")
@@ -849,16 +871,16 @@ mod tests {
             let s = editor.read(cx);
             assert_eq!(
                 cx.read_from_clipboard().unwrap().text().unwrap(),
-                s.preview.document.text()
+                s.reading.document.text()
             );
-            assert!(s.preview.layouts.borrow().len() < s.preview.document.blocks.len());
+            assert!(s.reading.layouts.borrow().len() < s.reading.document.blocks.len());
             assert_eq!(s.selected_range(), 2..8);
             assert_eq!(s.value(), source);
         });
     }
 
     #[gpui::test]
-    fn preview_discards_old_background_documents_and_caches_the_latest_source(
+    fn reading_discards_old_background_documents_and_caches_the_latest_source(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(crate::widgets::init);
@@ -872,8 +894,9 @@ mod tests {
         let editor = window.root(cx).unwrap();
         cx.update_window(window.into(), |_, w, cx| {
             editor.update(cx, |s, cx| {
-                s.set_text_mode(TextMode::MarkdownPreview, cx);
-                assert!(s.preview.task.is_some());
+                s.set_text_mode(TextMode::Markdown, cx);
+                s.set_read_only(true, cx);
+                assert!(s.reading.task.is_some());
                 s.set_value(latest.clone(), w, cx);
             });
         })
@@ -881,16 +904,16 @@ mod tests {
         cx.run_until_parked();
         cx.read(|cx| {
             let s = editor.read(cx);
-            assert_eq!(s.preview.revision, Some(s.revision));
-            assert_eq!(s.preview.document.blocks[0].content.text, "최신");
+            assert_eq!(s.reading.revision, Some(s.revision));
+            assert_eq!(s.reading.document.blocks[0].content.text, "최신");
             assert_eq!(s.value(), latest);
-            assert!(s.preview.task.is_none());
+            assert!(s.reading.task.is_none());
         });
         cx.update_window(window.into(), |_, w, cx| {
             editor.update(cx, |s, cx| {
                 s.set_value("# 오래된 결과\n\n본문\n\n".repeat(4000), w, cx);
-                s.ensure_preview(cx);
-                assert!(s.preview.task.is_some());
+                s.ensure_reading(cx);
+                assert!(s.reading.task.is_some());
                 s.set_text_mode(TextMode::PlainText, cx);
                 s.set_value("# 작은 문서", w, cx);
             });
@@ -899,11 +922,12 @@ mod tests {
         cx.run_until_parked();
         cx.update_window(window.into(), |_, _, cx| {
             editor.update(cx, |s, cx| {
-                assert!(s.preview.task.is_none());
-                assert_ne!(s.preview.revision, Some(s.revision));
-                s.set_text_mode(TextMode::MarkdownPreview, cx);
-                assert_eq!(s.preview.document.blocks[0].content.text, "작은 문서");
-                assert_eq!(s.preview.revision, Some(s.revision));
+                assert!(s.reading.task.is_none());
+                assert_ne!(s.reading.revision, Some(s.revision));
+                s.set_text_mode(TextMode::Markdown, cx);
+                s.set_read_only(true, cx);
+                assert_eq!(s.reading.document.blocks[0].content.text, "작은 문서");
+                assert_eq!(s.reading.revision, Some(s.revision));
             });
         })
         .unwrap();

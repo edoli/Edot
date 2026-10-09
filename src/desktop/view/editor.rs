@@ -174,6 +174,7 @@ impl Edot {
                     })),
             )
             .child(self.text_mode_view(cx))
+            .child(self.reading_mode_view(cx))
             .into_any_element()
     }
 
@@ -203,6 +204,41 @@ impl Edot {
                     .text_xs()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_text_mode_menu(trigger.get().top_right(), window, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn reading_mode_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(editor) = self.active_editor() else {
+            return div().into_any_element();
+        };
+        let read_only = editor.read(cx).is_read_only();
+        div()
+            .id("reading-mode-control")
+            .debug_selector(|| "reading-mode-control".into())
+            .flex_shrink_0()
+            .child(
+                Button::new("toggle-reading-mode")
+                    .small()
+                    .icon(if read_only {
+                        IconName::Pencil
+                    } else {
+                        IconName::BookOpen
+                    })
+                    .tooltip(if read_only {
+                        "편집 모드로 전환"
+                    } else {
+                        "읽기 모드로 전환"
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(editor) = this.active_editor() {
+                            editor.update(cx, |state, cx| {
+                                state.set_read_only(!state.is_read_only(), cx);
+                                state.focus(window, cx);
+                            });
+                        }
+                        cx.notify();
                     })),
             )
             .into_any_element()

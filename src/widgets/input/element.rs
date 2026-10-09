@@ -164,7 +164,9 @@ impl Element for EditorElement {
             }
         });
         let focus = self.0.read(cx).focus.clone();
-        window.handle_input(&focus, ElementInputHandler::new(bounds, self.0.clone()), cx);
+        if !self.0.read(cx).is_read_only() {
+            window.handle_input(&focus, ElementInputHandler::new(bounds, self.0.clone()), cx);
+        }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             self.0.update(cx, |s, cx| s.paint(window, cx))
         });
@@ -172,8 +174,8 @@ impl Element for EditorElement {
 }
 impl Render for InputState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.is_read_only() {
-            return self.preview_view(window, cx);
+        if self.is_markdown_reading() {
+            return self.reading_view(window, cx);
         }
         div()
             .id("text-input")
