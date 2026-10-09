@@ -165,7 +165,6 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
         this.toggle_space_list(window, cx);
         this.confirm_remove_space(other.clone(), window, cx);
     });
-    f.press(cx, "tab");
     f.press(cx, "enter");
     f.update(cx, |this, window, cx| {
         assert_eq!(this.space_ui.registry.entries.len(), 1);

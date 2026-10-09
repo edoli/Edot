@@ -25,6 +25,7 @@ pub struct Settings {
     pub font: String,
     pub font_size: u32,
     pub wrap: bool,
+    pub confirm_delete: bool,
 }
 
 impl Default for Settings {
@@ -34,6 +35,7 @@ impl Default for Settings {
             font: DEFAULT_FONT.into(),
             font_size: DEFAULT_FONT_SIZE,
             wrap: true,
+            confirm_delete: true,
         }
     }
 }
@@ -44,6 +46,8 @@ impl Settings {
             ("theme", "light") => self.theme = ThemeMode::Light,
             ("theme", "dark") => self.theme = ThemeMode::Dark,
             ("theme", "system") => self.theme = ThemeMode::System,
+            ("confirm_delete", "true") => self.confirm_delete = true,
+            ("confirm_delete", "false") => self.confirm_delete = false,
             ("font", font) if valid_font(font) => self.font = font.into(),
             ("font_size", size) => {
                 if let Ok(size @ MIN_FONT_SIZE..=MAX_FONT_SIZE) = size.parse::<u32>() {

@@ -10,6 +10,7 @@ pub struct Button {
     click: Option<ClickHandler>,
     style: StyleRefinement,
     primary: bool,
+    destructive: bool,
     selected: bool,
     tab_stop: bool,
     compact: bool,
@@ -24,6 +25,7 @@ impl Button {
             click: None,
             style: StyleRefinement::default(),
             primary: false,
+            destructive: false,
             selected: false,
             tab_stop: true,
             compact: false,
@@ -52,6 +54,11 @@ impl Button {
         self.primary = true;
         self
     }
+    pub fn destructive(mut self) -> Self {
+        self.primary = true;
+        self.destructive = true;
+        self
+    }
     pub fn small(mut self) -> Self {
         self.compact = true;
         self
@@ -73,6 +80,16 @@ impl Styled for Button {
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme().colors;
+        let primary = if self.destructive {
+            theme.destructive
+        } else {
+            theme.primary
+        };
+        let primary_hover = if self.destructive {
+            theme.destructive.blend(theme.foreground.opacity(0.12))
+        } else {
+            theme.primary_hover
+        };
         let click = self.click;
         let mut el = div()
             .id(self.id)
@@ -93,18 +110,18 @@ impl RenderOnce for Button {
             } else {
                 theme.foreground
             })
-            .when(self.primary, |d| d.bg(theme.primary))
+            .when(self.primary, |d| d.bg(primary))
             .when(self.selected, |d| {
                 d.bg(theme.selection).text_color(theme.primary)
             })
             .hover(move |d| {
                 d.bg(if self.primary {
-                    theme.primary_hover
+                    primary_hover
                 } else {
                     theme.accent
                 })
             })
-            .focus_visible(|s| s.border_1().border_color(theme.primary))
+            .focus_visible(|s| s.border_1().border_color(primary))
             .on_click(move |e, w, cx| {
                 cx.stop_propagation();
                 if let Some(f) = &click {

@@ -23,6 +23,7 @@ fn ini_preserves_comments_unknown_fields_and_escaped_font_names() {
         font: "Font \\\"한글".into(),
         font_size: 25,
         wrap: false,
+        confirm_delete: false,
     };
     settings.save(&dir).unwrap();
     assert_eq!(Settings::load(&dir).unwrap(), settings);
@@ -37,7 +38,10 @@ fn ini_preserves_comments_unknown_fields_and_escaped_font_names() {
         assert!(text.contains(fragment), "{text}");
     }
     assert!(
-        Settings::parse_ini("version=1\nfont_size=-1\nwrap='bad'\ntheme='bad'").unwrap()
+        Settings::parse_ini(
+            "version=1\nfont_size=-1\nwrap='bad'\ntheme='bad'\nconfirm_delete='bad'"
+        )
+        .unwrap()
             == Settings::default()
     );
     for text in [

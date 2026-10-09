@@ -11,6 +11,24 @@ pub(super) struct Preferences {
 }
 
 impl Edot {
+    pub(super) fn remember_delete_choice(
+        &mut self,
+        dont_ask_again: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !dont_ask_again {
+            return true;
+        }
+        let mut next = self.settings.clone();
+        next.confirm_delete = false;
+        if let Err(error) = next.save(&self.config_dir) {
+            self.fail("설정을 저장하지 못했습니다", error, cx);
+            return false;
+        }
+        self.settings = next;
+        cx.notify();
+        true
+    }
     pub(super) fn apply_theme(&self, window: &mut Window, cx: &mut App) {
         let dark = match self.settings.theme {
             ThemeMode::Light => false,

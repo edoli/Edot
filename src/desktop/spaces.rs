@@ -203,6 +203,10 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.settings.confirm_delete {
+            self.remove_space(&path, window, cx);
+            return;
+        }
         let name = self
             .space_ui
             .registry
@@ -216,17 +220,23 @@ impl Edot {
             let path = path.clone();
             dialog
                 .title("Space 목록에서 삭제")
+                .default_confirm()
+                .dont_ask_again()
                 .description(format!(
                     "‘{name}’을 목록에서 삭제할까요?\n폴더와 메모 파일은 그대로 보관됩니다."
                 ))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("목록에서 삭제")
+                        .destructive()
                         .cancel_text("취소"),
                 )
-                .on_ok(move |_, window, cx| {
-                    weak.update(cx, |this, cx| this.remove_space(&path, window, cx))
-                        .unwrap_or(false)
+                .on_ok_with_dont_ask_again(move |_, dont_ask_again, window, cx| {
+                    weak.update(cx, |this, cx| {
+                        this.remember_delete_choice(dont_ask_again, cx)
+                            && this.remove_space(&path, window, cx)
+                    })
+                    .unwrap_or(false)
                 })
         });
     }

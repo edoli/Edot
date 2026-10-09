@@ -210,28 +210,59 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let count = self.book.selected_subtrees(&selected).len();
+        let roots = self.book.selected_roots(&selected);
+        let count = roots.len();
         if count == 0 {
             return;
         }
+        if !self.settings.confirm_delete {
+            self.delete_confirmed(&selected, window, cx);
+            return;
+        }
+        let name = &self.book.get(roots[0]).unwrap().title;
+        let description = if count == 1 {
+            format!("정말로 \"{name}\" 파일을 삭제할까요?")
+        } else {
+            format!("정말로 \"{name}\" 파일 포함 {count}개를 삭제할까요?")
+        };
+        let root_ids: HashSet<_> = roots.iter().copied().collect();
+        let has_children = self
+            .book
+            .notes
+            .iter()
+            .any(|note| root_ids.contains(&note.parent));
+        let warning = has_children.then_some(if count == 1 {
+            "해당 폴더가 비어 있지 않습니다.\n폴더를 삭제하면 폴더 내의 모든 파일들이 삭제됩니다."
+        } else {
+            "비어 있지 않는 폴더가 포함되어 있습니다.\n폴더를 삭제하면 폴더 내의 모든 파일들이 삭제됩니다."
+        });
         let weak = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let weak = weak.clone();
             let selected = selected.clone();
+            let dialog = if let Some(warning) = warning {
+                dialog.warning(warning)
+            } else {
+                dialog
+            };
             dialog
                 .title("메모 삭제")
-                .description(format!(
-                    "메모와 하위 메모 {count}개를 삭제할까요?\n파일은 휴지통 폴더에 보관됩니다."
-                ))
+                .description(description)
                 .confirm()
+                .default_confirm()
+                .dont_ask_again()
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("삭제")
+                        .destructive()
                         .cancel_text("취소"),
                 )
-                .on_ok(move |_, window, cx| {
-                    weak.update(cx, |this, cx| this.delete_confirmed(&selected, window, cx))
-                        .unwrap_or(false)
+                .on_ok_with_dont_ask_again(move |_, dont_ask_again, window, cx| {
+                    weak.update(cx, |this, cx| {
+                        this.remember_delete_choice(dont_ask_again, cx)
+                            && this.delete_confirmed(&selected, window, cx)
+                    })
+                    .unwrap_or(false)
                 })
         });
     }

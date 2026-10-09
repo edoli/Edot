@@ -1,4 +1,91 @@
 use super::*;
+use crate::widgets::WindowExt;
+
+#[gpui::test]
+fn delete_dialog_keeps_controls_inline_and_warns_only_for_nonempty_folders(
+    cx: &mut TestAppContext,
+) {
+    let f = Fixture::new(cx);
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    for (selected, warning) in [
+        (vec![f.ids[1]], false),
+        (vec![f.ids[1], f.ids[2]], false),
+        (vec![f.ids[0]], true),
+        (vec![f.ids[1], f.ids[0]], true),
+        (vec![f.ids[2], f.ids[0], f.ids[0]], true),
+    ] {
+        f.update(cx, |this, window, cx| {
+            this.confirm_delete_notes(selected, window, cx)
+        });
+        visual.update(|window, cx| {
+            window.render_frame(cx);
+        });
+        let checkbox = visual.debug_bounds("delete-dont-ask-again").unwrap();
+        let footer = visual.debug_bounds("confirmation-footer").unwrap();
+        assert_eq!(checkbox.center().y, footer.center().y);
+        assert_eq!(visual.debug_bounds("delete-warning").is_some(), warning);
+        f.press(cx, "escape");
+    }
+    f.update(cx, |this, _, _| assert_eq!(this.book.notes.len(), 3));
+}
+
+#[gpui::test]
+fn delete_opt_out_persists_only_on_confirmation_and_skips_future_dialogs(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    f.update(cx, |this, window, cx| {
+        let lock = this.config_dir.join(".settings.lock");
+        if lock.is_file() {
+            fs::remove_file(&lock).unwrap();
+        }
+        fs::create_dir(&lock).unwrap();
+        assert!(!this.remember_delete_choice(true, cx));
+        assert!(this.settings.confirm_delete);
+        assert!(this.book.get(f.ids[2]).is_some());
+        fs::remove_dir(lock).unwrap();
+        this.error = None;
+        this.confirm_delete_notes(vec![f.ids[2]], window, cx);
+    });
+    f.press(cx, "shift-tab");
+    f.press(cx, "space");
+    f.press(cx, "escape");
+    f.update(cx, |this, window, cx| {
+        assert!(this.settings.confirm_delete);
+        assert!(Settings::load(&this.config_dir).unwrap().confirm_delete);
+        assert!(this.book.get(f.ids[2]).is_some());
+        this.confirm_delete_notes(vec![f.ids[2]], window, cx);
+    });
+    // Mouse toggling and keyboard navigation both leave confirmation explicit.
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|window, cx| window.render_frame(cx));
+    let checkbox = visual.debug_bounds("delete-dont-ask-again").unwrap();
+    visual.simulate_mouse_down(
+        checkbox.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    visual.simulate_mouse_up(
+        checkbox.center(),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    f.press(cx, "tab");
+    f.press(cx, "enter");
+    f.update(cx, |this, window, cx| {
+        assert!(!window.has_active_dialog(cx));
+        assert!(this.book.get(f.ids[2]).is_none());
+        assert!(!this.settings.confirm_delete);
+        let saved = Settings::load(&this.config_dir).unwrap();
+        assert!(!saved.confirm_delete);
+        this.settings = saved;
+        this.confirm_delete_notes(vec![f.ids[1]], window, cx);
+        assert!(!window.has_active_dialog(cx));
+        assert!(this.book.get(f.ids[1]).is_none());
+        this.confirm_remove_space(f.dir.clone(), window, cx);
+        assert!(!window.has_active_dialog(cx));
+        assert!(this.space_ui.registry.entries.is_empty());
+        assert!(this.book.file(&this.dir, f.ids[0]).is_file());
+    });
+}
 
 #[gpui::test]
 fn tree_context_target_and_active_note_survive_selection_and_menu_dismissal(
@@ -87,13 +174,21 @@ fn tree_context_target_and_active_note_survive_selection_and_menu_dismissal(
     });
     f.press(cx, "escape");
     f.update(cx, |this, window, cx| {
+        this.confirm_delete_notes(vec![f.ids[2]], window, cx);
+    });
+    f.press(cx, "tab");
+    f.press(cx, "enter");
+    f.update(cx, |this, window, cx| {
+        assert!(this.book.get(f.ids[2]).is_some());
+        assert!(!window.has_active_dialog(cx));
+    });
+    f.update(cx, |this, window, cx| {
         this.show_tree_menu(f.ids[2], point(px(50.), px(90.)), window, cx);
     });
     for _ in 0..4 {
         f.press(cx, "down");
     }
     f.press(cx, "enter");
-    f.press(cx, "tab");
     f.press(cx, "enter");
     f.update(cx, |this, _, _| {
         assert!(this.book.get(f.ids[2]).is_none());
