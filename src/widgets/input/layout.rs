@@ -79,7 +79,13 @@ impl InputState {
             .min(px(0.))
             .max(-(self.content_size.height - self.bounds.size.height).max(px(0.)));
     }
-    pub(super) fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &App) {
+    pub(super) fn layout(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_highlighting(cx);
         self.bounds = bounds;
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -107,6 +113,16 @@ impl InputState {
             style.color
         };
         let link_color = cx.theme().primary;
+        let palette = highlighting::Palette {
+            link: link_color,
+            muted: cx.theme().muted_foreground,
+            code: if cx.theme().background.l < 0.5 {
+                rgb(0x98c379).into()
+            } else {
+                rgb(0x267f60).into()
+            },
+            marker: cx.theme().warning,
+        };
         let key = (
             self.revision,
             width,
@@ -138,7 +154,14 @@ impl InputState {
                     underline: None,
                     strikethrough: None,
                 };
-                let runs = links::text_runs(value.len(), &tabs, &links, &run, link_color);
+                let runs = highlighting::text_runs(
+                    start..end,
+                    &tabs,
+                    &self.highlighting.spans,
+                    &links,
+                    &run,
+                    palette,
+                );
                 if let Ok(lines) = window.text_system().shape_text(
                     value,
                     font_size,

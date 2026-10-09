@@ -78,6 +78,7 @@ pub struct InputState {
     bounds: Bounds<Pixels>,
     content_padding: Edges<Pixels>,
     lines: Vec<Paragraph>,
+    highlighting: highlighting::Highlighting,
     layout_key: Option<(u64, Pixels, Pixels, Font, Hsla, Hsla)>,
     line_height: Pixels,
     content_size: Size<Pixels>,
@@ -157,6 +158,7 @@ impl InputState {
             bounds: Bounds::default(),
             content_padding: Edges::default(),
             lines: vec![],
+            highlighting: highlighting::Highlighting::default(),
             layout_key: None,
             line_height: px(24.),
             content_size: Size::default(),
@@ -305,6 +307,7 @@ impl InputState {
         self.selecting = false;
         self.revision = self.revision.wrapping_add(1);
         self.layout_key = None;
+        self.ensure_highlighting(cx);
         self.moved(cx);
         cx.emit(InputEvent::Change);
     }
@@ -317,10 +320,12 @@ impl InputState {
 
 mod column;
 mod element;
+mod highlighting;
 mod history;
 mod ime;
 mod layout;
 mod links;
+mod markdown;
 mod navigation;
 mod selection;
 pub use element::{Input, Textarea};
