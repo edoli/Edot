@@ -63,7 +63,7 @@ impl Edot {
                 }
             };
             let editor = cx.new(|cx| {
-                TextareaState::new(window, cx)
+                let mut state = TextareaState::new(window, cx)
                     .content_padding(Edges {
                         left: px(16.),
                         top: px(6.),
@@ -72,7 +72,9 @@ impl Edot {
                     })
                     .soft_wrap(self.settings.wrap)
                     .source_directory(self.dir.join("notes"))
-                    .default_value(text.clone())
+                    .default_value(text.clone());
+                state.set_read_only(self.settings.read_only, cx);
+                state
             });
             let subscription =
                 cx.subscribe_in(&editor, window, move |this, _, event, window, cx| {

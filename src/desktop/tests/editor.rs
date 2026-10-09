@@ -255,7 +255,7 @@ fn markdown_reading_renders_links_and_blocks_edits_without_losing_source_history
 }
 
 #[gpui::test]
-fn status_text_mode_menu_changes_only_the_current_editor(cx: &mut TestAppContext) {
+fn status_text_mode_is_per_note_and_reading_mode_is_global(cx: &mut TestAppContext) {
     use crate::widgets::TextMode;
     use gpui::Focusable;
     let f = Fixture::new(cx);
@@ -352,7 +352,11 @@ fn status_text_mode_menu_changes_only_the_current_editor(cx: &mut TestAppContext
         assert!(!editor.read(cx).is_composing());
         assert!(!this.open.iter().find(|t| t.id == f.ids[0]).unwrap().dirty);
         assert!(this.open_note(f.ids[1], true, window, cx));
-        assert!(!this.active_editor().unwrap().read(cx).is_read_only());
+        assert!(this.active_editor().unwrap().read(cx).is_read_only());
+        assert!(this.settings.read_only);
+        assert!(Settings::load(&this.config_dir).unwrap().read_only);
+        assert!(this.open_note(f.ids[2], true, window, cx));
+        assert!(this.active_editor().unwrap().read(cx).is_read_only());
         assert!(this.open_note(f.ids[0], true, window, cx));
         assert!(editor.read(cx).is_read_only());
     });
@@ -402,10 +406,23 @@ fn status_text_mode_menu_changes_only_the_current_editor(cx: &mut TestAppContext
         gpui::MouseButton::Left,
         Default::default(),
     );
-    f.update(cx, |_, window, cx| {
+    f.update(cx, |this, window, cx| {
         assert!(!editor.read(cx).is_read_only());
         assert_eq!(editor.read(cx).text_mode(), TextMode::Markdown);
         assert!(editor.read(cx).focus_handle(cx).is_focused(window));
+        assert!(!this.settings.read_only);
+        assert!(!Settings::load(&this.config_dir).unwrap().read_only);
+        for tab in &this.open {
+            assert!(!tab.editor.as_ref().unwrap().read(cx).is_read_only());
+        }
+        // Failed persistence must leave every editor and the saved setting intact.
+        fs::remove_file(this.config_dir.join("settings.ini")).unwrap();
+        fs::create_dir(this.config_dir.join("settings.ini")).unwrap();
+        assert!(!this.set_read_only(true, window, cx));
+        assert!(!this.settings.read_only);
+        for tab in &this.open {
+            assert!(!tab.editor.as_ref().unwrap().read(cx).is_read_only());
+        }
     });
 }
 

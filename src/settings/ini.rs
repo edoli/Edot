@@ -107,6 +107,7 @@ impl Document {
             ("font", format!("\"{font}\"")),
             ("font_size", settings.font_size.to_string()),
             ("wrap", settings.wrap.to_string()),
+            ("read_only", settings.read_only.to_string()),
             ("confirm_delete", settings.confirm_delete.to_string()),
         ];
         self.updated_values(&values)

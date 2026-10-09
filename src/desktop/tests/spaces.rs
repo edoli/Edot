@@ -80,10 +80,18 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
             state.replace_all("saved before switching", window, cx)
         });
         this.changed(f.ids[0], window, cx);
+        assert!(this.set_read_only(true, window, cx));
         this.set_collapsed(f.ids[0], true, cx);
         assert!(this.switch_space(other.clone(), window, cx));
         assert_eq!(this.dir, other);
-        assert_eq!(this.settings, settings);
+        assert_eq!(
+            this.settings,
+            Settings {
+                read_only: true,
+                ..settings.clone()
+            }
+        );
+        assert!(this.active_editor().unwrap().read(cx).is_read_only());
         assert_eq!(this.collapsed, HashSet::from([root]));
         assert_eq!(this.session.active, Some(child));
         assert_eq!(
@@ -97,6 +105,7 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
             this.active_editor().unwrap().read(cx).value(),
             "saved before switching"
         );
+        assert!(this.active_editor().unwrap().read(cx).is_read_only());
         assert!(this.switch_space(other.clone(), window, cx));
         assert!(!this.collapsed.contains(&root));
         assert_eq!(
@@ -190,6 +199,21 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
         "active child body"
     );
     assert_eq!(space::read_name(&other).unwrap(), "공유 Space 🙂");
+    // Startup loads the same global mode before it creates the active editor.
+    let paths = space::Paths {
+        space: f.dir.clone(),
+        config: f.dir.join("test-global-config"),
+    };
+    let loaded = LoadedSpace::open(&paths).unwrap();
+    assert!(loaded.settings.read_only);
+    let restarted =
+        cx.add_window(|window, cx| Edot::new(paths.space, paths.config, Ok(loaded), window, cx));
+    restarted
+        .update(cx, |this, _, cx| {
+            assert!(this.settings.read_only);
+            assert!(this.active_editor().unwrap().read(cx).is_read_only());
+        })
+        .unwrap();
 }
 
 #[gpui::test]

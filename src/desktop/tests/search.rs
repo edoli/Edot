@@ -44,4 +44,32 @@ fn global_replace_updates_open_and_closed_notes_and_preserves_undo(cx: &mut Test
     f.update(cx, |_, _, cx| {
         assert_eq!(editor.read(cx).value(), "loaded needle")
     });
+    f.update(cx, |this, window, cx| {
+        editor.update(cx, |s, cx| {
+            s.set_text_mode(crate::widgets::TextMode::PlainText, cx)
+        });
+        assert!(this.set_read_only(true, window, cx));
+        let range = crate::search::Pattern::compile("needle", false, false)
+            .unwrap()
+            .edits_text("loaded needle", "바뀜")[0]
+            .range;
+        this.replace_result(
+            crate::global_search::MatchKey {
+                id: f.ids[1],
+                range,
+            },
+            window,
+            cx,
+        );
+        assert_eq!(editor.read(cx).value(), "loaded 바뀜");
+        assert_eq!(
+            editor.read(cx).text_mode(),
+            crate::widgets::TextMode::PlainText
+        );
+        assert!(!this.settings.read_only);
+        assert!(!Settings::load(&this.config_dir).unwrap().read_only);
+        for tab in &this.open {
+            assert!(!tab.editor.as_ref().unwrap().read(cx).is_read_only());
+        }
+    });
 }

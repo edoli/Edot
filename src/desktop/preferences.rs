@@ -47,13 +47,28 @@ impl Edot {
         next: Settings,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if let Err(error) = next.save(&self.config_dir) {
             self.fail("설정을 저장하지 못했습니다", error, cx);
             self.sync_preferences(window, cx);
-            return;
+            return false;
         }
         self.apply_settings(next, window, cx);
+        true
+    }
+
+    pub(super) fn set_read_only(
+        &mut self,
+        read_only: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.settings.read_only == read_only {
+            return true;
+        }
+        let mut next = self.settings.clone();
+        next.read_only = read_only;
+        self.change_settings(next, window, cx)
     }
 
     fn apply_settings(&mut self, next: Settings, window: &mut Window, cx: &mut Context<Self>) {
@@ -65,6 +80,7 @@ impl Edot {
                     let offset = state.scroll_offset();
                     state.set_soft_wrap(self.settings.wrap, window, cx);
                     state.set_scroll_offset(offset, cx);
+                    state.set_read_only(self.settings.read_only, cx);
                 });
             }
         }

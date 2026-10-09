@@ -23,6 +23,7 @@ fn ini_preserves_comments_unknown_fields_and_escaped_font_names() {
         font: "Font \\\"한글".into(),
         font_size: 25,
         wrap: false,
+        read_only: true,
         confirm_delete: false,
     };
     settings.save(&dir).unwrap();
@@ -39,7 +40,7 @@ fn ini_preserves_comments_unknown_fields_and_escaped_font_names() {
     }
     assert!(
         Settings::parse_ini(
-            "version=1\nfont_size=-1\nwrap='bad'\ntheme='bad'\nconfirm_delete='bad'"
+            "version=1\nfont_size=-1\nwrap='bad'\nread_only='bad'\ntheme='bad'\nconfirm_delete='bad'"
         )
         .unwrap()
             == Settings::default()

@@ -22,12 +22,10 @@ impl Edot {
             return;
         };
         if self.open_note(key.id, false, window, cx)
+            && self.set_read_only(false, window, cx)
             && let Some(editor) = self.active_editor()
         {
             editor.update(cx, |state, cx| {
-                if state.is_read_only() {
-                    state.set_read_only(false, cx);
-                }
                 state.set_selected_range(editing::byte_range(&text, key.range), cx);
                 state.replace(edit.replacement, window, cx);
             });

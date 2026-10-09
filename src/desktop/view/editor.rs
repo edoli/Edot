@@ -210,10 +210,10 @@ impl Edot {
     }
 
     fn reading_mode_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(editor) = self.active_editor() else {
+        if self.active_editor().is_none() {
             return div().into_any_element();
-        };
-        let read_only = editor.read(cx).is_read_only();
+        }
+        let read_only = self.settings.read_only;
         div()
             .id("reading-mode-control")
             .debug_selector(|| "reading-mode-control".into())
@@ -232,13 +232,9 @@ impl Edot {
                         "읽기 모드로 전환"
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if let Some(editor) = this.active_editor() {
-                            editor.update(cx, |state, cx| {
-                                state.set_read_only(!state.is_read_only(), cx);
-                                state.focus(window, cx);
-                            });
+                        if this.set_read_only(!this.settings.read_only, window, cx) {
+                            this.focus_editor(window, cx);
                         }
-                        cx.notify();
                     })),
             )
             .into_any_element()
