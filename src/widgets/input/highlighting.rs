@@ -20,7 +20,7 @@ impl InputState {
             return;
         }
         self.text_mode = mode;
-        self.stop_reading_drag();
+        self.stop_pointer_drag();
         if self.is_read_only() {
             self.finish_composition();
         }

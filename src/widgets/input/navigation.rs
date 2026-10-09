@@ -2,6 +2,13 @@
 use super::*;
 
 impl InputState {
+    pub(super) fn stop_pointer_drag(&mut self) {
+        self.selecting = false;
+        self.column_anchor = None;
+        self.scroll_drag = None;
+        self.selection_auto_scroll.stop();
+        self.stop_reading_drag();
+    }
     /// Plain-text word boundaries, including VS Code's decimal-number rule.
     pub(super) fn word_at_cursor(&self) -> Option<Range<usize>> {
         self.word_at(self.cursor())
@@ -448,11 +455,13 @@ impl InputState {
             && !e.modifiers.control
             && !e.modifiers.platform
         {
+            self.selection_auto_scroll.last_drag_position = Some(e.position);
             self.begin_column_selection(e.position, cx);
             cx.stop_propagation();
             return;
         }
         self.selecting = true;
+        self.selection_auto_scroll.last_drag_position = Some(e.position);
         self.clear_extra_selections();
         self.preferred_x = None;
         let at = self.mouse_index(e.position);
@@ -502,26 +511,54 @@ impl InputState {
             return;
         }
         if self.selecting {
-            if e.position.y < self.bounds.top() {
-                self.scroll.y += self.line_height;
-            }
-            if e.position.y > self.bounds.bottom() {
-                self.scroll.y -= self.line_height;
-            }
-            if self.column_anchor.is_some() && !self.wrap {
-                if e.position.x < self.bounds.left() {
-                    self.scroll.x += self.line_height;
-                }
-                if e.position.x > self.bounds.right() {
-                    self.scroll.x -= self.line_height;
-                }
-            }
-            self.clamp_scroll();
-            if self.column_anchor.is_some() {
-                self.update_column_selection(e.position, cx);
-            } else {
-                self.move_to(self.mouse_index(e.position), true, cx);
-            }
+            self.selection_auto_scroll.last_drag_position = Some(e.position);
+            self.drag_selection(e.position, cx);
+            let scrolling = self.selection_scroll_delta(e.position) != point(px(0.), px(0.));
+            self.selection_auto_scroll
+                .set(scrolling.then_some(px(1.)), cx, |_, s, cx| {
+                    if !s.selecting {
+                        s.selection_auto_scroll.stop();
+                        return;
+                    }
+                    if let Some(position) = s.selection_auto_scroll.last_drag_position {
+                        s.scroll -= s.selection_scroll_delta(position);
+                        s.clamp_scroll();
+                        s.drag_selection(position, cx);
+                    }
+                });
         }
+    }
+    fn selection_scroll_delta(&self, position: Point<Pixels>) -> Point<Pixels> {
+        let delta = |value: Pixels, min: Pixels, max: Pixels| {
+            if value < min {
+                -((min - value) * 0.25).clamp(px(1.), px(24.))
+            } else if value > max {
+                ((value - max) * 0.25).clamp(px(1.), px(24.))
+            } else {
+                px(0.)
+            }
+        };
+        point(
+            if self.wrap {
+                px(0.)
+            } else {
+                delta(position.x, self.bounds.left(), self.bounds.right())
+            },
+            if self.multiline {
+                delta(position.y, self.bounds.top(), self.bounds.bottom())
+            } else {
+                px(0.)
+            },
+        )
+    }
+    fn drag_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.column_anchor.is_some() {
+            self.update_column_selection(position, cx);
+        } else {
+            self.move_to(self.mouse_index(position), true, cx);
+        }
+        // Timer-driven scrolling uses the pointer, rather than revealing a caret
+        // that may lie several rows beyond the viewport.
+        self.reveal = false;
     }
 }

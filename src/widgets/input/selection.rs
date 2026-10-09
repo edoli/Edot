@@ -60,8 +60,8 @@ impl InputState {
     }
 
     pub fn cancel_extra_selections(&mut self, cx: &mut Context<Self>) -> bool {
-        self.column_anchor = None;
-        self.selecting = false;
+        self.stop_pointer_drag();
+        cx.notify();
         self.finish_composition();
         let Some(first) = self.extra.first().cloned() else {
             return false;

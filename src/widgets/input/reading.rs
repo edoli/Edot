@@ -159,6 +159,9 @@ impl Default for Reading {
     }
 }
 impl InputState {
+    pub(super) fn is_reading_dragging(&self) -> bool {
+        self.reading.drag.is_some()
+    }
     pub(super) fn stop_reading_drag(&mut self) {
         self.reading.drag = None;
         self.reading.link = None;
@@ -179,10 +182,7 @@ impl InputState {
         }
         self.read_only = read_only;
         self.blink = true;
-        self.selecting = false;
-        self.column_anchor = None;
-        self.scroll_drag = None;
-        self.stop_reading_drag();
+        self.stop_pointer_drag();
         self.layout_key = None;
         self.ensure_highlighting(cx);
         self.ensure_reading(cx);
@@ -424,9 +424,9 @@ impl InputState {
                                     return;
                                 }
                                 if e.pressed_button != Some(MouseButton::Left) {
-                                    s.reading.drag = None;
-                                    s.reading.link = None;
-                                    s.reading.auto_scroll.stop();
+                                    s.stop_reading_drag();
+                                    cx.notify();
+                                    cx.stop_propagation();
                                     return;
                                 }
                                 s.reading_drag(e.position, cx);
@@ -449,6 +449,7 @@ impl InputState {
                                     s.reading.list.scroll_by(delta);
                                     cx.notify();
                                 });
+                                cx.stop_propagation();
                             });
                         });
                         let entity = up_entity.clone();
@@ -474,6 +475,7 @@ impl InputState {
                                     cx.open_url(&target);
                                 }
                                 cx.notify();
+                                cx.stop_propagation();
                             });
                         });
                     },
@@ -481,6 +483,7 @@ impl InputState {
                 .absolute()
                 .size_full(),
             )
+            .children(self.pointer_drag_capture())
             .child(
                 list(self.reading.list.clone(), move |i, window, cx| {
                     render_block(

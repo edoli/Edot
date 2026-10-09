@@ -10,7 +10,7 @@ impl IntoElement for EditorElement {
 }
 impl Element for EditorElement {
     type RequestLayoutState = ();
-    type PrepaintState = (Vec<(bool, Hitbox)>, Option<Hitbox>, Option<Hitbox>);
+    type PrepaintState = (Vec<(bool, Hitbox)>, Option<Hitbox>);
     fn id(&self) -> Option<ElementId> {
         None
     }
@@ -50,14 +50,6 @@ impl Element for EditorElement {
                 && s.link_at(window.mouse_position()).is_some();
         });
         let state = self.0.read(cx);
-        let capture = (state.scroll_drag.is_some()
-            || state.selecting && state.column_anchor.is_some())
-        .then(|| {
-            window.insert_hitbox(
-                Bounds::new(point(px(0.), px(0.)), window.viewport_size()),
-                HitboxBehavior::BlockMouse,
-            )
-        });
         let bars = [true, false]
             .into_iter()
             .filter_map(|axis| {
@@ -72,7 +64,7 @@ impl Element for EditorElement {
         let link = state
             .link_hover
             .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal));
-        (bars, capture, link)
+        (bars, link)
     }
     fn paint(
         &mut self,
@@ -90,19 +82,11 @@ impl Element for EditorElement {
             .find(|(_, hitbox)| hitbox.is_hovered(window))
             .map(|(axis, _)| *axis);
         self.0.update(cx, |s, _| s.scroll_hover = hovered);
-        if let Some(hitbox) = &bars.2 {
+        if let Some(hitbox) = &bars.1 {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         }
         for (_, hitbox) in &bars.0 {
             window.set_cursor_style(CursorStyle::Arrow, hitbox);
-        }
-        if let Some(hitbox) = &bars.1 {
-            let cursor = if self.0.read(cx).scroll_drag.is_some() {
-                CursorStyle::Arrow
-            } else {
-                CursorStyle::IBeam
-            };
-            window.set_cursor_style(cursor, hitbox);
         }
         let entity = self.0.clone();
         window.on_modifiers_changed(move |_, _, cx| entity.update(cx, |_, cx| cx.notify()));
@@ -142,21 +126,37 @@ impl Element for EditorElement {
                     s.link_hover = link_hover;
                     cx.notify();
                 }
-                if s.scroll_drag.is_some() || s.selecting && s.column_anchor.is_some() {
-                    s.mouse_move(e, window, cx);
+                if s.scroll_drag.is_some() || s.selecting {
+                    if e.pressed_button == Some(MouseButton::Left) {
+                        s.mouse_move(e, window, cx);
+                    } else {
+                        s.stop_pointer_drag();
+                        cx.notify();
+                    }
                     cx.stop_propagation();
                 }
             });
         });
         let entity = self.0.clone();
-        window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+        window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
             if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
                 entity.update(cx, |s, cx| {
-                    let column = s.selecting && s.column_anchor.take().is_some();
-                    if column {
-                        s.selecting = false;
-                    }
-                    if s.scroll_drag.take().is_some() || column {
+                    if s.scroll_drag.is_some() || s.selecting {
+                        // Use the release position even if no move event preceded it.
+                        if s.scroll_drag.is_some()
+                            || s.selection_auto_scroll.last_drag_position != Some(e.position)
+                        {
+                            s.mouse_move(
+                                &MouseMoveEvent {
+                                    position: e.position,
+                                    modifiers: e.modifiers,
+                                    pressed_button: Some(MouseButton::Left),
+                                },
+                                window,
+                                cx,
+                            );
+                        }
+                        s.stop_pointer_drag();
                         cx.notify();
                         cx.stop_propagation();
                     }
@@ -203,21 +203,6 @@ impl Render for InputState {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(|s, _: &SelectAll, w, cx| s.select_all(w, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
-            .on_mouse_move(cx.listener(Self::mouse_move))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|s, _, _, _| {
-                    s.selecting = false;
-                    s.scroll_drag = None;
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|s, _, _, _| {
-                    s.selecting = false;
-                    s.scroll_drag = None;
-                }),
-            )
             .on_scroll_wheel(cx.listener(|s, e: &ScrollWheelEvent, _, cx| {
                 if !e.modifiers.control {
                     let mut delta = e.delta.pixel_delta(s.line_height);
@@ -242,7 +227,36 @@ impl Render for InputState {
                 }
             }))
             .child(EditorElement(cx.entity()))
+            .children(self.pointer_drag_capture())
             .into_any_element()
+    }
+}
+
+impl InputState {
+    /// Deferred prepaint escapes the input's clipping and places this hitbox
+    /// above the rest of the window. Stopping propagation alone cannot suppress
+    /// GPUI's hover styles, cursor changes and tooltips.
+    pub(super) fn pointer_drag_capture(&self) -> Option<impl IntoElement> {
+        (self.selecting || self.scroll_drag.is_some() || self.is_reading_dragging()).then(|| {
+            let cursor = if self.scroll_drag.is_some() {
+                CursorStyle::Arrow
+            } else {
+                CursorStyle::IBeam
+            };
+            deferred(
+                canvas(
+                    |_, window, _| {
+                        window.insert_hitbox(
+                            Bounds::new(point(px(0.), px(0.)), window.viewport_size()),
+                            HitboxBehavior::BlockMouse,
+                        )
+                    },
+                    move |_, hitbox, window, _| window.set_cursor_style(cursor, &hitbox),
+                )
+                .absolute()
+                .size_full(),
+            )
+        })
     }
 }
 

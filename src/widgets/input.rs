@@ -1,4 +1,5 @@
 //! Edot's plain-text editor. Byte offsets internally, UTF-16 only at the IME boundary.
+use super::scroll::AutoScroll;
 use super::*;
 use std::{ops::Range, time::Duration};
 
@@ -100,6 +101,7 @@ pub struct InputState {
     line_height: Pixels,
     content_size: Size<Pixels>,
     selecting: bool,
+    selection_auto_scroll: AutoScroll,
     column_anchor: Option<Point<Pixels>>,
     reveal: bool,
     preferred_x: Option<Pixels>,
@@ -119,8 +121,7 @@ impl InputState {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle().tab_stop(true);
         let blur = cx.on_blur(&focus, window, |s, _, cx| {
-            s.selecting = false;
-            s.column_anchor = None;
+            s.stop_pointer_drag();
             s.focused = false;
             cx.emit(InputEvent::Blur);
             cx.notify();
@@ -129,6 +130,13 @@ impl InputState {
             s.focused = true;
             s.blink = true;
             cx.notify();
+        })
+        .detach();
+        cx.observe_window_activation(window, |s, window, cx| {
+            if !window.is_window_active() {
+                s.stop_pointer_drag();
+                cx.notify();
+            }
         })
         .detach();
         let blink_task = cx.spawn(async |entity, cx| {
@@ -183,6 +191,7 @@ impl InputState {
             line_height: px(24.),
             content_size: Size::default(),
             selecting: false,
+            selection_auto_scroll: AutoScroll::default(),
             column_anchor: None,
             reveal: false,
             preferred_x: None,
@@ -323,8 +332,7 @@ impl InputState {
         cx.notify();
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
-        self.column_anchor = None;
-        self.selecting = false;
+        self.stop_pointer_drag();
         self.revision = self.revision.wrapping_add(1);
         self.layout_key = None;
         self.ensure_highlighting(cx);

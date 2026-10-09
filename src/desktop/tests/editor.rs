@@ -1,6 +1,156 @@
 use super::*;
 
 #[gpui::test]
+fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut TestAppContext) {
+    use crate::widgets::{input::TextMode, theme::ActiveTheme as _};
+    use gpui::{InputEvent as _, MouseButton, MouseMoveEvent};
+    let f = Fixture::new(cx);
+    let source = ("abcdefghij".repeat(80) + "\n\n").repeat(80);
+    let editor = f.update(cx, |this, _, _| this.active_editor().unwrap());
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    let draw = |visual: &mut gpui::VisualTestContext| {
+        visual.update(|w, cx| w.render_frame(cx));
+    };
+    draw(&mut visual);
+    let selector: &'static str = format!("tree-note-{}", f.ids[1]).leak();
+    let sidebar = visual.debug_bounds(selector).unwrap().center();
+    let hover = |visual: &mut gpui::VisualTestContext| {
+        visual.update(|w, cx| {
+            w.painted_quads().iter().any(|q| {
+                q.background == cx.theme().accent.into()
+                    && q.bounds.contains(&sidebar.scale(w.scale_factor()))
+            })
+        })
+    };
+    for (mode, read_only, column, wrap) in [
+        (TextMode::Markdown, false, false, true),
+        (TextMode::Markdown, false, false, false),
+        (TextMode::PlainText, true, false, false),
+        (TextMode::PlainText, false, true, false),
+        (TextMode::Markdown, true, false, false),
+    ] {
+        f.update(cx, |this, w, cx| {
+            editor.update(cx, |s, cx| {
+                s.set_read_only(false, cx);
+                s.set_value(source.clone(), w, cx);
+                s.set_text_mode(mode, cx);
+                s.set_soft_wrap(wrap, w, cx);
+                s.set_read_only(read_only, cx);
+            });
+            this.focus_editor(w, cx);
+        });
+        draw(&mut visual);
+        visual.simulate_mouse_move(sidebar, None, Default::default());
+        draw(&mut visual);
+        assert!(hover(&mut visual), "normal sidebar hover must work");
+        let reading = read_only && mode == TextMode::Markdown;
+        let body = visual.debug_bounds("body-editor").unwrap();
+        let start = if reading {
+            let block = visual.debug_bounds("reading-block-0").unwrap();
+            point(block.left() + px(50.), block.top() + px(14.))
+        } else {
+            visual.update(|w, cx| {
+                let mut handler = ElementInputHandler::new(Bounds::default(), editor.clone());
+                let bounds = handler.bounds_for_range(4..5, w, cx).unwrap();
+                point(bounds.left() + px(0.1), bounds.center().y)
+            })
+        };
+        let modifiers = gpui::Modifiers {
+            alt: column,
+            shift: column,
+            ..Default::default()
+        };
+        visual.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        draw(&mut visual);
+        visual.simulate_mouse_move(sidebar, MouseButton::Left, modifiers);
+        draw(&mut visual);
+        assert!(
+            !hover(&mut visual),
+            "sidebar hover during {mode:?}, reading={read_only}, column={column}"
+        );
+        visual.update(|w, cx| w.press("ctrl-c", cx));
+        cx.update(|cx| assert!(!cx.read_from_clipboard().unwrap().text().unwrap().is_empty()));
+
+        if !reading {
+            visual.simulate_mouse_move(point(-px(30.), -px(30.)), MouseButton::Left, modifiers);
+            assert_eq!(editor.read_with(cx, |s, _| s.cursor()), 0);
+        }
+        if !reading && !wrap {
+            // Ordinary and rectangular selection both scroll unwrapped lines.
+            let right = point(body.right() + px(50.), start.y);
+            visual.simulate_mouse_move(right, MouseButton::Left, modifiers);
+            let before = editor.read_with(cx, |s, _| s.cursor());
+            for _ in 0..12 {
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(16));
+                cx.run_until_parked();
+                draw(&mut visual);
+            }
+            assert!(editor.read_with(cx, |s, _| s.cursor()) > before);
+            visual.simulate_mouse_move(start, MouseButton::Left, modifiers);
+        }
+
+        // A stationary pointer beyond the viewport must continue scrolling.
+        let below = point(start.x + px(70.), body.bottom() + px(50.));
+        visual.simulate_mouse_move(below, MouseButton::Left, modifiers);
+        draw(&mut visual);
+        visual.update(|w, cx| w.press("ctrl-c", cx));
+        let before = cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap());
+        for _ in 0..12 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.run_until_parked();
+            draw(&mut visual);
+        }
+        visual.update(|w, cx| w.press("ctrl-c", cx));
+        let after = cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap());
+        assert!(
+            after.len() > before.len(),
+            "stationary drag must extend selection"
+        );
+        visual.simulate_mouse_up(sidebar, MouseButton::Left, modifiers);
+        draw(&mut visual);
+        f.update(cx, |this, _, _| {
+            assert_eq!(this.session.active, Some(f.ids[0]))
+        });
+        visual.simulate_mouse_move(sidebar, None, Default::default());
+        draw(&mut visual);
+        assert!(hover(&mut visual), "hover must resume after release");
+        let range = editor.read_with(cx, |s, _| s.selected_range());
+        visual.update(|w, cx| {
+            // Include positions outside the native client area without desktop input.
+            w.dispatch_event(
+                MouseMoveEvent {
+                    position: point(-px(30.), -px(30.)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(64));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |s, _| s.selected_range()), range);
+        assert_eq!(editor.read_with(cx, |s, _| s.value().to_owned()), source);
+        // Recover if a release outside the native window was missed.
+        visual.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        draw(&mut visual);
+        visual.simulate_mouse_move(sidebar, None, Default::default());
+        draw(&mut visual);
+        assert!(hover(&mut visual), "missing release must clear capture");
+        visual.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        draw(&mut visual);
+        visual.update(|w, cx| w.press("escape", cx));
+        draw(&mut visual);
+        visual.simulate_mouse_move(sidebar, None, Default::default());
+        draw(&mut visual);
+        assert!(hover(&mut visual), "Escape must clear capture");
+    }
+}
+
+#[gpui::test]
 fn markdown_reading_renders_links_and_blocks_edits_without_losing_source_history(
     cx: &mut TestAppContext,
 ) {
