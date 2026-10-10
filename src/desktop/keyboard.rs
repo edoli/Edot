@@ -70,8 +70,27 @@ impl Edot {
             }
         } else if ctrl && shift && key == "t" && !event.keystroke.modifiers.alt {
             self.reopen_closed_tab(window, cx);
-        } else if ctrl && key == "b" {
-            self.session.sidebar_visible = !self.session.sidebar_visible;
+        } else if ctrl
+            && !shift
+            && !event.keystroke.modifiers.alt
+            && !event.keystroke.modifiers.platform
+            && key == "\\"
+        {
+            if !event.is_held {
+                self.session.sidebar_visible = !self.session.sidebar_visible;
+            }
+        } else if ctrl
+            && shift
+            && !event.keystroke.modifiers.alt
+            && !event.keystroke.modifiers.platform
+            && key == "p"
+        {
+            if !event.is_held
+                && self.active_editor().is_some()
+                && self.set_read_only(!self.settings.read_only, window, cx)
+            {
+                self.focus_editor(window, cx);
+            }
         } else if ctrl && key == "," {
             self.show_settings(window, cx);
         } else if ctrl && matches!(key, "f" | "h") {

@@ -84,7 +84,7 @@ impl Edot {
                         tool(
                             "hide-sidebar",
                             IconName::ChevronsLeft,
-                            "사이드바 숨기기 · Ctrl+B",
+                            "사이드바 숨기기 · Ctrl+\\",
                         )
                         .w(px(36.))
                         .h(px(36.))

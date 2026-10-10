@@ -18,7 +18,8 @@ const SECTIONS: &[ShortcutSection] = &[
             ("Ctrl+Tab / Ctrl+PageDown", "다음 탭으로 이동"),
             ("Ctrl+Shift+Tab / Ctrl+PageUp", "이전 탭으로 이동"),
             ("Ctrl+1~8 / Ctrl+9", "해당 순번 탭 / 마지막 탭으로 이동"),
-            ("Ctrl+B", "사이드바 표시 / 숨기기"),
+            ("Ctrl+\\", "사이드바 표시 / 숨기기"),
+            ("Ctrl+Shift+P", "읽기 / 편집 모드 전환"),
             ("Ctrl+,", "설정 열기 / 닫기"),
             ("Alt+Z", "자동 줄 바꿈 켜기 / 끄기"),
             ("F2", "노트 이름 바꾸기"),
@@ -41,6 +42,11 @@ const SECTIONS: &[ShortcutSection] = &[
             ),
             ("Ctrl+V", "텍스트 붙여넣기"),
             ("Ctrl+A", "입력 내용 전체 선택"),
+            ("Ctrl+B / Ctrl+I", "Markdown 본문: 굵게 / 기울임 적용·해제"),
+            (
+                "Ctrl+Shift+` / Ctrl+`",
+                "Markdown 본문: 취소선 / 인라인 코드 적용·해제",
+            ),
             (
                 "Ctrl+D",
                 "본문의 단어 선택 / 다음 일치 항목 추가 선택·동시 편집",

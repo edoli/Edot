@@ -368,6 +368,7 @@ impl InputState {
 
 mod column;
 mod element;
+mod formatting;
 mod highlighting;
 mod history;
 mod ime;

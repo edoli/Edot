@@ -192,7 +192,7 @@ impl Edot {
                     tool(
                         "show-sidebar",
                         IconName::ChevronsRight,
-                        "사이드바 표시 · Ctrl+B",
+                        "사이드바 표시 · Ctrl+\\",
                     )
                     .w(px(36.))
                     .h(px(34.))

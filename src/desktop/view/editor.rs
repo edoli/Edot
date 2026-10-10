@@ -227,9 +227,9 @@ impl Edot {
                         IconName::BookOpen
                     })
                     .tooltip(if read_only {
-                        "편집 모드로 전환"
+                        "편집 모드로 전환 · Ctrl+Shift+P"
                     } else {
-                        "읽기 모드로 전환"
+                        "읽기 모드로 전환 · Ctrl+Shift+P"
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.set_read_only(!this.settings.read_only, window, cx) {

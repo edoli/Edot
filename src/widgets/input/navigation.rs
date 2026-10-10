@@ -183,6 +183,22 @@ impl InputState {
         if event.keystroke.modifiers.alt || event.keystroke.modifiers.platform {
             return;
         }
+        if ctrl && self.multiline && self.text_mode == TextMode::Markdown {
+            let marker = match (key, shift) {
+                ("b", false) => Some("**"),
+                ("i", false) => Some("*"),
+                ("`", true) | ("~", false) => Some("~~"),
+                ("`", false) => Some("`"),
+                _ => None,
+            };
+            if let Some(marker) = marker {
+                if !event.is_held {
+                    self.toggle_inline_format(marker, cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
+        }
         let cursor = self.cursor();
         let mut dest = None;
         match key {

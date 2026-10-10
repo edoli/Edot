@@ -1,6 +1,145 @@
 use super::*;
 
 #[gpui::test]
+fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
+    cx: &mut TestAppContext,
+) {
+    use crate::widgets::TextMode;
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, window, cx| {
+        this.focus_editor(window, cx);
+        this.active_editor().unwrap()
+    });
+    cx.update_window(f.window, |_, window, cx| {
+        window.render_frame(cx);
+        for (key, marker) in [
+            ("ctrl-b", "**"),
+            ("ctrl-i", "*"),
+            ("ctrl-shift-`", "~~"),
+            ("ctrl-~", "~~"), // Windows normalizes Shift+backtick to '~'.
+            ("ctrl-`", "`"),
+        ] {
+            let original = "앞 한글🙂 뒤";
+            let start = "앞 ".len();
+            let end = start + "한글🙂".len();
+            editor.update(cx, |s, cx| {
+                s.set_value(original, window, cx);
+                s.set_selected_range(start..end, cx);
+            });
+            let sidebar = f.view.read(cx).session.sidebar_visible;
+            window.press(key, cx);
+            let formatted = format!("앞 {marker}한글🙂{marker} 뒤");
+            assert_eq!(editor.read(cx).value(), formatted);
+            assert_eq!(editor.read(cx).selected_value(), "한글🙂");
+            assert_eq!(f.view.read(cx).session.sidebar_visible, sidebar);
+            window.press("ctrl-z", cx);
+            assert_eq!(editor.read(cx).value(), original);
+            assert_eq!(editor.read(cx).selected_range(), start..end);
+            window.press("ctrl-y", cx);
+            assert_eq!(editor.read(cx).value(), formatted);
+            assert_eq!(editor.read(cx).selected_value(), "한글🙂");
+            window.press(key, cx);
+            assert_eq!(editor.read(cx).value(), original);
+            assert_eq!(editor.read(cx).selected_range(), start..end);
+            editor.update(cx, |s, cx| {
+                s.set_value("", window, cx);
+            });
+            window.press(key, cx);
+            assert_eq!(editor.read(cx).value(), format!("{marker}{marker}"));
+            assert_eq!(editor.read(cx).selected_range(), marker.len()..marker.len());
+            window.press(key, cx);
+            assert!(editor.read(cx).value().is_empty());
+        }
+        for (source, key, expected) in [
+            ("**한글**", "ctrl-i", "***한글***"),
+            ("***한글***", "ctrl-b", "*한글*"),
+            ("~~한글~~", "ctrl-shift-`", "한글"),
+            ("`한글`", "ctrl-`", "한글"),
+        ] {
+            editor.update(cx, |s, cx| {
+                s.set_value(source, window, cx);
+                let start = source.find("한글").unwrap();
+                s.set_selected_range(start..start + "한글".len(), cx);
+            });
+            window.press(key, cx);
+            assert_eq!(editor.read(cx).value(), expected);
+            assert_eq!(editor.read(cx).selected_value(), "한글");
+        }
+        for source in ["a`b", "`앞", "끝`", " 앞 "] {
+            editor.update(cx, |s, cx| {
+                s.set_value(source, window, cx);
+                s.select_all(window, cx);
+            });
+            window.press("ctrl-`", cx);
+            assert_eq!(editor.read(cx).selected_value(), source);
+            window.press("ctrl-`", cx);
+            assert_eq!(editor.read(cx).value(), source);
+        }
+        // All selected occurrences are formatted in one undo transaction.
+        editor.update(cx, |s, cx| {
+            s.set_value("한글 + 한글", window, cx);
+            s.set_selected_range(0..0, cx);
+        });
+        window.press("ctrl-d", cx);
+        window.press("ctrl-d", cx);
+        window.press("ctrl-b", cx);
+        assert_eq!(editor.read(cx).value(), "**한글** + **한글**");
+        assert_eq!(editor.read(cx).selected_ranges().count(), 2);
+        assert!(
+            editor
+                .read(cx)
+                .selected_ranges()
+                .all(|r| &editor.read(cx).value()[r] == "한글")
+        );
+        window.press("ctrl-z", cx);
+        assert_eq!(editor.read(cx).value(), "한글 + 한글");
+        assert_eq!(editor.read(cx).selected_ranges().count(), 2);
+        editor.update(cx, |s, cx| {
+            s.set_value("plain", window, cx);
+            s.select_all(window, cx);
+            s.set_text_mode(TextMode::PlainText, cx);
+        });
+        for key in ["ctrl-b", "ctrl-i", "ctrl-shift-`", "ctrl-~", "ctrl-`"] {
+            window.press(key, cx);
+        }
+        assert_eq!(editor.read(cx).value(), "plain");
+    })
+    .unwrap();
+    let sidebar = f.update(cx, |this, _, _| this.session.sidebar_visible);
+    f.press(cx, "ctrl-\\");
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.session.sidebar_visible, !sidebar)
+    });
+    f.press(cx, "ctrl-\\");
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.session.sidebar_visible, sidebar)
+    });
+    f.press(cx, "ctrl-shift-p");
+    f.update(cx, |this, _, cx| {
+        assert!(this.settings.read_only);
+        assert!(Settings::load(&this.config_dir).unwrap().read_only);
+        assert!(
+            this.open
+                .iter()
+                .filter_map(|tab| tab.editor.as_ref())
+                .all(|editor| editor.read(cx).is_read_only())
+        );
+    });
+    f.update(cx, |_, _, cx| {
+        editor.update(cx, |s, cx| s.set_text_mode(TextMode::Markdown, cx))
+    });
+    for key in ["ctrl-b", "ctrl-i", "ctrl-shift-`", "ctrl-~", "ctrl-`"] {
+        f.press(cx, key);
+    }
+    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), "plain"));
+    f.press(cx, "ctrl-shift-p");
+    f.update(cx, |this, _, cx| {
+        assert!(!this.settings.read_only);
+        assert!(!editor.read(cx).is_read_only());
+    });
+}
+
+#[gpui::test]
 fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut TestAppContext) {
     use crate::widgets::{input::TextMode, theme::ActiveTheme as _};
     use gpui::{InputEvent as _, MouseButton, MouseMoveEvent};
