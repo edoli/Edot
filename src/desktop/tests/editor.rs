@@ -5,6 +5,7 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
     cx: &mut TestAppContext,
 ) {
     use crate::widgets::TextMode;
+    use gpui::InputEvent as _;
     let f = Fixture::new(cx);
     let editor = f.update(cx, |this, window, cx| {
         this.focus_editor(window, cx);
@@ -136,6 +137,32 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
     f.update(cx, |this, _, cx| {
         assert!(!this.settings.read_only);
         assert!(!editor.read(cx).is_read_only());
+    });
+    // Window shortcuts also work while an overlay owns keyboard focus.
+    f.press(cx, "f1");
+    f.press(cx, "f11");
+    f.update(cx, |this, window, _| {
+        assert!(window.is_fullscreen());
+        assert!(this.shortcut_help.is_some());
+    });
+    f.press(cx, "ctrl-f11");
+    cx.update_window(f.window, |_, window, cx| {
+        window.dispatch_event(
+            gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("f11").unwrap(),
+                is_held: true,
+                prefer_character_input: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        assert!(window.is_fullscreen());
+    })
+    .unwrap();
+    f.press(cx, "f11");
+    f.update(cx, |_, window, cx| {
+        assert!(!window.is_fullscreen());
+        assert_eq!(editor.read(cx).value(), "plain");
     });
 }
 

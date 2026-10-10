@@ -26,6 +26,15 @@ impl Render for Root {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
+            .capture_key_down(|event, window, cx| {
+                if event.keystroke.key == "f11" && event.keystroke.modifiers == Modifiers::default()
+                {
+                    if !event.is_held {
+                        window.toggle_fullscreen();
+                    }
+                    cx.stop_propagation();
+                }
+            })
             .on_key_down(|event, window, cx| {
                 if event.keystroke.key == "tab" && !event.keystroke.modifiers.control {
                     if event.keystroke.modifiers.shift {

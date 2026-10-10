@@ -11,6 +11,7 @@ const SECTIONS: &[ShortcutSection] = &[
         title: "앱 · 노트 · 탭",
         rows: &[
             ("F1", "단축키 안내 열기 / 닫기"),
+            ("F11", "전체화면 켜기 / 끄기"),
             ("Ctrl+N", "새 노트 만들기"),
             ("Ctrl+S", "수정한 노트 저장"),
             ("Ctrl+W / Ctrl+F4", "현재 탭 닫기"),
