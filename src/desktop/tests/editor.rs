@@ -167,6 +167,99 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
 }
 
 #[gpui::test]
+fn shortcut_search_filters_rows_and_preserves_input_and_editor_focus(cx: &mut TestAppContext) {
+    use gpui::Focusable as _;
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, window, cx| {
+        this.focus_editor(window, cx);
+        this.active_editor().unwrap()
+    });
+    let original = editor.read_with(cx, |state, _| (state.value(), state.revision));
+    f.press(cx, "f1");
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    let draw = |visual: &mut gpui::VisualTestContext| {
+        visual.update(|window, cx| window.render_frame(cx));
+    };
+    draw(&mut visual);
+    assert!(visual.debug_bounds("shortcut-search").is_some());
+    cx.simulate_input(f.window, "F11");
+    draw(&mut visual);
+    assert!(visual.debug_bounds("shortcut-row-2").is_some());
+    assert!(visual.debug_bounds("shortcut-row-1").is_none());
+    // Home edits the query instead of scrolling the table.
+    f.press(cx, "home");
+    f.press(cx, "delete");
+    cx.simulate_input(f.window, "F");
+    draw(&mut visual);
+    assert!(visual.debug_bounds("shortcut-row-2").is_some());
+    f.press(cx, "ctrl-f");
+    cx.simulate_input(f.window, "cTrL + ShIfT + p");
+    draw(&mut visual);
+    assert!(visual.debug_bounds("shortcut-row-11").is_some());
+    assert!(visual.debug_bounds("shortcut-row-2").is_none());
+    f.press(cx, "enter");
+    f.update(cx, |this, _, _| assert!(this.shortcut_help.is_some()));
+    f.press(cx, "ctrl-f");
+    cx.simulate_input(f.window, "전체화면");
+    draw(&mut visual);
+    assert!(visual.debug_bounds("shortcut-row-2").is_some());
+    f.press(cx, "ctrl-a");
+    cx.simulate_input(f.window, "없는 기능입니다");
+    draw(&mut visual);
+    assert!(visual.debug_bounds("shortcut-empty").is_some());
+    assert!(visual.debug_bounds("shortcut-row-2").is_none());
+    f.press(cx, "ctrl-a");
+    f.press(cx, "backspace");
+    draw(&mut visual);
+    assert!(visual.debug_bounds("shortcut-empty").is_none());
+    assert!(visual.debug_bounds("shortcut-row-1").is_some());
+    f.press(cx, "tab");
+    f.press(cx, "end");
+    f.update(cx, |this, _, cx| {
+        assert!(
+            this.shortcut_help
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .scroll
+                .offset()
+                .y
+                < px(0.)
+        );
+    });
+    f.press(cx, "shift-tab");
+    cx.simulate_input(f.window, "F11");
+    draw(&mut visual);
+    assert!(visual.debug_bounds("shortcut-row-2").is_some());
+    f.update(cx, |this, _, cx| {
+        assert_eq!(
+            this.shortcut_help
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .scroll
+                .offset()
+                .y,
+            px(0.)
+        );
+    });
+    f.press(cx, "escape");
+    f.update(cx, |this, window, cx| {
+        assert!(this.shortcut_help.is_none());
+        assert!(editor.read(cx).focus_handle(cx).is_focused(window));
+        assert_eq!(
+            (editor.read(cx).value(), editor.read(cx).revision),
+            original
+        );
+    });
+    f.press(cx, "f1");
+    draw(&mut visual);
+    assert!(visual.debug_bounds("shortcut-row-1").is_some());
+    f.press(cx, "f1");
+    f.update(cx, |this, _, _| assert!(this.shortcut_help.is_none()));
+}
+
+#[gpui::test]
 fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut TestAppContext) {
     use crate::widgets::{input::TextMode, theme::ActiveTheme as _};
     use gpui::{InputEvent as _, MouseButton, MouseMoveEvent};

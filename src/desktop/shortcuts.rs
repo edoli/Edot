@@ -10,7 +10,7 @@ const SECTIONS: &[ShortcutSection] = &[
     ShortcutSection {
         title: "앱 · 노트 · 탭",
         rows: &[
-            ("F1", "단축키 안내 열기 / 닫기"),
+            ("F1", "단축키 열기 / 닫기"),
             ("F11", "전체화면 켜기 / 끄기"),
             ("Ctrl+N", "새 노트 만들기"),
             ("Ctrl+S", "수정한 노트 저장"),
@@ -149,21 +149,36 @@ const SECTIONS: &[ShortcutSection] = &[
         ],
     },
     ShortcutSection {
-        title: "단축키 안내",
+        title: "단축키",
         rows: &[
+            ("Ctrl+F", "단축키 검색창으로 이동·전체 선택"),
+            ("Tab / Shift+Tab", "검색창 / 단축키 표로 포커스 이동"),
             ("↑ / ↓ / 휠", "표 위 / 아래로 스크롤"),
             ("PageUp / PageDown", "표 한 화면 위 / 아래로 스크롤"),
-            ("Home / End", "표 처음 / 끝으로 이동"),
-            ("F1 / Esc / Enter", "단축키 안내 닫기"),
+            (
+                "Home / End",
+                "표 처음 / 끝으로 이동 (검색창에서는 커서 이동)",
+            ),
+            ("F1 / Esc", "단축키 닫기"),
+            ("Enter", "단축키 닫기 (검색창 제외)"),
         ],
     },
 ];
+
+fn search_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
 
 pub(super) struct ShortcutHelp {
     focus: FocusHandle,
     restore: Option<FocusHandle>,
     owner: WeakEntity<Edot>,
     pub(super) scroll: ScrollHandle,
+    search: Entity<InputState>,
+    _subscription: Subscription,
 }
 
 impl Edot {
@@ -186,13 +201,27 @@ impl Edot {
         self.resizing = None;
         let focus = cx.focus_handle();
         let owner = cx.entity().downgrade();
-        self.shortcut_help = Some(cx.new(|_| ShortcutHelp {
-            focus: focus.clone(),
-            restore,
-            owner,
-            scroll: ScrollHandle::new(),
-        }));
-        focus.focus(window, cx);
+        let help = cx.new(|cx| {
+            let search =
+                cx.new(|cx| InputState::new(window, cx).placeholder("단축키 또는 기능 검색"));
+            let subscription = cx.subscribe(&search, |this: &mut ShortcutHelp, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.scroll.set_offset(point(px(0.), px(0.)));
+                    cx.notify();
+                }
+            });
+            ShortcutHelp {
+                focus,
+                restore,
+                owner,
+                scroll: ScrollHandle::new(),
+                search,
+                _subscription: subscription,
+            }
+        });
+        let search_focus = help.read(cx).search.read(cx).focus_handle(cx);
+        self.shortcut_help = Some(help);
+        search_focus.focus(window, cx);
         cx.notify();
     }
 }
@@ -212,10 +241,35 @@ impl ShortcutHelp {
     }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
+        let search_focus = self.search.read(cx).focus_handle(cx);
+        let search_focused = search_focus.is_focused(window);
+        if search_focused && self.search.read(cx).is_composing() {
+            return;
+        }
         match key {
-            "escape" | "enter" => self.close(window, cx),
+            "escape" => self.close(window, cx),
+            "enter" if !search_focused => self.close(window, cx),
             "f1" if !event.is_held => self.close(window, cx),
-            "up" | "down" | "pageup" | "pagedown" | "home" | "end" => {
+            "f" if event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.shift
+                && !event.keystroke.modifiers.alt
+                && !event.keystroke.modifiers.platform =>
+            {
+                self.search.update(cx, |search, cx| {
+                    search.select_all(window, cx);
+                    search.focus(window, cx);
+                });
+            }
+            "tab" => {
+                if search_focused {
+                    self.focus.focus(window, cx);
+                } else {
+                    search_focus.focus(window, cx);
+                }
+            }
+            "up" | "down" | "pageup" | "pagedown" | "home" | "end"
+                if !search_focused || !matches!(key, "home" | "end") =>
+            {
                 let current = self.scroll.offset().y;
                 let page = self.scroll.bounds().size.height;
                 let max = self.scroll.max_offset().y;
@@ -231,6 +285,7 @@ impl ShortcutHelp {
                     .set_offset(point(px(0.), next.clamp(-max, px(0.))));
                 cx.notify();
             }
+            _ if search_focused => return,
             _ => {}
         }
         cx.stop_propagation();
@@ -305,7 +360,26 @@ impl Render for ShortcutHelp {
             .overflow_y_scroll()
             .track_scroll(&self.scroll);
         let mut row_id = 1;
+        let query = search_text(&self.search.read(cx).value());
+        let mut any_matches = false;
         for section in SECTIONS {
+            let section_matches = search_text(section.title).contains(&query);
+            let matching_rows: Vec<_> = section
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, (keys, description))| {
+                    section_matches
+                        || search_text(keys).contains(&query)
+                        || search_text(description).contains(&query)
+                })
+                .collect();
+            let section_start = row_id;
+            row_id += section.rows.len();
+            if matching_rows.is_empty() {
+                continue;
+            }
+            any_matches = true;
             rows = rows.child(
                 div()
                     .flex_shrink_0()
@@ -316,10 +390,24 @@ impl Render for ShortcutHelp {
                     .text_color(cx.theme().primary)
                     .child(section.title),
             );
-            for &(keys, description) in section.rows {
-                rows = rows.child(table_row(row_id, keys, description, false, cx));
-                row_id += 1;
+            for (index, &(keys, description)) in matching_rows {
+                rows = rows.child(table_row(
+                    section_start + index,
+                    keys,
+                    description,
+                    false,
+                    cx,
+                ));
             }
+        }
+        if !any_matches {
+            rows = rows.child(
+                div()
+                    .debug_selector(|| "shortcut-empty".into())
+                    .p_3()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("검색 결과가 없습니다."),
+            );
         }
         div()
             .id("shortcut-overlay")
@@ -339,7 +427,7 @@ impl Render for ShortcutHelp {
                     .id("shortcut-help")
                     .debug_selector(|| "shortcut-help".into())
                     .role(Role::Dialog)
-                    .aria_label("단축키 안내")
+                    .aria_label("단축키")
                     .v_flex()
                     .w(px(
                         (f32::from(window.viewport_size().width) - 32.).clamp(0., 760.)
@@ -364,23 +452,42 @@ impl Render for ShortcutHelp {
                             .gap_3()
                             .child(
                                 div()
-                                    .flex_1()
+                                    .flex_shrink_0()
                                     .text_xl()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("단축키 안내"),
+                                    .child("단축키"),
                             )
                             .child(
-                                div().debug_selector(|| "shortcut-close".into()).child(
-                                    Button::new("shortcut-close-button")
-                                        .label("닫기")
-                                        .tab_stop(false)
-                                        .on_click(cx.listener(|this, _, w, cx| this.close(w, cx))),
-                                ),
+                                div()
+                                    .debug_selector(|| "shortcut-search".into())
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&self.search).aria_label("단축키 검색")),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "shortcut-close".into())
+                                    .flex_shrink_0()
+                                    .child(
+                                        Button::new("shortcut-close-button")
+                                            .icon(IconName::Close)
+                                            .tooltip("닫기 · Esc")
+                                            .w(px(32.))
+                                            .px_0()
+                                            .tab_stop(false)
+                                            .on_click(
+                                                cx.listener(|this, _, w, cx| this.close(w, cx)),
+                                            ),
+                                    ),
                             ),
                     )
                     .child(
                         div()
                             .id("shortcut-table")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| this.focus.focus(window, cx)),
+                            )
                             .v_flex()
                             .role(Role::Table)
                             .flex_1()
