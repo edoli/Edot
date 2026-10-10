@@ -4,17 +4,16 @@ use super::*;
 impl Edot {
     pub(in crate::desktop) fn tabs_view(
         &mut self,
+        sidebar_extent: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let sidebar_width = if self.session.sidebar_visible {
-            sidebar_width(
-                self.session.sidebar_width,
-                f32::from(window.viewport_size().width),
-            ) + SIDEBAR_RESIZE_WIDTH
-        } else {
-            36.
-        };
+        let sidebar_width = sidebar_extent
+            + if self.session.sidebar_visible {
+                0.
+            } else {
+                36.
+            };
         let available = (f32::from(window.viewport_size().width) - sidebar_width - 80.).max(1.);
         let layout = crate::tabs::TabLayout::new(
             available as i32,

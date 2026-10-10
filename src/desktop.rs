@@ -36,6 +36,7 @@ mod keyboard;
 mod preferences;
 mod search_ui;
 mod shortcuts;
+mod sidebar;
 mod spaces;
 #[cfg(test)]
 mod tests;
@@ -86,6 +87,7 @@ pub struct Edot {
     drop_target: Option<DropTarget>,
     tab_drop: Option<usize>,
     resizing: Option<(Pixels, i32)>,
+    sidebar_motion: sidebar::SidebarMotion,
     tree_auto: component::scroll::AutoScroll,
     tab_auto: component::scroll::AutoScroll,
     dragging_notes: Vec<NoteId>,
@@ -130,6 +132,8 @@ impl Edot {
             }
             Err(error) => Some(format!("Space 목록을 읽지 못했습니다\n{error}")),
         };
+        let sidebar_motion =
+            sidebar::SidebarMotion::new(session.sidebar_visible, cx.background_executor().now());
         let mut this = Self {
             dir,
             space_ui,
@@ -168,6 +172,7 @@ impl Edot {
             drop_target: None,
             tab_drop: None,
             resizing: None,
+            sidebar_motion,
             tree_auto: Default::default(),
             tab_auto: Default::default(),
             dragging_notes: vec![],

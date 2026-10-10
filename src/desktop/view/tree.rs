@@ -211,7 +211,9 @@ impl Edot {
         let active = self.session.active == Some(id);
         let context = self.context_note == Some(id);
         let multiple = selected && self.selection.ids.len() > 1;
-        let renaming = self.rename.as_ref().is_some_and(|(note, _)| *note == id);
+        // During closing the same title editor is already hosted by the tab bar.
+        let renaming = self.session.sidebar_visible
+            && self.rename.as_ref().is_some_and(|(note, _)| *note == id);
         let ids = if selected {
             self.book
                 .selected_roots(&self.selection.ids.iter().copied().collect::<Vec<_>>())

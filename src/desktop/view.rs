@@ -44,6 +44,22 @@ mod tree;
 
 impl Render for Edot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (sidebar_progress, sidebar_moving) = self.sidebar_motion.tick(
+            self.session.sidebar_visible,
+            cx.background_executor().now(),
+            cx.reduce_motion(),
+        );
+        if sidebar_moving {
+            window.request_animation_frame();
+        }
+        if !self.session.sidebar_visible {
+            self.resizing = None;
+        }
+        let sidebar_full_width = sidebar_width(
+            self.session.sidebar_width,
+            f32::from(window.viewport_size().width),
+        ) + SIDEBAR_RESIZE_WIDTH;
+        let sidebar_extent = sidebar_full_width * sidebar_progress;
         if !self.dragging_notes.is_empty() && cx.has_active_drag() {
             let cursor = if self.drop_target.is_some() {
                 CursorStyle::ClosedHand
@@ -72,7 +88,7 @@ impl Render for Edot {
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(self.tabs_view(window, cx))
+            .child(self.tabs_view(sidebar_extent, window, cx))
             .child(body)
             .child(self.status_view(cx));
         let mut root = div()
@@ -108,21 +124,41 @@ impl Render for Edot {
                     cx.notify();
                 }),
             );
-        if self.session.sidebar_visible {
-            root = root.child(self.sidebar(window, cx)).child(
+        if sidebar_extent > 0. {
+            let sidebar = self.sidebar(window, cx);
+            root = root.child(
                 div()
-                    .w(px(SIDEBAR_RESIZE_WIDTH))
+                    .id("sidebar-clip")
+                    .relative()
+                    .w(px(sidebar_extent))
                     .h_full()
                     .flex_shrink_0()
-                    .bg(cx.theme().sidebar),
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h_flex()
+                            .w(px(sidebar_full_width))
+                            .h_full()
+                            .flex_shrink_0()
+                            .ml(px(sidebar_extent - sidebar_full_width))
+                            .child(sidebar)
+                            .child(
+                                div()
+                                    .w(px(SIDEBAR_RESIZE_WIDTH))
+                                    .h_full()
+                                    .flex_shrink_0()
+                                    .bg(cx.theme().sidebar),
+                            ),
+                    )
+                    .when(sidebar_moving, |clip| {
+                        clip.child(div().absolute().inset_0().occlude())
+                    }),
             );
         }
         root = root.child(main);
-        if self.session.sidebar_visible {
-            let edge = sidebar_width(
-                self.session.sidebar_width,
-                f32::from(window.viewport_size().width),
-            ) + SIDEBAR_RESIZE_WIDTH;
+        if sidebar_extent > 0. {
+            let edge = sidebar_extent;
+            let enabled = self.session.sidebar_visible && !sidebar_moving;
             let dragging = self.resizing.is_some();
             let view = cx.entity().downgrade();
             let entity_id = cx.entity_id();
@@ -153,8 +189,12 @@ impl Render for Edot {
                             move |bounds, hitbox, window, cx| {
                                 // One hitbox owns color, cursor, and mouse-down. Avoid
                                 // a separate group-hover element and its hover cache.
-                                let hovered = hitbox.is_hovered(window);
-                                let cursor = CursorStyle::ResizeColumn;
+                                let hovered = enabled && hitbox.is_hovered(window);
+                                let cursor = if enabled {
+                                    CursorStyle::ResizeColumn
+                                } else {
+                                    CursorStyle::Arrow
+                                };
                                 window.set_cursor_style(cursor, &hitbox);
                                 let highlighted = dragging || hovered;
                                 let line = Bounds::new(
@@ -172,7 +212,8 @@ impl Render for Edot {
                                 let move_hitbox = hitbox.clone();
                                 window.on_mouse_event(
                                     move |_: &MouseMoveEvent, phase, window, cx| {
-                                        if phase == DispatchPhase::Capture
+                                        if enabled
+                                            && phase == DispatchPhase::Capture
                                             && move_hitbox.is_hovered(window) != hovered
                                         {
                                             cx.notify(entity_id);
@@ -183,7 +224,8 @@ impl Render for Edot {
                                 let view = view.clone();
                                 window.on_mouse_event(
                                     move |e: &MouseDownEvent, phase, window, cx| {
-                                        if phase != DispatchPhase::Bubble
+                                        if !enabled
+                                            || phase != DispatchPhase::Bubble
                                             || e.button != MouseButton::Left
                                             || !hitbox.is_hovered(window)
                                         {

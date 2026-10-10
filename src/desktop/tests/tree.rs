@@ -305,3 +305,34 @@ fn rename_pasted_tabs_and_newlines_become_spaces(cx: &mut TestAppContext) {
         "🙂 한글12\r\n한글3\rkeep\n"
     );
 }
+
+#[gpui::test]
+fn closing_sidebar_preserves_title_edit_and_saved_width(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let width = f.update(cx, |this, window, cx| {
+        this.begin_rename(f.ids[0], window, cx);
+        this.title_input.update(cx, |state, cx| {
+            state.replace_all("애니메이션 중 보존할 제목", window, cx);
+        });
+        this.session.sidebar_width
+    });
+    f.press(cx, "ctrl-\\");
+    cx.update_window(f.window, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    f.update(cx, |this, window, cx| {
+        assert!(!this.session.sidebar_visible);
+        assert_eq!(
+            this.title_input.read(cx).value(),
+            "애니메이션 중 보존할 제목"
+        );
+        assert!(this.finish_rename(true, true, window, cx));
+        assert_eq!(
+            this.book.get(f.ids[0]).unwrap().title,
+            "애니메이션 중 보존할 제목"
+        );
+        this.save_session().unwrap();
+        let saved = Session::load(&this.dir, &this.book);
+        assert!(!saved.sidebar_visible);
+        assert_eq!(saved.sidebar_width, width);
+    });
+}
