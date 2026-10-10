@@ -11,6 +11,60 @@ pub(super) struct Preferences {
 }
 
 impl Edot {
+    pub(super) fn refresh_startup_fonts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if cx.global::<AppState>().font_refresh_started {
+            return;
+        }
+        cx.global_mut::<AppState>().font_refresh_started = true;
+        let text_system = cx.text_system().clone();
+        let refresh = cx.background_executor().spawn(async move {
+            text_system
+                .refresh_system_fonts_once()
+                .map(|refreshed| refreshed.then(|| text_system.all_font_names()))
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = refresh.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                cx.global_mut::<AppState>().font_refresh = None;
+                match result {
+                    Ok(Some(fonts)) => this.apply_startup_font_names(fonts, window, cx),
+                    Ok(None) => this.sync_fallback_font(window, cx),
+                    Err(error) => {
+                        eprintln!("글꼴 목록을 갱신하지 못했습니다: {error}");
+                        this.sync_fallback_font(window, cx);
+                    }
+                }
+            });
+        });
+        cx.global_mut::<AppState>().font_refresh = Some(task);
+    }
+
+    pub(super) fn apply_startup_font_names(
+        &mut self,
+        fonts: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_fallback_font(window, cx);
+        if let Some(preferences) = &self.preferences {
+            let choices = font_choices(fonts.clone(), &cx.global::<AppState>().settings.font);
+            preferences
+                .font
+                .update(cx, |select, cx| select.set_items(choices, cx));
+        }
+        cx.global_mut::<AppState>().font_names = Some(fonts);
+    }
+
+    fn sync_fallback_font(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.startup_failed
+            && let Some(font) = fallback_font(&cx.global::<AppState>().settings.font, cx)
+        {
+            let mut next = cx.global::<AppState>().settings.clone();
+            next.font = font;
+            self.change_settings(next, window, cx);
+        }
+    }
+
     pub(super) fn remember_delete_choice(
         &mut self,
         dont_ask_again: bool,
@@ -19,18 +73,18 @@ impl Edot {
         if !dont_ask_again {
             return true;
         }
-        let mut next = self.settings.clone();
+        let mut next = cx.global::<AppState>().settings.clone();
         next.confirm_delete = false;
-        if let Err(error) = next.save(&self.config_dir) {
+        if let Err(error) = next.save(&cx.global::<AppState>().config_dir) {
             self.fail("설정을 저장하지 못했습니다", error, cx);
             return false;
         }
-        self.settings = next;
+        cx.global_mut::<AppState>().settings = next;
         cx.notify();
         true
     }
     pub(super) fn apply_theme(&self, window: &mut Window, cx: &mut App) {
-        let dark = match self.settings.theme {
+        let dark = match cx.global::<AppState>().settings.theme {
             ThemeMode::Light => false,
             ThemeMode::Dark => true,
             ThemeMode::System => matches!(
@@ -44,16 +98,23 @@ impl Edot {
     }
     pub(super) fn change_settings(
         &mut self,
-        next: Settings,
+        mut next: Settings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if let Err(error) = next.save(&self.config_dir) {
+        let font_changed = next.font != cx.global::<AppState>().settings.font;
+        if font_changed && let Some(font) = fallback_font(&next.font, cx) {
+            next.font = font;
+        }
+        if let Err(error) = next.save(&cx.global::<AppState>().config_dir) {
             self.fail("설정을 저장하지 못했습니다", error, cx);
             self.sync_preferences(window, cx);
             return false;
         }
         self.apply_settings(next, window, cx);
+        if font_changed {
+            self.sync_preferences(window, cx);
+        }
         true
     }
 
@@ -63,24 +124,24 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.settings.read_only == read_only {
+        if cx.global::<AppState>().settings.read_only == read_only {
             return true;
         }
-        let mut next = self.settings.clone();
+        let mut next = cx.global::<AppState>().settings.clone();
         next.read_only = read_only;
         self.change_settings(next, window, cx)
     }
 
     fn apply_settings(&mut self, next: Settings, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings = next;
+        cx.global_mut::<AppState>().settings = next;
         self.apply_theme(window, cx);
         for tab in &self.open {
             if let Some(editor) = &tab.editor {
                 editor.update(cx, |state, cx| {
                     let offset = state.scroll_offset();
-                    state.set_soft_wrap(self.settings.wrap, window, cx);
+                    state.set_soft_wrap(cx.global::<AppState>().settings.wrap, window, cx);
                     state.set_scroll_offset(offset, cx);
-                    state.set_read_only(self.settings.read_only, cx);
+                    state.set_read_only(cx.global::<AppState>().settings.read_only, cx);
                 });
             }
         }
@@ -90,7 +151,7 @@ impl Edot {
         let Some(prefs) = &self.preferences else {
             return;
         };
-        let mode: SharedString = match self.settings.theme {
+        let mode: SharedString = match cx.global::<AppState>().settings.theme {
             ThemeMode::Light => "밝게",
             ThemeMode::Dark => "어둡게",
             ThemeMode::System => "시스템",
@@ -100,10 +161,22 @@ impl Edot {
             .theme
             .update(cx, |s, cx| s.set_selected_value(&mode, window, cx));
         prefs.font.update(cx, |s, cx| {
-            s.set_selected_value(&self.settings.font.clone().into(), window, cx)
+            s.set_selected_value(
+                &cx.global::<AppState>().settings.font.clone().into(),
+                window,
+                cx,
+            )
         });
         prefs.size.update(cx, |s, cx| {
-            s.set_selected_value(&self.settings.font_size.to_string().into(), window, cx)
+            s.set_selected_value(
+                &cx.global::<AppState>()
+                    .settings
+                    .font_size
+                    .to_string()
+                    .into(),
+                window,
+                cx,
+            )
         });
     }
     pub(super) fn dismiss_settings(&mut self, cx: &mut Context<Self>) {
@@ -124,15 +197,12 @@ impl Edot {
         }
         self.find_visible = false;
         if self.preferences.is_none() {
-            let mut fonts = cx.text_system().all_font_names();
-            // Keep names compatible with the existing settings format and omit
-            // vertical aliases, as the previous GDI enumeration did.
-            fonts.retain(|name| crate::settings::valid_font(name) && !name.starts_with('@'));
-            if !fonts.contains(&self.settings.font) {
-                fonts.push(self.settings.font.clone());
-            }
-            fonts.sort_unstable();
-            fonts.dedup();
+            let fonts = cx
+                .global::<AppState>()
+                .font_names
+                .clone()
+                .unwrap_or_else(|| cx.text_system().all_font_names());
+            let fonts = font_choices(fonts, &cx.global::<AppState>().settings.font);
             let theme = cx.new(|cx| {
                 SelectState::new(
                     vec!["밝게".into(), "어둡게".into(), "시스템".into()],
@@ -141,18 +211,7 @@ impl Edot {
                     cx,
                 )
             });
-            let font = cx.new(|cx| {
-                SelectState::new(
-                    fonts
-                        .into_iter()
-                        .map(SharedString::from)
-                        .collect::<Vec<_>>(),
-                    None,
-                    window,
-                    cx,
-                )
-                .searchable(true)
-            });
+            let font = cx.new(|cx| SelectState::new(fonts, None, window, cx).searchable(true));
             let size = cx.new(|cx| {
                 SelectState::new(
                     (crate::settings::MIN_FONT_SIZE..=crate::settings::MAX_FONT_SIZE)
@@ -173,7 +232,7 @@ impl Edot {
                         let SelectEvent::Confirm(Some(value)) = event else {
                             return;
                         };
-                        let mut next = this.settings.clone();
+                        let mut next = cx.global::<AppState>().settings.clone();
                         match kind {
                             0 => {
                                 next.theme = match value.as_ref() {
@@ -188,7 +247,7 @@ impl Edot {
                                     value.parse().unwrap_or(crate::settings::DEFAULT_FONT_SIZE)
                             }
                         }
-                        if next != this.settings {
+                        if next != cx.global::<AppState>().settings {
                             this.change_settings(next, window, cx);
                         }
                     },
@@ -227,4 +286,29 @@ impl Edot {
             .update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
     }
+}
+
+fn fallback_font(family: &str, cx: &App) -> Option<String> {
+    let text_system = cx.text_system();
+    let requested = gpui::font(family.to_owned());
+    if text_system.font_id(&requested).is_ok() {
+        return None;
+    }
+    let resolved = text_system.resolve_font(&requested);
+    text_system
+        .get_font_for_id(resolved)
+        .map(|font| {
+            gpui::font_name_with_fallbacks(&font.family, component::theme::UI_FONT).to_owned()
+        })
+        .filter(|family| crate::settings::valid_font(family))
+}
+
+fn font_choices(mut fonts: Vec<String>, selected: &str) -> Vec<SharedString> {
+    fonts.retain(|name| crate::settings::valid_font(name) && !name.starts_with('@'));
+    if !fonts.iter().any(|name| name == selected) {
+        fonts.push(selected.to_owned());
+    }
+    fonts.sort_unstable();
+    fonts.dedup();
+    fonts.into_iter().map(SharedString::from).collect()
 }

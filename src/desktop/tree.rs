@@ -215,7 +215,7 @@ impl Edot {
         if count == 0 {
             return;
         }
-        if !self.settings.confirm_delete {
+        if !cx.global::<AppState>().settings.confirm_delete {
             self.delete_confirmed(&selected, window, cx);
             return;
         }

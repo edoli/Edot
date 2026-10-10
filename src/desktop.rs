@@ -22,6 +22,8 @@ use std::{
     rc::Rc,
 };
 
+mod app_state;
+use app_state::AppState;
 mod documents;
 mod file_sync;
 mod image_drop;
@@ -47,11 +49,9 @@ use metrics::*;
 
 pub struct Edot {
     dir: PathBuf,
-    config_dir: PathBuf,
     space_ui: SpaceUi,
     _lock: Option<StoreLock>,
     book: Notebook,
-    settings: Settings,
     session: Session,
     open: Vec<OpenTab>,
     closed_tabs: Vec<ClosedTab>,
@@ -99,25 +99,17 @@ pub struct Edot {
 impl Edot {
     fn new(
         dir: PathBuf,
-        config_dir: PathBuf,
         loaded: Result<LoadedSpace, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (lock, book, settings, session, error) = match loaded {
+        let (lock, book, session, error) = match loaded {
             Ok(LoadedSpace {
                 lock,
                 book,
-                settings,
                 session,
-            }) => (Some(lock), book, settings, session, None),
-            Err(error) => (
-                None,
-                Notebook::default(),
-                Settings::default(),
-                Session::default(),
-                Some(error),
-            ),
+            }) => (Some(lock), book, session, None),
+            Err(error) => (None, Notebook::default(), Session::default(), Some(error)),
         };
         let collapsed = session.collapsed(&book);
         let local = SearchPanel::new(window, cx);
@@ -126,9 +118,9 @@ impl Edot {
         let mut space_ui = SpaceUi::new(cx);
         space_ui.name = space::read_name(&dir).unwrap_or_else(|_| space::name(&dir));
         let registry = if error.is_none() {
-            space::Registry::initialize(&config_dir, &dir)
+            space::Registry::initialize(&cx.global::<AppState>().config_dir, &dir)
         } else {
-            space::Registry::load(&config_dir)
+            space::Registry::load(&cx.global::<AppState>().config_dir)
         };
         let registry_error = match registry {
             Ok(registry) => {
@@ -139,11 +131,9 @@ impl Edot {
         };
         let mut this = Self {
             dir,
-            config_dir,
             space_ui,
             _lock: lock,
             book,
-            settings,
             session,
             open: vec![],
             closed_tabs: vec![],
@@ -272,7 +262,7 @@ impl Edot {
         ));
         this.subscriptions
             .push(cx.observe_window_appearance(window, |this, window, cx| {
-                if this.settings.theme == ThemeMode::System {
+                if cx.global::<AppState>().settings.theme == ThemeMode::System {
                     this.apply_theme(window, cx);
                 }
             }));
@@ -353,7 +343,12 @@ pub fn run() {
         |paths| (paths.space.clone(), paths.config.clone()),
     );
     let loaded = paths
-        .and_then(|paths| LoadedSpace::open(&paths))
+        .and_then(|paths| {
+            let state = AppState::load(paths.config.clone())?;
+            let loaded = LoadedSpace::open(&paths)?;
+            paths.remember()?;
+            Ok((state, loaded))
+        })
         .map_err(|error| {
             format!("노트 저장소를 열지 못했습니다. 파일을 덮어쓰지 않습니다.\n{error}")
         });
@@ -364,6 +359,16 @@ pub fn run() {
                 crate::image_http::ImageHttpClient::new(cx.background_executor().clone()),
             ));
             component::init(cx);
+            let loaded = match loaded {
+                Ok((state, loaded)) => {
+                    cx.set_global(state);
+                    Ok(loaded)
+                }
+                Err(error) => {
+                    cx.set_global(AppState::new(config_dir, Settings::default()));
+                    Err(error)
+                }
+            };
 
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
@@ -385,7 +390,19 @@ pub fn run() {
                 ..Default::default()
             };
             if let Err(error) = component::open_window(options, cx, |window, cx| {
-                let view = cx.new(|cx| Edot::new(dir, config_dir, loaded, window, cx));
+                let view = cx.new(|cx| Edot::new(dir, loaded, window, cx));
+                let weak = view.downgrade();
+                // Next-frame callbacks run before presentation; the second turn starts
+                // background work only after the first frame has been presented.
+                window.on_next_frame(move |window, _| {
+                    window.on_next_frame(move |window, cx| {
+                        if let Err(error) = weak.update(cx, |this, cx| {
+                            this.refresh_startup_fonts(window, cx);
+                        }) {
+                            eprintln!("글꼴 갱신을 시작하지 못했습니다: {error}");
+                        }
+                    });
+                });
                 if let Err(error) = image_drop::install(&view, window, cx) {
                     view.update(cx, |this, cx| {
                         this.fail("이미지 드롭을 준비하지 못했습니다", error, cx)

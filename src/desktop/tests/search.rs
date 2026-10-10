@@ -66,8 +66,12 @@ fn global_replace_updates_open_and_closed_notes_and_preserves_undo(cx: &mut Test
             editor.read(cx).text_mode(),
             crate::widgets::TextMode::PlainText
         );
-        assert!(!this.settings.read_only);
-        assert!(!Settings::load(&this.config_dir).unwrap().read_only);
+        assert!(!cx.global::<AppState>().settings.read_only);
+        assert!(
+            !Settings::load(&cx.global::<AppState>().config_dir)
+                .unwrap()
+                .read_only
+        );
         for tab in &this.open {
             assert!(!tab.editor.as_ref().unwrap().read(cx).is_read_only());
         }

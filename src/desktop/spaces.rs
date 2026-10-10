@@ -32,27 +32,14 @@ impl SpaceUi {
 pub(super) struct LoadedSpace {
     pub(super) lock: StoreLock,
     pub(super) book: Notebook,
-    pub(super) settings: Settings,
     pub(super) session: Session,
 }
 
 impl LoadedSpace {
     pub(super) fn open(paths: &space::Paths) -> io::Result<Self> {
-        Self::open_with_settings(paths, None)
-    }
-
-    fn open_with_settings(
-        paths: &space::Paths,
-        running_settings: Option<Settings>,
-    ) -> io::Result<Self> {
-        let switching = running_settings.is_some();
         let lock = StoreLock::acquire(&paths.space)?;
         let _span = startup::span("notebook.load");
         let book = Notebook::load(&paths.space)?;
-        let settings = match running_settings {
-            Some(settings) => settings,
-            None => Settings::load_or_create(&paths.config)?,
-        };
         let session = Session::load(&paths.space, &book);
         if !paths.space.join("tree.tsv").try_exists()? {
             book.save(&paths.space)?;
@@ -63,14 +50,9 @@ impl LoadedSpace {
             session.save(&paths.space)?;
         }
         space::initialize_metadata(&paths.space)?;
-        if switching {
-            space::Registry::register(&paths.config, &paths.space)?;
-        }
-        paths.remember()?;
         Ok(Self {
             lock,
             book,
-            settings,
             session,
         })
     }
@@ -86,7 +68,7 @@ impl Edot {
             self.close_space_list(window, cx);
             return;
         }
-        match space::Registry::load(&self.config_dir) {
+        match space::Registry::load(&cx.global::<AppState>().config_dir) {
             Ok(registry) => self.space_ui.registry = registry,
             Err(error) => {
                 self.fail("Space 목록을 읽지 못했습니다", error, cx);
@@ -178,7 +160,7 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        match space::Registry::remove(&self.config_dir, path) {
+        match space::Registry::remove(&cx.global::<AppState>().config_dir, path) {
             Ok(registry) => {
                 self.space_ui.registry = registry;
                 self.space_ui.rename = None;
@@ -203,7 +185,7 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.settings.confirm_delete {
+        if !cx.global::<AppState>().settings.confirm_delete {
             self.remove_space(&path, window, cx);
             return;
         }
@@ -286,7 +268,7 @@ impl Edot {
         cx: &mut Context<Self>,
     ) -> bool {
         if space::same_path(&path, &self.dir) {
-            return match space::Registry::register(&self.config_dir, &path) {
+            return match space::Registry::register(&cx.global::<AppState>().config_dir, &path) {
                 Ok(registry) => {
                     self.space_ui.registry = registry;
                     if let Ok(name) = space::read_name(&self.dir) {
@@ -311,11 +293,16 @@ impl Edot {
         }
         let paths = space::Paths {
             space: path.clone(),
-            config: self.config_dir.clone(),
+            config: cx.global::<AppState>().config_dir.clone(),
         };
-        match LoadedSpace::open_with_settings(&paths, Some(self.settings.clone())) {
+        let loaded = LoadedSpace::open(&paths).and_then(|loaded| {
+            space::Registry::register(&paths.config, &paths.space)?;
+            paths.remember()?;
+            Ok(loaded)
+        });
+        match loaded {
             Ok(loaded) => {
-                *self = Self::new(path, self.config_dir.clone(), Ok(loaded), window, cx);
+                *self = Self::new(path, Ok(loaded), window, cx);
                 cx.notify();
                 true
             }

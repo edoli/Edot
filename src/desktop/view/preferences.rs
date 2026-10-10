@@ -102,9 +102,9 @@ impl Edot {
                 Switch::new("word-wrap")
                     .track_focus(&prefs.wrap_focus)
                     .label("자동 줄 바꿈")
-                    .checked(self.settings.wrap)
+                    .checked(cx.global::<AppState>().settings.wrap)
                     .on_change(cx.listener(|this, value, window, cx| {
-                        let mut next = this.settings.clone();
+                        let mut next = cx.global::<AppState>().settings.clone();
                         next.wrap = *value;
                         this.change_settings(next, window, cx);
                     })),

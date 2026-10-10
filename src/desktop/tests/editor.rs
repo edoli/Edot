@@ -117,8 +117,12 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
     });
     f.press(cx, "ctrl-shift-p");
     f.update(cx, |this, _, cx| {
-        assert!(this.settings.read_only);
-        assert!(Settings::load(&this.config_dir).unwrap().read_only);
+        assert!(cx.global::<AppState>().settings.read_only);
+        assert!(
+            Settings::load(&cx.global::<AppState>().config_dir)
+                .unwrap()
+                .read_only
+        );
         assert!(
             this.open
                 .iter()
@@ -134,8 +138,8 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
     }
     f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), "plain"));
     f.press(cx, "ctrl-shift-p");
-    f.update(cx, |this, _, cx| {
-        assert!(!this.settings.read_only);
+    f.update(cx, |_, _, cx| {
+        assert!(!cx.global::<AppState>().settings.read_only);
         assert!(!editor.read(cx).is_read_only());
     });
     // Window shortcuts also work while an overlay owns keyboard focus.
@@ -612,8 +616,12 @@ fn status_text_mode_is_per_note_and_reading_mode_is_global(cx: &mut TestAppConte
         assert!(!this.open.iter().find(|t| t.id == f.ids[0]).unwrap().dirty);
         assert!(this.open_note(f.ids[1], true, window, cx));
         assert!(this.active_editor().unwrap().read(cx).is_read_only());
-        assert!(this.settings.read_only);
-        assert!(Settings::load(&this.config_dir).unwrap().read_only);
+        assert!(cx.global::<AppState>().settings.read_only);
+        assert!(
+            Settings::load(&cx.global::<AppState>().config_dir)
+                .unwrap()
+                .read_only
+        );
         assert!(this.open_note(f.ids[2], true, window, cx));
         assert!(this.active_editor().unwrap().read(cx).is_read_only());
         assert!(this.open_note(f.ids[0], true, window, cx));
@@ -669,16 +677,20 @@ fn status_text_mode_is_per_note_and_reading_mode_is_global(cx: &mut TestAppConte
         assert!(!editor.read(cx).is_read_only());
         assert_eq!(editor.read(cx).text_mode(), TextMode::Markdown);
         assert!(editor.read(cx).focus_handle(cx).is_focused(window));
-        assert!(!this.settings.read_only);
-        assert!(!Settings::load(&this.config_dir).unwrap().read_only);
+        assert!(!cx.global::<AppState>().settings.read_only);
+        assert!(
+            !Settings::load(&cx.global::<AppState>().config_dir)
+                .unwrap()
+                .read_only
+        );
         for tab in &this.open {
             assert!(!tab.editor.as_ref().unwrap().read(cx).is_read_only());
         }
         // Failed persistence must leave every editor and the saved setting intact.
-        fs::remove_file(this.config_dir.join("settings.ini")).unwrap();
-        fs::create_dir(this.config_dir.join("settings.ini")).unwrap();
+        fs::remove_file(cx.global::<AppState>().config_dir.join("settings.ini")).unwrap();
+        fs::create_dir(cx.global::<AppState>().config_dir.join("settings.ini")).unwrap();
         assert!(!this.set_read_only(true, window, cx));
-        assert!(!this.settings.read_only);
+        assert!(!cx.global::<AppState>().settings.read_only);
         for tab in &this.open {
             assert!(!tab.editor.as_ref().unwrap().read(cx).is_read_only());
         }

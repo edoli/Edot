@@ -80,13 +80,13 @@ fn delete_dialog_keeps_controls_inline_and_warns_only_for_nonempty_folders(
 fn delete_opt_out_persists_only_on_confirmation_and_skips_future_dialogs(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     f.update(cx, |this, window, cx| {
-        let lock = this.config_dir.join(".settings.lock");
+        let lock = cx.global::<AppState>().config_dir.join(".settings.lock");
         if lock.is_file() {
             fs::remove_file(&lock).unwrap();
         }
         fs::create_dir(&lock).unwrap();
         assert!(!this.remember_delete_choice(true, cx));
-        assert!(this.settings.confirm_delete);
+        assert!(cx.global::<AppState>().settings.confirm_delete);
         assert!(this.book.get(f.ids[2]).is_some());
         fs::remove_dir(lock).unwrap();
         this.error = None;
@@ -96,8 +96,12 @@ fn delete_opt_out_persists_only_on_confirmation_and_skips_future_dialogs(cx: &mu
     f.press(cx, "space");
     f.press(cx, "escape");
     f.update(cx, |this, window, cx| {
-        assert!(this.settings.confirm_delete);
-        assert!(Settings::load(&this.config_dir).unwrap().confirm_delete);
+        assert!(cx.global::<AppState>().settings.confirm_delete);
+        assert!(
+            Settings::load(&cx.global::<AppState>().config_dir)
+                .unwrap()
+                .confirm_delete
+        );
         assert!(this.book.get(f.ids[2]).is_some());
         this.confirm_delete_notes(vec![f.ids[2]], window, cx);
     });
@@ -120,10 +124,10 @@ fn delete_opt_out_persists_only_on_confirmation_and_skips_future_dialogs(cx: &mu
     f.update(cx, |this, window, cx| {
         assert!(!window.has_active_dialog(cx));
         assert!(this.book.get(f.ids[2]).is_none());
-        assert!(!this.settings.confirm_delete);
-        let saved = Settings::load(&this.config_dir).unwrap();
+        assert!(!cx.global::<AppState>().settings.confirm_delete);
+        let saved = Settings::load(&cx.global::<AppState>().config_dir).unwrap();
         assert!(!saved.confirm_delete);
-        this.settings = saved;
+        cx.global_mut::<AppState>().settings = saved;
         this.confirm_delete_notes(vec![f.ids[1]], window, cx);
         assert!(!window.has_active_dialog(cx));
         assert!(this.book.get(f.ids[1]).is_none());

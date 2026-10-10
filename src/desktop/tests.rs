@@ -1,5 +1,5 @@
 //! Headless GPUI event tests. They never send input to the user's desktop.
-use super::{Edot, LoadedSpace, NoteId, Settings, StoreLock};
+use super::{AppState, Edot, LoadedSpace, NoteId, Settings, StoreLock};
 use crate::{model::Notebook, session::Session, settings::ThemeMode};
 use gpui::{
     AnyWindowHandle, AppContext, Bounds, Context, ElementInputHandler, Entity, InputHandler,
@@ -80,6 +80,10 @@ impl Fixture {
         .unwrap();
         let (window, view) = cx.update(|cx| {
             crate::widgets::init(cx);
+            cx.set_global(AppState::new(
+                dir.join("test-global-config"),
+                Settings::default(),
+            ));
             crate::widgets::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
@@ -93,12 +97,10 @@ impl Fixture {
                     cx.new(|cx| {
                         Edot::new(
                             dir.clone(),
-                            dir.join("test-global-config"),
                             Ok(LoadedSpace {
                                 lock,
                                 session: Session::load(&dir, &book),
                                 book,
-                                settings: Settings::default(),
                             }),
                             window,
                             cx,

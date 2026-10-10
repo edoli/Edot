@@ -80,6 +80,16 @@ impl SelectState {
             cx.notify();
         }
     }
+    pub fn set_items(&mut self, items: Vec<SharedString>, cx: &mut Context<Self>) {
+        let highlighted = self.filtered(cx).get(self.cursor).cloned();
+        self.items = items;
+        let values = self.filtered(cx);
+        self.cursor = highlighted
+            .as_ref()
+            .and_then(|value| values.iter().position(|item| item == value))
+            .unwrap_or_else(|| self.cursor.min(values.len().saturating_sub(1)));
+        cx.notify();
+    }
     pub fn focus(&self, w: &mut Window, cx: &mut App) {
         self.focus.focus(w, cx);
     }

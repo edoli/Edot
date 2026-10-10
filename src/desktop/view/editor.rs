@@ -29,7 +29,8 @@ impl Edot {
                 )
                 .into_any_element();
         };
-        let font_size = self.settings.font_size as f32 * self.zoom as f32 / ZOOM_DEFAULT as f32;
+        let font_size = cx.global::<AppState>().settings.font_size as f32 * self.zoom as f32
+            / ZOOM_DEFAULT as f32;
         let editor_menu = editor.clone();
         let weak = cx.entity().downgrade();
         let wheel_view = weak.clone();
@@ -39,7 +40,7 @@ impl Edot {
             .relative()
             .size_full()
             .min_h_0()
-            .font_family(self.settings.font.clone())
+            .font_family(cx.global::<AppState>().settings.font.clone())
             .text_size(px(font_size))
             .child(
                 canvas(
@@ -93,7 +94,7 @@ impl Edot {
                 Textarea::new(&editor)
                     .h(relative(1.))
                     .appearance(false)
-                    .font_family(self.settings.font.clone())
+                    .font_family(cx.global::<AppState>().settings.font.clone())
                     .text_size(px(font_size))
                     .p_0()
                     .aria_label("노트 본문"),
@@ -213,7 +214,7 @@ impl Edot {
         if self.active_editor().is_none() {
             return div().into_any_element();
         }
-        let read_only = self.settings.read_only;
+        let read_only = cx.global::<AppState>().settings.read_only;
         div()
             .id("reading-mode-control")
             .debug_selector(|| "reading-mode-control".into())
@@ -232,7 +233,11 @@ impl Edot {
                         "읽기 모드로 전환 · Ctrl+Shift+P"
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if this.set_read_only(!this.settings.read_only, window, cx) {
+                        if this.set_read_only(
+                            !cx.global::<AppState>().settings.read_only,
+                            window,
+                            cx,
+                        ) {
                             this.focus_editor(window, cx);
                         }
                     })),

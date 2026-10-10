@@ -56,7 +56,7 @@ impl Edot {
             && !event.keystroke.modifiers.platform
             && key == "z"
         {
-            let mut next = self.settings.clone();
+            let mut next = cx.global::<AppState>().settings.clone();
             next.wrap = !next.wrap;
             self.change_settings(next, window, cx);
         } else if ctrl && key == "n" {
@@ -87,7 +87,7 @@ impl Edot {
         {
             if !event.is_held
                 && self.active_editor().is_some()
-                && self.set_read_only(!self.settings.read_only, window, cx)
+                && self.set_read_only(!cx.global::<AppState>().settings.read_only, window, cx)
             {
                 self.focus_editor(window, cx);
             }
