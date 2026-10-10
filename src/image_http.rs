@@ -174,6 +174,18 @@ fn set_timeouts(handle: &InternetHandle, deadline: Instant) -> Result<()> {
 }
 
 fn download(request: Request<AsyncBody>, max_bytes: usize) -> Result<Response<AsyncBody>> {
+    let mut bytes = Vec::new();
+    let status = download_to(request, max_bytes, MAX_REQUEST_TIME, &mut bytes)?;
+    Ok(Response::builder().status(status).body(bytes.into())?)
+}
+
+/// Shared WinHTTP transport. Update payloads stream to disk instead of RAM.
+pub(crate) fn download_to(
+    request: Request<AsyncBody>,
+    max_bytes: usize,
+    max_time: Duration,
+    output: &mut impl io::Write,
+) -> Result<u16> {
     if request.method() != Method::GET {
         return Err(anyhow!("The image HTTP client only supports GET"));
     }
@@ -193,7 +205,7 @@ fn download(request: Request<AsyncBody>, max_bytes: usize) -> Result<Response<As
     let timeout = request
         .extensions()
         .get::<RequestTimeout>()
-        .map_or(MAX_REQUEST_TIME, |timeout| timeout.0.min(MAX_REQUEST_TIME));
+        .map_or(max_time, |timeout| timeout.0.min(max_time));
     let deadline = Instant::now() + timeout;
 
     // SAFETY: All strings are NUL terminated, optional pointers are null, and
@@ -289,7 +301,7 @@ fn download(request: Request<AsyncBody>, max_bytes: usize) -> Result<Response<As
             null_mut(),
         )
     })?;
-    let mut bytes = Vec::new();
+    let mut total = 0usize;
     if (200..300).contains(&status) {
         let mut buffer = [0u8; 16 * 1024];
         loop {
@@ -306,13 +318,12 @@ fn download(request: Request<AsyncBody>, max_bytes: usize) -> Result<Response<As
             if read == 0 {
                 break;
             }
-            if read as usize > max_bytes.saturating_sub(bytes.len()) {
-                return Err(anyhow!("Remote image exceeds the download size limit"));
+            if read as usize > max_bytes.saturating_sub(total) {
+                return Err(anyhow!("Remote download exceeds the size limit"));
             }
-            bytes.extend_from_slice(&buffer[..read as usize]);
+            output.write_all(&buffer[..read as usize])?;
+            total += read as usize;
         }
     }
-    Ok(Response::builder()
-        .status(status as u16)
-        .body(bytes.into())?)
+    Ok(status as u16)
 }

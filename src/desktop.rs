@@ -40,6 +40,7 @@ mod spaces;
 #[cfg(test)]
 mod tests;
 mod tree;
+mod updates;
 use spaces::{LoadedSpace, SpaceUi};
 mod view;
 

@@ -109,6 +109,90 @@ impl Edot {
                         this.change_settings(next, window, cx);
                     })),
             )
+            .child(self.update_view(cx))
+            .into_any_element()
+    }
+
+    fn update_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::update::{self, State};
+        let state = cx.global::<AppState>();
+        let version = if update::BUILD_LABEL.is_empty() {
+            format!("Edot v{}", update::VERSION)
+        } else {
+            format!("Edot v{} · {}", update::VERSION, update::BUILD_LABEL)
+        };
+        let (label, actionable, available) = match &state.update_state {
+            State::Unchecked => ("업데이트 확인".to_owned(), true, false),
+            State::Checking => ("최신 버전 확인 중…".to_owned(), false, false),
+            State::Current => ("최신 버전".to_owned(), true, false),
+            State::NoRelease => ("공개 릴리스 없음".to_owned(), true, false),
+            State::Available(release) => (format!("업데이트 · v{}", release.version), true, true),
+            State::Installing => ("업데이트 준비 중…".to_owned(), false, false),
+            State::Failed(_) => ("확인 실패 · 재시도".to_owned(), true, false),
+        };
+        let message = match &state.update_state {
+            State::Failed(error) => Some(error.clone()),
+            _ => state.update_message.clone(),
+        };
+        div()
+            .id("settings-version")
+            .debug_selector(|| "settings-version".into())
+            .v_flex()
+            .gap_2()
+            .pt_3()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("settings-version-label")
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .tooltip({
+                                let version = version.clone();
+                                move |window, cx| Tooltip::new(version.clone()).build(window, cx)
+                            })
+                            .child(version),
+                    )
+                    .when(actionable, |view| {
+                        view.child(
+                            Button::new("settings-update")
+                                .small()
+                                .text_xs()
+                                .flex_shrink_0()
+                                .whitespace_nowrap()
+                                .label(label.clone())
+                                .when(available, |button| button.primary())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if available {
+                                        this.install_update(window, cx);
+                                    } else {
+                                        this.check_for_updates(true, window, cx);
+                                    }
+                                })),
+                        )
+                    })
+                    .when(!actionable, |view| {
+                        view.child(
+                            div()
+                                .flex_shrink_0()
+                                .whitespace_nowrap()
+                                .text_xs()
+                                .child(label),
+                        )
+                    }),
+            )
+            .when_some(message, |view, message| {
+                view.child(div().text_sm().child(message))
+            })
             .into_any_element()
     }
 }

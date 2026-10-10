@@ -4,6 +4,7 @@ mod desktop;
 mod image_http;
 mod platform;
 mod startup;
+mod update;
 mod widgets;
 
 use edot::{

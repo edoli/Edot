@@ -1,0 +1,124 @@
+name: Windows build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read Cargo version and validate release tag
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          $version = python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read package version' }
+          if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -or
+              @($version.Split('.') | Where-Object { [long]$_ -gt 65535 }).Count -ne 0) {
+            throw 'Cargo.toml version must be major.minor.patch, with each component <= 65535'
+          }
+          if ($env:REF_TYPE -eq 'tag') {
+            if ($env:REF_NAME -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+              throw 'Release tags must have the form v0.0.1'
+            }
+            $tagVersion = $env:REF_NAME.Substring(1)
+            if ($tagVersion -cne $version) {
+              throw "Release tag '$env:REF_NAME' does not match Cargo.toml version '$version'. Update Cargo.toml before tagging."
+            }
+            $label = ''
+          } else {
+            $label = 'main-' + $env:COMMIT_SHA.Substring(0, 7)
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "EDOT_BUILD_LABEL=$label" >> $env:GITHUB_ENV
+      - name: Configure Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt clippy
+          python tools/configure_path_remap.py
+          if ($LASTEXITCODE -ne 0) { throw 'Path remapping failed' }
+      - name: Validate
+        env:
+          EDOT_REPOSITORY: ${{ github.repository }}
+        run: |
+          python tools/check_gpui_features.py
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency checks failed' }
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { throw 'Formatting failed' }
+          cargo test --locked --target-dir target -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+          cargo clippy --locked --all-targets --target-dir target -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Clippy failed' }
+      - name: Install packaging tool
+        run: ./tools/install_inno.ps1
+      - name: Build installer and portable ZIP
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ./tools/package.ps1 -Version $env:RELEASE_VERSION -Repository $env:RELEASE_REPOSITORY -BuildLabel $env:EDOT_BUILD_LABEL
+          python tools/check_binary_paths.py
+          if ($LASTEXITCODE -ne 0) { throw 'Binary path checks failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Edot-windows-${{ steps.version.outputs.version }}-${{ github.sha }}
+          path: |
+            target/dist/Edot-Setup-*-windows-x64.exe
+            target/dist/Edot-*-windows-x64.zip
+            target/dist/edot-update.txt
+            target/dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: windows-2025
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Edot-windows-*
+          merge-multiple: true
+          path: dist
+      - name: Publish complete GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # Keep older tags from replacing a newer release as the update target.
+          $latestTag = gh api "repos/$env:GH_REPO/releases/latest" --jq .tag_name 2>$null
+          $makeLatest = $true
+          if ($LASTEXITCODE -eq 0 -and $latestTag -match '^v\d+\.\d+\.\d+$') {
+            $makeLatest = [version]$env:RELEASE_TAG.Substring(1) -gt [version]$latestTag.Substring(1)
+          }
+          $assets = @(Get-ChildItem -LiteralPath dist -File | ForEach-Object FullName)
+          if ($assets.Count -ne 4) { throw 'Expected installer, ZIP, update manifest and checksums' }
+          gh release create $env:RELEASE_TAG @assets --repo $env:GH_REPO --verify-tag --draft --generate-notes --title "Edot $env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed' }
+          # A draft remains hidden until every upload has completed.
+          gh release edit $env:RELEASE_TAG --repo $env:GH_REPO --draft=false "--latest=$($makeLatest.ToString().ToLowerInvariant())"
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
