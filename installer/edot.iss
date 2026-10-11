@@ -41,6 +41,7 @@ MinVersion=10.0
 OutputDir={#OutputPath}
 OutputBaseFilename=Edot-Setup-{#AppVersion}-windows-x64
 SetupIconFile=..\assets\app-icon\edot.ico
+UninstallDisplayName={#AppNameValue}
 UninstallDisplayIcon={app}\edot.exe
 Compression=lzma2/max
 SolidCompression=yes
