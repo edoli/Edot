@@ -316,8 +316,10 @@ mod native {
                 return Changes::all();
             }
             let wide: Vec<_> = name
-                .chunks_exact(2)
-                .map(|p| u16::from_le_bytes([p[0], p[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|p| u16::from_le_bytes(*p))
                 .collect();
             let name = String::from_utf16_lossy(&wide);
             let action = u32::from_le_bytes(header[4..8].try_into().unwrap());

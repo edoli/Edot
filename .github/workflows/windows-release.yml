@@ -53,9 +53,8 @@ jobs:
           "EDOT_BUILD_LABEL=$label" >> $env:GITHUB_ENV
       - name: Configure Rust
         run: |
-          rustup update stable --no-self-update
-          rustup default stable
-          rustup component add rustfmt clippy
+          rustup show active-toolchain
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain setup failed' }
           python tools/configure_path_remap.py
           if ($LASTEXITCODE -ne 0) { throw 'Path remapping failed' }
       - name: Validate

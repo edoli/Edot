@@ -76,15 +76,11 @@ impl Session {
             expanded: HashSet::new(),
         };
         let tabs_end = HEADER_LEN + tab_count * 8;
-        for chunk in bytes[HEADER_LEN..tabs_end].chunks_exact(8) {
-            session
-                .tabs
-                .push(NoteId::from_le_bytes(chunk.try_into().ok()?));
+        for chunk in bytes[HEADER_LEN..tabs_end].as_chunks::<8>().0 {
+            session.tabs.push(NoteId::from_le_bytes(*chunk));
         }
-        for chunk in bytes[tabs_end..].chunks_exact(8) {
-            session
-                .expanded
-                .insert(NoteId::from_le_bytes(chunk.try_into().ok()?));
+        for chunk in bytes[tabs_end..].as_chunks::<8>().0 {
+            session.expanded.insert(NoteId::from_le_bytes(*chunk));
         }
         Some(session.restore(book))
     }
