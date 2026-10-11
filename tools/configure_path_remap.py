@@ -16,11 +16,15 @@ def output(*args, cwd=ROOT):
 
 
 def configure():
+    toolchain = output("rustup", "show", "active-toolchain").split()[0]
     # Discover dependency roots before loading the generated (required) include.
     # --manifest-path alone does not load the project's .cargo/config.toml.
     with tempfile.TemporaryDirectory(prefix="edot-remap-") as temporary:
         metadata = json.loads(
             output(
+                "rustup",
+                "run",
+                toolchain,
                 "cargo",
                 "metadata",
                 "--locked",

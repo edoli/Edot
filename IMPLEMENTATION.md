@@ -271,6 +271,8 @@ UI 기본 글꼴은 Segoe UI 15px, 본문 기본값은 Consolas 18px다. SVG 아
 
 ## 9. 코드 구성과 빌드
 
+`rust-toolchain.toml`은 로컬과 GitHub Actions에서 Rust 1.99.0·rustfmt·Clippy를 사용하도록 고정한다. CI에서 매번 stable을 갱신하지 않아 새 경고가 예고 없이 빌드를 실패시키는 것을 방지한다. Rust 버전 변경 시 같은 버전으로 fmt·테스트·Clippy·최종 release 빌드를 검증하고 경로 치환 설정을 재생성한다. 경로 치환 도구는 프로젝트의 활성 toolchain을 임시 폴더의 Cargo metadata 호출에도 명시한다.
+
 아래 경로는 `src/` 기준이다. 화면의 공통 수치는 `desktop/metrics.rs`, 색상·UI 글꼴은 `widgets/theme.rs`, 설정·세션 기본값은 각각 `settings.rs`, `session.rs`에 둔다.
 
 | 모듈 | 책임 |
