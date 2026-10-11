@@ -121,14 +121,14 @@ impl Edot {
         } else {
             format!("Edot v{} · {}", update::VERSION, update::BUILD_LABEL)
         };
-        let (label, actionable, available) = match &state.update_state {
-            State::Unchecked => ("업데이트 확인".to_owned(), true, false),
-            State::Checking => ("최신 버전 확인 중…".to_owned(), false, false),
-            State::Current => ("최신 버전".to_owned(), true, false),
-            State::NoRelease => ("공개 릴리스 없음".to_owned(), true, false),
-            State::Available(release) => (format!("업데이트 · v{}", release.version), true, true),
-            State::Installing => ("업데이트 준비 중…".to_owned(), false, false),
-            State::Failed(_) => ("확인 실패 · 재시도".to_owned(), true, false),
+        let (label, available) = match &state.update_state {
+            State::Unchecked => ("업데이트 확인 전".to_owned(), false),
+            State::Checking => ("최신 버전 확인 중…".to_owned(), false),
+            State::Current => ("최신 버전".to_owned(), false),
+            State::NoRelease => ("공개 릴리스 없음".to_owned(), false),
+            State::Available(release) => (format!("업데이트 · v{}", release.version), true),
+            State::Installing => ("업데이트 준비 중…".to_owned(), false),
+            State::Failed(_) => ("확인 실패".to_owned(), false),
         };
         let message = match &state.update_state {
             State::Failed(error) => Some(error.clone()),
@@ -145,6 +145,7 @@ impl Edot {
             .child(
                 div()
                     .h_flex()
+                    .items_center()
                     .gap_2()
                     .child(
                         div()
@@ -156,13 +157,9 @@ impl Edot {
                             .whitespace_nowrap()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .tooltip({
-                                let version = version.clone();
-                                move |window, cx| Tooltip::new(version.clone()).build(window, cx)
-                            })
                             .child(version),
                     )
-                    .when(actionable, |view| {
+                    .when(available, |view| {
                         view.child(
                             Button::new("settings-update")
                                 .small()
@@ -170,22 +167,19 @@ impl Edot {
                                 .flex_shrink_0()
                                 .whitespace_nowrap()
                                 .label(label.clone())
-                                .when(available, |button| button.primary())
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if available {
-                                        this.install_update(window, cx);
-                                    } else {
-                                        this.check_for_updates(true, window, cx);
-                                    }
+                                .primary()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.install_update(window, cx);
                                 })),
                         )
                     })
-                    .when(!actionable, |view| {
+                    .when(!available, |view| {
                         view.child(
                             div()
                                 .flex_shrink_0()
                                 .whitespace_nowrap()
                                 .text_xs()
+                                .text_color(cx.theme().muted_foreground)
                                 .child(label),
                         )
                     }),

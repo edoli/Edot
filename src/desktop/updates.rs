@@ -4,18 +4,14 @@ use crate::update::{self, State};
 use std::time::{Duration, Instant};
 
 impl Edot {
-    pub(super) fn check_for_updates(
-        &mut self,
-        force: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = cx.global::<AppState>();
-        if matches!(state.update_state, State::Checking | State::Installing)
-            || (!force
-                && state
-                    .update_checked
-                    .is_some_and(|time| time.elapsed() < Duration::from_secs(300)))
+        // Headless tests cannot wake the scheduler from a native worker thread.
+        if cfg!(test)
+            || matches!(state.update_state, State::Checking | State::Installing)
+            || state
+                .update_checked
+                .is_some_and(|time| time.elapsed() < Duration::from_secs(300))
         {
             return;
         }

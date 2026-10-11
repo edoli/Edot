@@ -196,8 +196,7 @@ impl Edot {
             return;
         }
         self.find_visible = false;
-        #[cfg(not(test))]
-        self.check_for_updates(false, window, cx);
+        self.check_for_updates(window, cx);
         if self.preferences.is_none() {
             let fonts = cx
                 .global::<AppState>()
