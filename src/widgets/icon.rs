@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone, Copy)]
 pub enum IconName {
     Check,
+    Copy,
     ChevronsLeft,
     ChevronsRight,
     ChevronDown,
@@ -25,6 +26,7 @@ impl IconName {
     fn path(self) -> &'static str {
         match self {
             Self::Check => "check",
+            Self::Copy => "copy",
             Self::ChevronsLeft => "chevrons-left",
             Self::ChevronsRight => "chevrons-right",
             Self::ChevronDown => "chevron-down",
@@ -79,6 +81,7 @@ impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
             "check" => include_bytes!("../../assets/icons/check.svg"),
+            "copy" => include_bytes!("../../assets/icons/copy.svg"),
             "chevrons-left" => include_bytes!("../../assets/icons/chevrons-left.svg"),
             "chevrons-right" => include_bytes!("../../assets/icons/chevrons-right.svg"),
             "chevron-down" => include_bytes!("../../assets/icons/chevron-down.svg"),

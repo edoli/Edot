@@ -172,6 +172,8 @@ pub(super) struct Reading {
     drag: Option<Point<Pixels>>,
     dragged: bool,
     link: Option<String>,
+    copied_block: Option<usize>,
+    copy_feedback: Option<Task<()>>,
     layouts: Rc<RefCell<Vec<Fragment>>>,
     auto_scroll: AutoScroll,
 }
@@ -189,6 +191,8 @@ impl Default for Reading {
             drag: None,
             dragged: false,
             link: None,
+            copied_block: None,
+            copy_feedback: None,
             layouts: Rc::default(),
             auto_scroll: AutoScroll::default(),
         }
@@ -235,6 +239,8 @@ impl InputState {
         self.reading.link = None;
         self.reading.auto_scroll.stop();
         self.reading.layouts.borrow_mut().clear();
+        self.reading.copied_block = None;
+        self.reading.copy_feedback = None;
         self.reading.document = Arc::new(document);
         self.reading.revision = Some(revision);
         self.reading.list.reset(self.reading.document.blocks.len());
@@ -247,6 +253,33 @@ impl InputState {
             range: self.reading.anchor.min(self.reading.head)
                 ..self.reading.anchor.max(self.reading.head),
         }
+    }
+    fn copy_reading_block(&mut self, index: usize, revision: u64, cx: &mut Context<Self>) {
+        if !self.is_markdown_reading()
+            || revision != self.revision
+            || self.reading.revision != Some(revision)
+        {
+            return;
+        }
+        let Some(block) = self.reading.document.blocks.get(index) else {
+            return;
+        };
+        if !matches!(block.kind, Kind::Code | Kind::Mermaid(_)) {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(block.content.text.clone()));
+        self.reading.copied_block = Some(index);
+        self.reading.copy_feedback = Some(cx.spawn(async |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.reading.copied_block = None;
+                s.reading.copy_feedback = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
     fn reading_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(start) = self.reading.drag else {
@@ -343,6 +376,9 @@ impl InputState {
         let selection = self.reading_selection();
         let move_entity = cx.entity();
         let up_entity = cx.entity();
+        let copy_entity = cx.entity().downgrade();
+        let revision = self.revision;
+        let copied_block = self.reading.copied_block;
         let reading = div()
             .id("markdown-reading")
             .debug_selector(|| "markdown-reading".into())
@@ -522,15 +558,48 @@ impl InputState {
             .children(self.pointer_drag_capture())
             .child(
                 list(self.reading.list.clone(), move |i, window, cx| {
-                    render_block(
-                        &document.blocks[i],
-                        i,
-                        font_size,
-                        &directory,
-                        &selection,
-                        window,
-                        cx,
-                    )
+                    let block = &document.blocks[i];
+                    let rendered =
+                        render_block(block, i, font_size, &directory, &selection, window, cx);
+                    if !matches!(block.kind, Kind::Code | Kind::Mermaid(_)) {
+                        return rendered;
+                    }
+                    let entity = copy_entity.clone();
+                    let copied = copied_block == Some(i);
+                    div()
+                        .id(("reading-code-container", i))
+                        .relative()
+                        .group("reading-code")
+                        .child(rendered)
+                        .child(
+                            div()
+                                .debug_selector(move || format!("reading-code-copy-{i}"))
+                                .absolute()
+                                .top(px(14.))
+                                .right(px(22.))
+                                .opacity(if copied { 1. } else { 0. })
+                                .group_hover("reading-code", |s| s.opacity(1.))
+                                .child(
+                                    Button::new(("reading-code-copy", i))
+                                        .small()
+                                        .tab_stop(false)
+                                        .icon(if copied {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Copy
+                                        })
+                                        .tooltip(if copied { "복사됨" } else { "코드 복사" })
+                                        .bg(cx.theme().background)
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .on_click(move |_, _, cx| {
+                                            let _ = entity.update(cx, |s, cx| {
+                                                s.copy_reading_block(i, revision, cx);
+                                            });
+                                        }),
+                                ),
+                        )
+                        .into_any_element()
                 })
                 .size_full(),
             )
@@ -704,7 +773,7 @@ fn render_block(
                 .child(render_inline(&block.content, selection, cx));
         }
         Kind::Mermaid(Ok(graph)) => {
-            body = body.child(
+            body = body.pr(px(36.)).child(
                 div()
                     .id(("mermaid-diagram", index))
                     .debug_selector(move || format!("mermaid-diagram-{index}"))
@@ -720,6 +789,8 @@ fn render_block(
         Kind::Code | Kind::Mermaid(Err(_)) => {
             body = body
                 .p_3()
+                .pr(px(48.))
+                .min_h(px(39.))
                 .rounded_md()
                 .bg(cx.theme().accent)
                 .child(render_text(
@@ -852,6 +923,75 @@ fn web_url(target: &str) -> bool {
 mod tests {
     use super::{Copy, InputState, SelectAll, TextMode};
     use gpui::{AppContext, MouseButton, point, px};
+
+    #[gpui::test]
+    fn code_buttons_copy_only_the_target_block_without_changing_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::widgets::init);
+        let source = "# 제목\n\n```rust\n\tlet 한글 = \"🙂\";\n\n```\n\n    indented\tcode\n\n```mermaid\nflowchart LR\nA-->B\n```\n\n```mermaid\nsequenceDiagram\nA->>B: hello\n```";
+        let window = cx.add_window(|w, cx| {
+            let mut state = InputState::new(w, cx).default_value(source.into());
+            state.set_selected_range(0..2, cx);
+            state.set_read_only(true, cx);
+            state.reading.anchor = 0;
+            state.reading.head = 3;
+            state
+        });
+        let editor = window.root(cx).unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_window_resize(window.into(), gpui::size(px(900.), px(900.)));
+        let draw = |visual: &mut gpui::VisualTestContext| {
+            visual.update(|w, cx| {
+                w.refresh();
+                w.draw(cx).clear(cx);
+            });
+        };
+        let revision = editor.read_with(cx, |s, _| s.revision);
+        draw(&mut visual);
+        assert!(visual.debug_bounds("reading-code-copy-0").is_none());
+        for (index, selector, expected) in [
+            (1, "reading-code-copy-1", "\tlet 한글 = \"🙂\";\n\n"),
+            (2, "reading-code-copy-2", "indented\tcode\n"),
+            (3, "reading-code-copy-3", "flowchart LR\nA-->B\n"),
+            (4, "reading-code-copy-4", "sequenceDiagram\nA->>B: hello\n"),
+        ] {
+            draw(&mut visual);
+            let bounds = visual.debug_bounds(selector).unwrap();
+            visual.simulate_mouse_move(bounds.center(), None, Default::default());
+            draw(&mut visual);
+            visual.simulate_mouse_down(bounds.center(), MouseButton::Left, Default::default());
+            visual.simulate_mouse_up(bounds.center(), MouseButton::Left, Default::default());
+            editor.read_with(cx, |s, cx| {
+                assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), expected);
+                assert_eq!(s.value(), source);
+                assert_eq!(s.revision, revision);
+                assert_eq!(s.selection, 0..2);
+                assert_eq!((s.reading.anchor, s.reading.head), (0, 3));
+                assert!(s.reading.drag.is_none());
+                assert_eq!(s.reading.copied_block, Some(index));
+            });
+        }
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1500));
+        cx.run_until_parked();
+        editor.read_with(cx, |s, _| {
+            assert!(s.reading.copied_block.is_none());
+            assert!(s.reading.copy_feedback.is_none());
+        });
+        visual.update(|w, cx| {
+            editor.update(cx, |s, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("preserve".into()));
+                s.set_value("```\nnew content\n```", w, cx);
+                s.copy_reading_block(0, revision, cx);
+                assert_eq!(
+                    cx.read_from_clipboard().unwrap().text().unwrap(),
+                    "preserve"
+                );
+            });
+        });
+    }
 
     #[gpui::test]
     fn images_hide_descriptions_until_loading_fails(cx: &mut gpui::TestAppContext) {
