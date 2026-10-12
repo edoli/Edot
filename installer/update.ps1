@@ -90,7 +90,8 @@ try {
     if ((Get-Item -LiteralPath $executable).VersionInfo.ProductVersion -ne $env:EDOT_UPDATE_VERSION) {
         throw '설치한 버전이 일치하지 않습니다. Release 페이지에서 다시 설치하세요.'
     }
-    Write-Result ("v" + $env:EDOT_UPDATE_VERSION + ' 업데이트를 완료했습니다.')
+    # A successful update clears older errors; the version row already shows the installed version.
+    Write-Result ''
 } catch {
     try { Write-Result ('업데이트 실패: ' + $_.Exception.Message) } catch { }
 } finally {

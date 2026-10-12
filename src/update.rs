@@ -329,7 +329,17 @@ pub fn read_result(config: &Path) -> Option<String> {
         .take(4096)
         .read_to_string(&mut text)
         .ok()?;
-    (!text.trim().is_empty()).then(|| text.trim().to_owned())
+    let text = text.trim();
+    // Older helpers persisted a success notice. Keep errors visible without showing that banner.
+    if text.is_empty()
+        || text
+            .strip_prefix('v')
+            .and_then(|text| text.strip_suffix(" 업데이트를 완료했습니다."))
+            .is_some_and(|version| Version::parse(version).is_ok())
+    {
+        return None;
+    }
+    Some(text.to_owned())
 }
 
 fn base64_utf16(text: &str) -> String {
@@ -357,6 +367,37 @@ fn base64_utf16(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_update_success_is_hidden_and_failure_remains_visible() {
+        let config = std::env::temp_dir().join(format!(
+            "edot-update-result-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&config).unwrap();
+        assert!(read_result(&config).is_none());
+        for result in [
+            "",
+            "\r\n",
+            "v0.1.1 업데이트를 완료했습니다.\r\n",
+            "v10.20.30 업데이트를 완료했습니다.",
+        ] {
+            fs::write(config.join(RESULT_FILE), result).unwrap();
+            assert!(read_result(&config).is_none(), "{result}");
+        }
+        for result in [
+            "업데이트 실패: 설치가 취소되었습니다.",
+            "앱을 다시 실행하지 못했습니다: 실행 오류",
+        ] {
+            fs::write(config.join(RESULT_FILE), result).unwrap();
+            assert_eq!(read_result(&config).as_deref(), Some(result));
+        }
+        fs::remove_dir_all(config).unwrap();
+    }
 
     #[test]
     fn versions_compare_numerically_and_reject_unsafe_tags() {
