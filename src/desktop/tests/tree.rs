@@ -2,6 +2,84 @@ use super::*;
 use crate::widgets::WindowExt;
 
 #[gpui::test]
+fn disclosure_hover_and_click_stay_distinct_from_note_selection(cx: &mut TestAppContext) {
+    use crate::widgets::theme::ActiveTheme as _;
+    use gpui::MouseButton;
+    let f = Fixture::new(cx);
+    f.update(cx, |this, window, cx| {
+        this.tree_click(f.ids[1], Default::default(), window, cx);
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    let draw = |visual: &mut gpui::VisualTestContext| {
+        visual.update(|w, cx| w.render_frame(cx));
+    };
+    draw(&mut visual);
+    let row_selector: &'static str = format!("tree-note-{}", f.ids[0]).leak();
+    let arrow_selector: &'static str = format!("tree-expand-{}", f.ids[0]).leak();
+    let child_selector: &'static str = format!("tree-note-{}", f.ids[2]).leak();
+    let row = visual.debug_bounds(row_selector).unwrap();
+    let arrow = visual.debug_bounds(arrow_selector).unwrap();
+    visual.simulate_mouse_move(arrow.center(), None, Default::default());
+    draw(&mut visual);
+    visual.update(|w, cx| {
+        let at = arrow.center().scale(w.scale_factor());
+        assert!(
+            w.painted_quads()
+                .iter()
+                .any(|q| { q.background == cx.theme().accent.into() && q.bounds.contains(&at) })
+        );
+        assert!(w.painted_quads().iter().any(|q| {
+            q.background == cx.theme().primary.opacity(0.18).into() && q.bounds.contains(&at)
+        }));
+    });
+    for collapsed in [true, false] {
+        visual.simulate_mouse_down(arrow.center(), MouseButton::Left, Default::default());
+        visual.simulate_mouse_up(arrow.center(), MouseButton::Left, Default::default());
+        draw(&mut visual);
+        f.update(cx, |this, _, _| {
+            assert_eq!(this.collapsed.contains(&f.ids[0]), collapsed);
+            assert_eq!(this.session.active, Some(f.ids[1]));
+            assert_eq!(
+                this.selection.ids.as_ref(),
+                &std::collections::HashSet::from([f.ids[1]])
+            );
+            assert_eq!(
+                Session::load(&this.dir, &this.book)
+                    .expanded
+                    .contains(&f.ids[0]),
+                !collapsed
+            );
+        });
+        assert_eq!(visual.debug_bounds(child_selector).is_some(), !collapsed);
+    }
+    visual.simulate_mouse_down(row.center(), MouseButton::Left, Default::default());
+    visual.simulate_mouse_up(row.center(), MouseButton::Left, Default::default());
+    visual.simulate_mouse_move(arrow.center(), None, Default::default());
+    draw(&mut visual);
+    visual.update(|w, cx| {
+        let at = arrow.center().scale(w.scale_factor());
+        let hovered = cx.theme().selection.blend(cx.theme().primary.opacity(0.08));
+        assert!(
+            w.painted_quads()
+                .iter()
+                .any(|q| { q.background == hovered.into() && q.bounds.contains(&at) })
+        );
+    });
+    let leaf_selector: &'static str = format!("tree-expand-{}", f.ids[2]).leak();
+    let blank = visual.debug_bounds(leaf_selector).unwrap().center();
+    visual.simulate_mouse_down(blank, MouseButton::Left, Default::default());
+    visual.simulate_mouse_up(blank, MouseButton::Left, Default::default());
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.session.active, Some(f.ids[2]));
+        assert_eq!(
+            this.selection.ids.as_ref(),
+            &std::collections::HashSet::from([f.ids[2]])
+        );
+        assert!(!this.collapsed.contains(&f.ids[0]));
+    });
+}
+
+#[gpui::test]
 fn tree_background_menu_creates_root_notes_with_a_nested_caret_and_an_empty_tree(
     cx: &mut TestAppContext,
 ) {

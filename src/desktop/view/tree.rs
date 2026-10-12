@@ -202,13 +202,22 @@ impl Edot {
         let (id, depth) = visible[index];
         let note = self.book.get(id).unwrap();
         let title = note.title.clone();
-        let tooltip = title.clone();
         let folder = !self.book.children(id).is_empty();
         let expanded = !self.collapsed.contains(&id);
         let selected = self.selection.ids.contains(&id);
         let active = self.session.active == Some(id);
         let context = self.context_note == Some(id);
         let multiple = selected && self.selection.ids.len() > 1;
+        let row_background = if multiple {
+            cx.theme().multi_selection
+        } else {
+            cx.theme().selection
+        };
+        let row_hover = if selected || active {
+            row_background.blend(cx.theme().primary.opacity(0.08))
+        } else {
+            cx.theme().accent
+        };
         // During closing the same title editor is already hosted by the tab bar.
         let renaming = self.session.sidebar_visible
             && self.rename.as_ref().is_some_and(|(note, _)| *note == id);
@@ -241,17 +250,10 @@ impl Edot {
                 transparent_black()
             })
             .cursor_pointer()
-            .when(selected || active, |row| {
-                row.bg(if multiple {
-                    cx.theme().multi_selection
-                } else {
-                    cx.theme().selection
-                })
+            .when(selected || active, |row| row.bg(row_background))
+            .when(!context && self.dragging_notes.is_empty(), |row| {
+                row.hover(move |row| row.bg(row_hover))
             })
-            .when(
-                !selected && !active && !context && self.dragging_notes.is_empty(),
-                |row| row.hover(|row| row.bg(cx.theme().accent)),
-            )
             .when(active || self.caret == Some(id), |row| {
                 row.child(
                     div()
@@ -281,34 +283,43 @@ impl Edot {
                     )
                 },
             )
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .child(
                 div()
                     .id(("expand", id))
+                    .debug_selector(move || format!("tree-expand-{id}"))
                     .w(px(16.))
                     .h(px(24.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
                     .when(folder, |icon| {
-                        icon.child(
-                            Icon::new(if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
+                        icon.role(Role::Button)
+                            .aria_label(if expanded { "접기" } else { "펼치기" })
+                            .aria_expanded(expanded)
+                            .rounded_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .hover(|style| {
+                                style
+                                    .bg(cx.theme().primary.opacity(0.18))
+                                    .text_color(cx.theme().primary)
                             })
-                            .size(px(14.)),
-                        )
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            if folder {
-                                this.set_collapsed(id, !this.collapsed.contains(&id), cx);
-                            }
-                            cx.stop_propagation();
-                        }),
-                    ),
+                            .active(|style| style.bg(cx.theme().primary.opacity(0.3)))
+                            .child(
+                                Icon::new(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size(px(14.)),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.set_collapsed(id, !this.collapsed.contains(&id), cx);
+                                    cx.stop_propagation();
+                                }),
+                            )
+                    }),
             )
             .child(
                 Icon::new(if folder {
