@@ -17,13 +17,11 @@ impl Edot {
                 )
                 .child(
                     div()
-                        .text_xl()
                         .font_weight(FontWeight::SEMIBOLD)
                         .child("생각을 가볍게 기록하세요"),
                 )
                 .child(
                     div()
-                        .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child("노트를 선택하거나 Ctrl + N으로 새 노트를 만드세요"),
                 )
@@ -150,7 +148,6 @@ impl Edot {
             .border_t_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().bar)
-            .text_xs()
             .text_color(cx.theme().muted_foreground)
             .child(
                 div()
@@ -202,7 +199,6 @@ impl Edot {
                     .label(mode.label())
                     .icon(IconName::ChevronDown)
                     .tooltip("텍스트 모드 선택")
-                    .text_xs()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_text_mode_menu(trigger.get().top_right(), window, cx);
                     })),

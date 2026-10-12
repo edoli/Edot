@@ -170,7 +170,6 @@ impl Render for Dialog {
                     .shadow_lg()
                     .bg(cx.theme().background)
                     .text_color(cx.theme().foreground)
-                    .text_size(px(15.))
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)

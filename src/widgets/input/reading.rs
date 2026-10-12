@@ -805,7 +805,7 @@ fn render_block(
                 body = body.child(
                     div()
                         .mt_2()
-                        .text_sm()
+                        .text_size(px(theme::UI_FONT_SIZE))
                         .text_color(cx.theme().warning)
                         .child(*error),
                 );

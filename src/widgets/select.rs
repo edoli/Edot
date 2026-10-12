@@ -262,7 +262,6 @@ impl Render for SelectState {
                             list.child(
                                 div()
                                     .p_2()
-                                    .text_sm()
                                     .text_color(cx.theme().muted_foreground)
                                     .child("검색 결과가 없습니다."),
                             )

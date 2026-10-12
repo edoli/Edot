@@ -7,7 +7,7 @@ use ini::Document;
 pub const SETTINGS_FILE: &str = "settings.ini";
 
 pub const DEFAULT_FONT: &str = "Consolas";
-pub const DEFAULT_FONT_SIZE: u32 = 18;
+pub const DEFAULT_FONT_SIZE: u32 = 14;
 pub const MIN_FONT_SIZE: u32 = 8;
 pub const MAX_FONT_SIZE: u32 = 72;
 

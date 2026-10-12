@@ -443,7 +443,6 @@ impl Render for ShortcutHelp {
                     .bg(cx.theme().background)
                     .text_color(cx.theme().foreground)
                     .font_family(component::theme::UI_FONT)
-                    .text_size(px(14.))
                     .shadow_lg()
                     .child(
                         div()
@@ -453,7 +452,6 @@ impl Render for ShortcutHelp {
                             .child(
                                 div()
                                     .flex_shrink_0()
-                                    .text_xl()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("단축키"),
                             )

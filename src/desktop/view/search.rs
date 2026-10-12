@@ -10,7 +10,6 @@ impl Edot {
         let panel = if global { &self.global } else { &self.local };
         let query = Input::new(&panel.query)
             .small()
-            .text_size(px(SEARCH_INPUT_FONT_SIZE))
             .aria_label(if global {
                 "전체 노트 검색어"
             } else {
@@ -89,7 +88,6 @@ impl Edot {
                     div().when(global, |d| d.pl(px(18.))).child(
                         Input::new(&panel.replacement)
                             .small()
-                            .text_size(px(SEARCH_INPUT_FONT_SIZE))
                             .aria_label(if global {
                                 "전체 노트 바꿀 내용"
                             } else {
@@ -142,7 +140,6 @@ impl Edot {
                     })
                     .px_1()
                     .py_1()
-                    .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(panel.message.clone()),
             )
@@ -151,7 +148,6 @@ impl Edot {
     pub(in crate::desktop) fn local_view(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .font_family(component::theme::UI_FONT)
-            .text_size(px(component::theme::UI_FONT_SIZE))
             .occlude()
             .absolute()
             .right_3()
@@ -183,7 +179,7 @@ impl Edot {
                                 cx.notify();
                             })),
                     )
-                    .child(div().flex_1().text_sm().child(if self.local.replace {
+                    .child(div().flex_1().child(if self.local.replace {
                         "찾기 및 바꾸기"
                     } else {
                         "찾기"
@@ -250,7 +246,6 @@ impl Edot {
                                     .min_w_0()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
-                                    .text_sm()
                                     .child("검색"),
                             )
                             .child(
@@ -317,7 +312,6 @@ impl Edot {
                                     .absolute()
                                     .inset_0()
                                     .p_3()
-                                    .text_sm()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(if self.global.query.read(cx).value().is_empty() {
                                         "노트 본문에서 검색합니다"
@@ -352,7 +346,6 @@ impl Edot {
             .w_full()
             .px_2()
             .gap_1()
-            .text_xs()
             .cursor_pointer()
             .when(selected, |row| row.bg(cx.theme().selection))
             .when(!selected, |row| row.hover(|s| s.bg(cx.theme().accent)))

@@ -103,7 +103,7 @@ impl RenderOnce for Button {
             .cursor_pointer()
             .tab_index(0)
             .tab_stop(self.tab_stop)
-            .text_sm()
+            .text_size(px(theme::UI_FONT_SIZE))
             .aria_label(self.tip.clone().unwrap_or(self.label.clone()))
             .text_color(if self.primary {
                 theme.primary_foreground
@@ -152,7 +152,8 @@ impl Render for Tooltip {
         div()
             .px_2()
             .py_1()
-            .text_sm()
+            .font_family(theme::UI_FONT)
+            .text_size(px(theme::UI_FONT_SIZE))
             .rounded_md()
             .border_1()
             .border_color(cx.theme().border)

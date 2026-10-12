@@ -7,12 +7,11 @@ pub(super) const EDITOR_MIN_WIDTH: f32 = 220.;
 pub(super) const TAB_MIN_WIDTH: i32 = 100;
 pub(super) const TAB_PREFERRED_WIDTH: i32 = 180;
 pub(super) const CLOSED_TAB_HISTORY_LIMIT: usize = 100;
-pub(super) const TREE_ROW_HEIGHT: f32 = 29.;
+pub(super) const TREE_ROW_HEIGHT: f32 = 25.;
 pub(super) const TREE_INDENT: f32 = 22.;
 // Row padding + disclosure width + gap: insertion lines start at the note icon.
 pub(super) const TREE_ICON_LEFT: f32 = 24.;
 pub(super) const SEARCH_ROW_HEIGHT: f32 = 26.;
-pub(super) const SEARCH_INPUT_FONT_SIZE: f32 = 14.;
 pub(super) const TREE_SCROLL_EDGE: f32 = 24.;
 pub(super) const TREE_SCROLL_ROWS: f32 = 2.;
 pub(super) const TREE_SCROLL_INTERVAL: Duration = Duration::from_millis(160);

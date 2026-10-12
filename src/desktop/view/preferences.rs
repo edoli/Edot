@@ -39,7 +39,6 @@ impl Edot {
                     .child(
                         div()
                             .flex_1()
-                            .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("설정"),
                     )
@@ -54,15 +53,11 @@ impl Edot {
                     ),
             )
             .child(
-                div()
-                    .v_flex()
-                    .gap_1()
-                    .child(div().text_sm().child("앱 테마"))
-                    .child(
-                        Select::new(&prefs.theme)
-                            .w_full()
-                            .accessibility_label("테마"),
-                    ),
+                div().v_flex().gap_1().child(div().child("앱 테마")).child(
+                    Select::new(&prefs.theme)
+                        .w_full()
+                        .accessibility_label("테마"),
+                ),
             )
             .child(
                 div()
@@ -76,7 +71,7 @@ impl Edot {
                             .flex_1()
                             .min_w_0()
                             .gap_1()
-                            .child(div().text_sm().child("본문 글꼴"))
+                            .child(div().child("본문 글꼴"))
                             .child(
                                 Select::new(&prefs.font)
                                     .w_full()
@@ -90,7 +85,7 @@ impl Edot {
                             .w(px(92.))
                             .flex_shrink_0()
                             .gap_1()
-                            .child(div().text_sm().child("글자 크기"))
+                            .child(div().child("글자 크기"))
                             .child(
                                 Select::new(&prefs.size)
                                     .w_full()
@@ -155,7 +150,6 @@ impl Edot {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(version),
                     )
@@ -163,7 +157,6 @@ impl Edot {
                         view.child(
                             Button::new("settings-update")
                                 .small()
-                                .text_xs()
                                 .flex_shrink_0()
                                 .whitespace_nowrap()
                                 .label(label.clone())
@@ -178,15 +171,12 @@ impl Edot {
                             div()
                                 .flex_shrink_0()
                                 .whitespace_nowrap()
-                                .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(label),
                         )
                     }),
             )
-            .when_some(message, |view, message| {
-                view.child(div().text_sm().child(message))
-            })
+            .when_some(message, |view, message| view.child(div().child(message)))
             .into_any_element()
     }
 }

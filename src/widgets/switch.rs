@@ -81,7 +81,6 @@ impl RenderOnce for Switch {
                 .child(
                     div()
                         .w(px(28.))
-                        .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(if checked { "켜짐" } else { "꺼짐" }),
                 )

@@ -155,7 +155,6 @@ impl Edot {
                             .border_1()
                             .border_color(cx.theme().primary)
                             .bg(cx.theme().selection)
-                            .text_sm()
                             .text_color(cx.theme().primary)
                             .child("＋ 최상위로 이동"),
                     )
@@ -169,7 +168,6 @@ impl Edot {
                         .top_8()
                         .left_4()
                         .right_4()
-                        .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child("Ctrl + N으로 첫 노트를 만드세요"),
                 )
@@ -226,6 +224,7 @@ impl Edot {
         let drag_view = weak.clone();
         div()
             .id(("note", id))
+            .text_size(px(component::theme::TREE_FONT_SIZE))
             .debug_selector(move || format!("tree-note-{id}"))
             .h_flex()
             .relative()
@@ -241,7 +240,6 @@ impl Edot {
             } else {
                 transparent_black()
             })
-            .text_sm()
             .cursor_pointer()
             .when(selected || active, |row| {
                 row.bg(if multiple {

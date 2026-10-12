@@ -303,7 +303,6 @@ impl Render for TrashBrowser {
                             )
                             .child(
                                 div()
-                                    .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(deleted_ago(entry.stamp)),
                             )
@@ -352,7 +351,6 @@ impl Render for TrashBrowser {
                             .flex_shrink_0()
                             .child(
                                 div()
-                                    .text_xl()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .flex_1()
                                     .min_w_0()
@@ -411,7 +409,6 @@ impl Render for TrashBrowser {
                                                 .absolute()
                                                 .inset_0()
                                                 .p_3()
-                                                .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child(if self.loading {
                                                     "휴지통 확인 중…"
@@ -430,7 +427,6 @@ impl Render for TrashBrowser {
                                     .gap_2()
                                     .child(
                                         div()
-                                            .text_sm()
                                             .text_ellipsis()
                                             .whitespace_nowrap()
                                             .overflow_hidden()
@@ -438,24 +434,20 @@ impl Render for TrashBrowser {
                                     )
                                     .when(legacy, |v| {
                                         v.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(
-                                                    "이름·폴더 정보가 없어 최상위로 복원됩니다.",
-                                                ),
+                                            div().text_color(cx.theme().muted_foreground).child(
+                                                "이름·폴더 정보가 없어 최상위로 복원됩니다.",
+                                            ),
                                         )
                                     })
                                     .when(self.preview_loading || self.preview_truncated, |v| {
                                         v.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(if self.preview_loading {
+                                            div().text_color(cx.theme().muted_foreground).child(
+                                                if self.preview_loading {
                                                     "본문 확인 중…"
                                                 } else {
                                                     "본문 앞부분 256KiB까지 표시합니다."
-                                                }),
+                                                },
+                                            ),
                                         )
                                     })
                                     .child(
@@ -477,7 +469,7 @@ impl Render for TrashBrowser {
                             ),
                     )
                     .when_some(self.message.clone(), |v, message| {
-                        v.child(div().text_sm().child(message))
+                        v.child(div().child(message))
                     })
                     .child(div().h_flex().justify_end().flex_shrink_0().when(
                         selected.is_some() && !self.loading,

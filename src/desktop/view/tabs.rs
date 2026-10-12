@@ -46,6 +46,7 @@ impl Edot {
             strip = strip.child(
                 div()
                     .id(("tab", id))
+                    .text_size(px(component::theme::TAB_FONT_SIZE))
                     .debug_selector(move || {
                         if active {
                             "active-tab".into()
@@ -61,7 +62,6 @@ impl Edot {
                     .px_2()
                     .gap_2()
                     .cursor_pointer()
-                    .text_sm()
                     .whitespace_nowrap()
                     .when(active, |row| {
                         row.bg(cx.theme().background)

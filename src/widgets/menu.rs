@@ -171,7 +171,6 @@ impl Render for PopupMenu {
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .text_size(px(14.))
             .track_focus(&self.focus)
             .on_mouse_down_out(cx.listener(|s, _, w, cx| s.dismiss(w, cx)))
             .on_key_down(cx.listener(|s, e: &KeyDownEvent, w, cx| {

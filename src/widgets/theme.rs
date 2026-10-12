@@ -1,7 +1,9 @@
 //! Shared light/dark palette and UI typography. Body typography belongs to Settings.
 use super::*;
 pub const UI_FONT: &str = "Segoe UI";
-pub const UI_FONT_SIZE: f32 = 15.;
+pub const UI_FONT_SIZE: f32 = 14.;
+pub const TAB_FONT_SIZE: f32 = 12.;
+pub const TREE_FONT_SIZE: f32 = 12.;
 
 #[derive(Clone, Copy)]
 pub struct Colors {

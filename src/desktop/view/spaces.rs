@@ -73,7 +73,6 @@ impl Edot {
             list = list.child(
                 div()
                     .p_3()
-                    .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child("등록된 Space가 없습니다."),
             );

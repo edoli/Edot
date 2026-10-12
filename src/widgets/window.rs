@@ -26,6 +26,8 @@ impl Render for Root {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
+            .font_family(theme::UI_FONT)
+            .text_size(px(theme::UI_FONT_SIZE))
             .capture_key_down(|event, window, cx| {
                 if event.keystroke.key == "f11" && event.keystroke.modifiers == Modifiers::default()
                 {

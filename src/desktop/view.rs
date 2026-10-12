@@ -27,7 +27,8 @@ impl Render for DragLabel {
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .text_sm()
+            .font_family(component::theme::UI_FONT)
+            .text_size(px(component::theme::TAB_FONT_SIZE))
             .child(self.0.clone())
     }
 }
@@ -101,7 +102,6 @@ impl Render for Edot {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .font_family(component::theme::UI_FONT)
-            .text_size(px(component::theme::UI_FONT_SIZE))
             .capture_key_down(cx.listener(Self::key_down))
             .on_drag_move::<TreeDrag>(cx.listener(
                 |this, event: &DragMoveEvent<TreeDrag>, _, cx| {
@@ -333,7 +333,7 @@ impl Render for Edot {
                             .border_color(cx.theme().border)
                             .shadow_lg()
                             .child(div().font_weight(FontWeight::SEMIBOLD).child("Edot"))
-                            .child(div().text_sm().child(error.clone()))
+                            .child(div().child(error.clone()))
                             .child(
                                 Button::new("dismiss-error")
                                     .primary()
