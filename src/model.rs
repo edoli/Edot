@@ -440,45 +440,7 @@ impl Notebook {
     /// Archive a whole selection and commit its index once. Failed file/index
     /// writes restore the previous tree and every file already archived.
     pub fn trash_notes(&mut self, dir: &Path, selected: &[NoteId]) -> io::Result<Vec<NoteId>> {
-        if selected.iter().any(|&id| self.get(id).is_none()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Unknown selected note",
-            ));
-        }
-        let ids = self.selected_subtrees(selected);
-        if ids.is_empty() {
-            return Ok(ids);
-        }
-        let trash = dir.join("trash");
-        fs::create_dir_all(&trash)?;
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let mut moved = Vec::new();
-        for &id in &ids {
-            let source = self.file(dir, id);
-            let target = trash.join(format!("{id}-{stamp}.txt"));
-            if let Err(error) = fs::rename(&source, &target) {
-                for (from, to) in moved.iter().rev() {
-                    let _ = fs::rename(to, from);
-                }
-                return Err(error);
-            }
-            moved.push((source, target));
-        }
-        let previous = self.clone();
-        let deleted: std::collections::HashSet<_> = ids.iter().copied().collect();
-        self.notes.retain(|n| !deleted.contains(&n.id));
-        if let Err(error) = self.save(dir) {
-            *self = previous;
-            for (from, to) in moved.iter().rev() {
-                let _ = fs::rename(to, from);
-            }
-            return Err(error);
-        }
-        Ok(ids)
+        crate::trash::archive(self, dir, selected)
     }
 
     fn set_orders(&mut self, parent: NoteId, siblings: &[NoteId]) {
@@ -758,7 +720,7 @@ mod tests {
             book.trash_notes(&dir, &[b, child, a, a]).unwrap(),
             vec![a, child, b]
         );
-        assert_eq!(fs::read_dir(dir.join("trash")).unwrap().count(), 3);
+        assert_eq!(crate::trash::list(&dir).unwrap().len(), 3);
         assert!(Notebook::load(&dir).unwrap().notes.is_empty());
         fs::remove_dir_all(dir).unwrap();
     }

@@ -40,6 +40,7 @@ mod sidebar;
 mod spaces;
 #[cfg(test)]
 mod tests;
+mod trash_ui;
 mod tree;
 mod updates;
 use spaces::{LoadedSpace, SpaceUi};
@@ -58,6 +59,7 @@ pub struct Edot {
     open: Vec<OpenTab>,
     closed_tabs: Vec<ClosedTab>,
     shortcut_help: Option<Entity<shortcuts::ShortcutHelp>>,
+    trash_browser: Option<Entity<trash_ui::TrashBrowser>>,
     tree_focus: FocusHandle,
     results_focus: FocusHandle,
     focus: FocusHandle,
@@ -143,6 +145,7 @@ impl Edot {
             open: vec![],
             closed_tabs: vec![],
             shortcut_help: None,
+            trash_browser: None,
             tree_focus: cx.focus_handle(),
             results_focus: cx.focus_handle(),
             focus: cx.focus_handle(),

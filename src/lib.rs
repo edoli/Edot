@@ -11,4 +11,5 @@ pub mod settings;
 pub mod space;
 pub mod storage;
 pub mod tabs;
+pub mod trash;
 pub mod watch;

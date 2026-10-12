@@ -144,5 +144,6 @@ mod file_sync;
 mod images;
 mod search;
 mod spaces;
+mod trash;
 mod tree;
 mod updates;

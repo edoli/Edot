@@ -8,6 +8,7 @@ impl Edot {
             .id("space-footer")
             .debug_selector(|| "space-footer".into())
             .relative()
+            .h_flex()
             .h(px(44.))
             .flex_shrink_0()
             .border_t_1()
@@ -24,13 +25,31 @@ impl Edot {
                     .label(self.current_space_name())
                     .tooltip(format!("Space · {}", self.current_space_name()))
                     .selected(self.space_ui.open)
-                    .w_full()
+                    .flex_1()
+                    .min_w_0()
                     .h_full()
                     .justify_start()
                     .text_ellipsis()
                     .overflow_hidden()
                     .on_click(
                         cx.listener(|this, _, window, cx| this.toggle_space_list(window, cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "trash-open".into())
+                    .w(px(36.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(
+                        Button::new("open-trash")
+                            .icon(IconName::ArchiveRestore)
+                            .tooltip("휴지통 열기")
+                            .w_full()
+                            .h_full()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.show_trash(window, cx)),
+                            ),
                     ),
             )
             .into_any_element()

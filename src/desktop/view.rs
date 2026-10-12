@@ -300,6 +300,9 @@ impl Render for Edot {
         if let Some(help) = &self.shortcut_help {
             root = root.child(help.clone());
         }
+        if let Some(trash) = &self.trash_browser {
+            root = root.child(trash.clone());
+        }
         if self.space_ui.open
             && self.session.sidebar_visible
             && self.error.is_none()

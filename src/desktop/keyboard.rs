@@ -24,7 +24,7 @@ impl Edot {
         }
         let ctrl = event.keystroke.modifiers.control;
         let shift = event.keystroke.modifiers.shift;
-        if self.shortcut_help.is_some() {
+        if self.shortcut_help.is_some() || self.trash_browser.is_some() {
             return;
         }
         if key == "f1" && event.keystroke.modifiers == Modifiers::default() {
