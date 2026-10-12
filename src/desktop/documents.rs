@@ -15,6 +15,7 @@ pub(super) struct OpenTab {
     pub(super) metrics: editing::TextMetrics,
     pub(super) metrics_revision: u64,
     pub(super) dirty: bool,
+    pub(super) preview: bool,
     pub(super) _subscriptions: Vec<Subscription>,
 }
 
@@ -42,6 +43,61 @@ impl Edot {
         } else {
             self.tree_focus.focus(window, cx);
         }
+    }
+    fn keep_tab(&mut self, id: NoteId, cx: &mut Context<Self>) {
+        if let Some(tab) = self.open.iter_mut().find(|tab| tab.id == id)
+            && tab.preview
+        {
+            tab.preview = false;
+            cx.notify();
+        }
+    }
+    pub(super) fn open_tree_note(
+        &mut self,
+        id: NoteId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // Focus callbacks may still be queued when the next tree click arrives.
+        // Protect edits and an in-progress IME composition even without focus.
+        for tab in &mut self.open {
+            if tab.preview
+                && tab.editor.as_ref().is_some_and(|editor| {
+                    let state = editor.read(cx);
+                    state.focus_handle(cx).is_focused(window)
+                        || state.is_composing()
+                        || state.value().as_ref() != tab.saved
+                })
+            {
+                tab.preview = false;
+            }
+        }
+        let existing = self.open.iter().find(|tab| tab.id == id);
+        let new_tab = existing.is_none();
+        let preview = existing.is_none_or(|tab| tab.preview);
+        let previous = self.open.iter().position(|tab| tab.preview && tab.id != id);
+        // Read and activate the target before removing the previous preview.
+        // A read or rename failure leaves the old editor available.
+        if !self.open_note(id, false, window, cx) {
+            return false;
+        }
+        self.open
+            .iter_mut()
+            .find(|tab| tab.id == id)
+            .unwrap()
+            .preview = preview;
+        if let Some(index) = previous {
+            self.open.remove(index);
+            if new_tab {
+                let tab = self.open.pop().unwrap();
+                self.open.insert(index, tab);
+            }
+        }
+        if let Some(index) = self.open.iter().position(|tab| tab.id == id) {
+            self.tab_scroll.scroll_to_item(index);
+        }
+        cx.notify();
+        true
     }
     pub(super) fn open_note(
         &mut self,
@@ -88,6 +144,10 @@ impl Edot {
                     cx.notify();
                 });
             let observe = cx.observe(&editor, |_, _, cx| cx.notify());
+            let editor_focus = editor.read(cx).focus_handle(cx);
+            let focus_subscription = cx.on_focus(&editor_focus, window, move |this, _, cx| {
+                this.keep_tab(id, cx);
+            });
             let tab = OpenTab {
                 id,
                 editor: Some(editor),
@@ -96,7 +156,8 @@ impl Edot {
                 saved: text,
                 saved_revision: 0,
                 dirty: false,
-                _subscriptions: vec![subscription, observe],
+                preview: false,
+                _subscriptions: vec![subscription, observe, focus_subscription],
             };
             if let Some(index) = existing {
                 self.open[index] = tab;
@@ -104,6 +165,7 @@ impl Edot {
                 self.open.push(tab);
             }
         }
+        self.keep_tab(id, cx);
         self.closed_tabs.retain(|tab| tab.id != id);
         self.session.active = Some(id);
         self.local.last = None;
@@ -135,6 +197,7 @@ impl Edot {
         true
     }
     pub(super) fn changed(&mut self, id: NoteId, window: &mut Window, cx: &mut Context<Self>) {
+        self.keep_tab(id, cx);
         if let Some(tab) = self.open.iter_mut().find(|tab| tab.id == id)
             && let Some(editor) = &tab.editor
         {

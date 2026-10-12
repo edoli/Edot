@@ -221,6 +221,7 @@ impl Edot {
                 metrics: Default::default(),
                 metrics_revision: 0,
                 dirty: false,
+                preview: false,
                 _subscriptions: vec![],
             })
             .collect();

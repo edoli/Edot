@@ -194,7 +194,7 @@ impl Edot {
         self.pressed = preserve.then_some(id);
         self.caret = Some(id);
         if !modifiers.control && !modifiers.shift {
-            self.open_note(id, false, window, cx);
+            self.open_tree_note(id, window, cx);
         }
         self.tree_focus.focus(window, cx);
         cx.notify();

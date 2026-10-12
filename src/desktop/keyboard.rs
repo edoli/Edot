@@ -287,7 +287,7 @@ impl Edot {
                 self.selection.click(id, &visible, ctrl, shift);
             }
             if !ctrl && !shift {
-                self.open_note(id, false, window, cx);
+                self.open_tree_note(id, window, cx);
             }
             self.reveal_tree(id);
         }
