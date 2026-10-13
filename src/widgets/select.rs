@@ -1,6 +1,5 @@
 use super::*;
 const OPTION_HEIGHT: f32 = 32.;
-const POPUP_WIDTH: f32 = 290.;
 const OPTIONS_MAX_HEIGHT: f32 = 230.;
 const PAGE_ROWS: usize = 7;
 pub enum SelectEvent {
@@ -233,7 +232,7 @@ impl Render for SelectState {
                 .id("select-popup")
                 .debug_selector(|| "select-popup".into())
                 .occlude()
-                .w(px(POPUP_WIDTH))
+                .w_full()
                 .v_flex()
                 .gap_1()
                 .p_1()
@@ -290,7 +289,8 @@ impl Render for SelectState {
                         })),
                 );
             el = el.child(
-                deferred(div().absolute().top(px(34.)).right_0().child(popup)).with_priority(5),
+                deferred(div().absolute().top(px(34.)).left_0().w_full().child(popup))
+                    .with_priority(5),
             );
         }
         el
