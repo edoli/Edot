@@ -1,5 +1,134 @@
 use super::*;
 
+#[test]
+fn permanent_deletion_removes_only_the_confirmed_subtree_and_keeps_live_notes() {
+    let (data, mut book, [root, child, other]) = fixture();
+    book.trash_notes(&data.0, &[root]).unwrap();
+    let entries = list(&data.0).unwrap();
+    let selected = subtree(
+        &entries,
+        entries.iter().find(|e| e.note.id == root).unwrap(),
+    );
+    let keys: Vec<_> = selected.iter().map(Entry::key).collect();
+    let tree = fs::read(data.0.join("tree.tsv")).unwrap();
+    let notes = book.notes.clone();
+    let result = permanently_delete(&data.0, &keys).unwrap();
+    assert_eq!(result.count, 2);
+    assert!(result.warning.is_none());
+    assert!(list(&data.0).unwrap().is_empty());
+    for entry in selected {
+        assert!(!entry.body(&data.0).exists());
+        assert!(!entry.metadata(&data.0).exists());
+    }
+    assert_eq!(book.notes, notes);
+    assert_eq!(fs::read(data.0.join("tree.tsv")).unwrap(), tree);
+    assert_eq!(
+        fs::read_to_string(book.file(&data.0, other)).unwrap(),
+        "보존"
+    );
+    assert!(!book.file(&data.0, child).exists());
+    assert_eq!(permanently_delete(&data.0, &keys).unwrap().count, 0);
+}
+
+#[test]
+fn empty_snapshot_keeps_new_archives_unknown_files_and_directories() {
+    let (data, mut book, [root, _, other]) = fixture();
+    book.trash_notes(&data.0, &[root]).unwrap();
+    fs::write(data.0.join("trash/99-1.meta"), "old orphan metadata").unwrap();
+    fs::write(data.0.join("trash/unknown.txt"), "preserve unknown").unwrap();
+    fs::write(data.0.join("trash/01-2.txt"), "preserve noncanonical").unwrap();
+    fs::create_dir(data.0.join("trash/98-1.txt")).unwrap();
+    fs::write(data.0.join("trash/98-1.txt/nested.txt"), "preserve nested").unwrap();
+    let keys = deletion_keys(&data.0).unwrap();
+    assert_eq!(keys.len(), 3);
+    // A new deletion after confirmation was opened must survive its snapshot.
+    book.trash_notes(&data.0, &[other]).unwrap();
+    let result = permanently_delete(&data.0, &keys).unwrap();
+    assert_eq!(result.count, 3);
+    assert!(result.warning.is_none());
+    assert_eq!(list(&data.0).unwrap()[0].note.id, other);
+    assert!(!data.0.join("trash/99-1.meta").exists());
+    assert_eq!(
+        fs::read_to_string(data.0.join("trash/unknown.txt")).unwrap(),
+        "preserve unknown"
+    );
+    assert_eq!(
+        fs::read_to_string(data.0.join("trash/01-2.txt")).unwrap(),
+        "preserve noncanonical"
+    );
+    assert_eq!(
+        fs::read_to_string(data.0.join("trash/98-1.txt/nested.txt")).unwrap(),
+        "preserve nested"
+    );
+    permanently_delete(&data.0, &deletion_keys(&data.0).unwrap()).unwrap();
+    assert!(list(&data.0).unwrap().is_empty());
+    assert!(data.0.join("trash/unknown.txt").is_file());
+}
+
+#[test]
+fn invalid_keys_and_replaced_directories_are_never_deleted() {
+    let (data, mut book, [root, _, _]) = fixture();
+    book.trash_notes(&data.0, &[root]).unwrap();
+    let entry = list(&data.0).unwrap().pop().unwrap();
+    for invalid in ["../notes/1", "1-2/../3", "0-1", "01-1", "1-01"] {
+        assert!(permanently_delete(&data.0, &[entry.key(), invalid.into()]).is_err());
+        assert!(entry.body(&data.0).is_file());
+        assert!(entry.metadata(&data.0).is_file());
+    }
+    fs::remove_file(entry.body(&data.0)).unwrap();
+    fs::create_dir(entry.body(&data.0)).unwrap();
+    fs::write(entry.body(&data.0).join("keep.txt"), "preserve").unwrap();
+    let result = permanently_delete(&data.0, &[entry.key()]).unwrap();
+    assert_eq!(result.count, 0);
+    assert!(result.warning.is_some());
+    assert!(entry.metadata(&data.0).is_file());
+    assert_eq!(
+        fs::read_to_string(entry.body(&data.0).join("keep.txt")).unwrap(),
+        "preserve"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn deletion_failures_preserve_metadata_and_orphans_can_be_retried() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (data, mut book, [root, child, _]) = fixture();
+    book.trash_notes(&data.0, &[root]).unwrap();
+    let entries = list(&data.0).unwrap();
+    let root = entries.iter().find(|e| e.note.id == root).unwrap();
+    let child = entries.iter().find(|e| e.note.id == child).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(root.body(&data.0))
+        .unwrap();
+    let result =
+        permanently_delete(&data.0, &entries.iter().map(Entry::key).collect::<Vec<_>>()).unwrap();
+    assert_eq!(result.count, 1);
+    assert!(result.warning.is_some());
+    assert!(root.body(&data.0).is_file());
+    assert!(root.metadata(&data.0).is_file());
+    assert!(!child.body(&data.0).exists());
+    drop(lock);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(root.metadata(&data.0))
+        .unwrap();
+    let result = permanently_delete(&data.0, &[root.key()]).unwrap();
+    assert_eq!(result.count, 1);
+    assert!(result.warning.is_some());
+    assert!(!root.body(&data.0).exists());
+    assert!(root.metadata(&data.0).is_file());
+    drop(lock);
+    let keys = deletion_keys(&data.0).unwrap();
+    assert_eq!(keys, [root.key()]);
+    let result = permanently_delete(&data.0, &keys).unwrap();
+    assert_eq!(result.count, 1);
+    assert!(result.warning.is_none());
+    assert!(deletion_keys(&data.0).unwrap().is_empty());
+}
+
 struct Data(PathBuf);
 impl Data {
     fn new() -> Self {

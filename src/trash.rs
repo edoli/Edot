@@ -315,6 +315,130 @@ pub fn restore(book: &mut Notebook, dir: &Path, key: &str) -> io::Result<Restore
     })
 }
 
+fn parse_key(key: &str) -> Option<(NoteId, u128)> {
+    let (id, stamp) = key.split_once('-')?;
+    let (id, stamp) = (id.parse::<NoteId>().ok()?, stamp.parse::<u128>().ok()?);
+    (id != 0 && key == format!("{id}-{stamp}")).then_some((id, stamp))
+}
+
+fn is_link(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+fn deletion_directory(dir: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(dir.join("trash")) {
+        Ok(metadata) if metadata.is_dir() && !is_link(&metadata) => Ok(true),
+        Ok(_) => Err(io::Error::other("휴지통 경로가 일반 폴더가 아닙니다.")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Snapshot only app-owned files, including metadata left after a partial cleanup.
+pub fn deletion_keys(dir: &Path) -> io::Result<Vec<String>> {
+    if !deletion_directory(dir)? {
+        return Ok(vec![]);
+    }
+    let mut keys = HashSet::new();
+    for file in fs::read_dir(dir.join("trash"))? {
+        let file = file?;
+        let metadata = fs::symlink_metadata(file.path())?;
+        if !metadata.is_file() || is_link(&metadata) {
+            continue;
+        }
+        let name = file.file_name();
+        if let Some(key) = name.to_str().and_then(|name| {
+            name.strip_suffix(".txt")
+                .or_else(|| name.strip_suffix(".meta"))
+        }) && parse_key(key).is_some()
+        {
+            keys.insert(key.to_owned());
+        }
+    }
+    let mut keys: Vec<_> = keys.into_iter().collect();
+    keys.sort_unstable();
+    Ok(keys)
+}
+
+pub struct Deleted {
+    pub count: usize,
+    pub warning: Option<String>,
+}
+
+/// Delete an explicitly confirmed snapshot. Never recursively remove the bin.
+pub fn permanently_delete(dir: &Path, keys: &[String]) -> io::Result<Deleted> {
+    if keys.iter().any(|key| parse_key(key).is_none()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "잘못된 휴지통 항목입니다.",
+        ));
+    }
+    let mut result = Deleted {
+        count: 0,
+        warning: None,
+    };
+    if !deletion_directory(dir)? {
+        return Ok(result);
+    }
+    let mut failed = 0;
+    let mut first_error = None;
+    let mut seen = HashSet::new();
+    for key in keys {
+        if !seen.insert(key) {
+            continue;
+        }
+        let body = dir.join("trash").join(format!("{key}.txt"));
+        let metadata = dir.join("trash").join(format!("{key}.meta"));
+        let removed = match remove_archived_file(&body) {
+            Ok(removed) => removed,
+            Err(e) => {
+                failed += 1;
+                first_error.get_or_insert(e);
+                continue; // Keep its name/hierarchy when body deletion fails.
+            }
+        };
+        match remove_archived_file(&metadata) {
+            Ok(removed_metadata) => result.count += usize::from(removed || removed_metadata),
+            Err(e) => {
+                result.count += usize::from(removed);
+                failed += 1;
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        result.warning = Some(format!(
+            "{}개 항목을 영구 삭제했습니다. 파일 {failed}개를 삭제하지 못했습니다 · {error}",
+            result.count
+        ));
+    }
+    Ok(result)
+}
+
+fn remove_archived_file(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !is_link(&metadata) => {
+            fs::remove_file(path)?;
+            Ok(true)
+        }
+        Ok(_) => Err(io::Error::other(
+            "일반 휴지통 파일이 아닌 항목은 삭제하지 않습니다.",
+        )),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 pub const PREVIEW_LIMIT: u64 = 256 * 1024;
 pub fn preview(dir: &Path, entry: &Entry) -> io::Result<(String, bool)> {
     let mut bytes = vec![];

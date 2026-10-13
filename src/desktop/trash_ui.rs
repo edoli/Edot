@@ -209,7 +209,100 @@ impl TrashBrowser {
             cx.notify();
         });
     }
+    pub(super) fn confirm_delete(
+        &mut self,
+        empty: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loading || window.has_active_dialog(cx) {
+            return;
+        }
+        let (keys, title, description, action) = if empty {
+            let keys = match trash::deletion_keys(&self.dir) {
+                Ok(keys) => keys,
+                Err(e) => {
+                    self.message = Some(format!("휴지통을 읽지 못했습니다 · {e}"));
+                    cx.notify();
+                    return;
+                }
+            };
+            let description = format!("휴지통의 모든 항목 {}개를 영구 삭제할까요?", keys.len());
+            (keys, "휴지통 비우기", description, "비우기")
+        } else {
+            let Some(entry) = self.selected.and_then(|i| self.entries.get(i)) else {
+                return;
+            };
+            let selected = trash::subtree(&self.entries, entry);
+            let description = if selected.len() > 1 {
+                format!(
+                    "‘{}’와 하위 노트 {}개를 영구 삭제할까요?",
+                    entry.note.title,
+                    selected.len() - 1
+                )
+            } else {
+                format!("‘{}’를 영구 삭제할까요?", entry.note.title)
+            };
+            (
+                selected.iter().map(Entry::key).collect(),
+                "휴지통 항목 영구 삭제",
+                description,
+                "영구 삭제",
+            )
+        };
+        if keys.is_empty() {
+            self.message = Some("휴지통이 비어 있습니다.".into());
+            cx.notify();
+            return;
+        }
+        self.focus.focus(window, cx);
+        let weak = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title(title)
+                .description(description)
+                .warning("삭제한 내용은 복원할 수 없습니다.")
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(action)
+                        .cancel_text("취소")
+                        .destructive(),
+                )
+                .on_ok(move |_, window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.delete_confirmed(&keys, window, cx));
+                    true
+                })
+        });
+    }
+
+    fn delete_confirmed(&mut self, keys: &[String], window: &mut Window, cx: &mut Context<Self>) {
+        let browser_id = cx.entity().entity_id();
+        let result = self.owner.update(cx, |owner, _| {
+            if owner.startup_failed
+                || owner.dir != self.dir
+                || owner
+                    .trash_browser
+                    .as_ref()
+                    .is_none_or(|browser| browser.entity_id() != browser_id)
+            {
+                return Err(io::Error::other("Space 또는 휴지통 창이 변경되었습니다."));
+            }
+            trash::permanently_delete(&self.dir, keys)
+        });
+        self.message = Some(match result {
+            Ok(Ok(deleted)) => deleted
+                .warning
+                .unwrap_or_else(|| format!("{}개 항목을 영구 삭제했습니다.", deleted.count)),
+            Ok(Err(e)) => format!("영구 삭제하지 못했습니다 · {e}"),
+            Err(_) => "Space가 닫혔습니다.".into(),
+        });
+        self.reload(window, cx);
+    }
     fn key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
         let preview_focus = self.preview.read(cx).focus_handle(cx);
         match e.keystroke.key.as_str() {
             "escape" => self.close(window, cx),
@@ -219,6 +312,22 @@ impl TrashBrowser {
             }
             "enter" if e.keystroke.modifiers.control && !e.is_held => {
                 self.restore_selected(window, cx)
+            }
+            "delete"
+                if !e.is_held
+                    && e.keystroke.modifiers == Modifiers::default()
+                    && self.focus.is_focused(window) =>
+            {
+                self.confirm_delete(false, window, cx)
+            }
+            "delete"
+                if !e.is_held
+                    && e.keystroke.modifiers.control
+                    && e.keystroke.modifiers.shift
+                    && !e.keystroke.modifiers.alt
+                    && !e.keystroke.modifiers.platform =>
+            {
+                self.confirm_delete(true, window, cx)
             }
             "tab" => {
                 if self.focus.is_focused(window) {
@@ -471,25 +580,56 @@ impl Render for TrashBrowser {
                     .when_some(self.message.clone(), |v, message| {
                         v.child(div().child(message))
                     })
-                    .child(div().h_flex().justify_end().flex_shrink_0().when(
-                        selected.is_some() && !self.loading,
-                        |v| {
-                            v.child(
-                                Button::new("trash-restore")
-                                    .primary()
-                                    .tab_stop(false)
-                                    .label(if count > 1 {
-                                        format!("하위 노트와 함께 복원 · {count}개")
-                                    } else {
-                                        "복원".into()
-                                    })
-                                    .tooltip("복원 · Ctrl+Enter")
-                                    .on_click(
-                                        cx.listener(|this, _, w, cx| this.restore_selected(w, cx)),
+                    .child(
+                        div()
+                            .h_flex()
+                            .gap_2()
+                            .flex_shrink_0()
+                            .when(!self.loading, |v| {
+                                v.child(
+                                    div().debug_selector(|| "trash-empty".into()).child(
+                                        Button::new("trash-empty-button")
+                                            .tab_stop(false)
+                                            .text_color(cx.theme().destructive)
+                                            .label("휴지통 비우기")
+                                            .tooltip("휴지통 비우기 · Ctrl+Shift+Delete")
+                                            .on_click(cx.listener(|this, _, w, cx| {
+                                                this.confirm_delete(true, w, cx)
+                                            })),
                                     ),
-                            )
-                        },
-                    )),
+                                )
+                            })
+                            .child(div().flex_1())
+                            .when(selected.is_some() && !self.loading, |v| {
+                                v.child(
+                                    div().debug_selector(|| "trash-delete".into()).child(
+                                        Button::new("trash-delete-button")
+                                            .primary()
+                                            .destructive()
+                                            .tab_stop(false)
+                                            .label("영구 삭제")
+                                            .tooltip("영구 삭제 · Delete")
+                                            .on_click(cx.listener(|this, _, w, cx| {
+                                                this.confirm_delete(false, w, cx)
+                                            })),
+                                    ),
+                                )
+                                .child(
+                                    Button::new("trash-restore")
+                                        .primary()
+                                        .tab_stop(false)
+                                        .label(if count > 1 {
+                                            format!("하위 노트와 함께 복원 · {count}개")
+                                        } else {
+                                            "복원".into()
+                                        })
+                                        .tooltip("복원 · Ctrl+Enter")
+                                        .on_click(cx.listener(|this, _, w, cx| {
+                                            this.restore_selected(w, cx)
+                                        })),
+                                )
+                            }),
+                    ),
             )
     }
 }
