@@ -59,6 +59,7 @@ pub(super) struct Block {
     pub content: Inline,
     pub cells: Vec<Inline>,
     pub prefix: String,
+    pub task_marker: Option<usize>,
     pub indent: usize,
     pub quote: usize,
     pub source: Range<usize>,
@@ -170,6 +171,7 @@ impl Builder {
             content: Inline::default(),
             cells: Vec::new(),
             prefix: std::mem::take(&mut self.prefix),
+            task_marker: None,
             indent: self.lists.len().saturating_sub(1),
             quote: self.quote,
             source: range,
@@ -365,7 +367,11 @@ pub(super) fn parse(text: &str) -> Document {
             Event::SoftBreak => b.push(" ", range, 0),
             Event::HardBreak => b.push("\n", range, 0),
             Event::TaskListMarker(checked) => {
-                b.ensure(range).prefix = if checked { "☑" } else { "☐" }.into();
+                let marker = range.start;
+                let valid = matches!(text.get(marker..marker + 3), Some("[ ]" | "[x]" | "[X]"));
+                let block = b.ensure(range);
+                block.prefix = if checked { "☑" } else { "☐" }.into();
+                block.task_marker = valid.then_some(marker + 1);
             }
             Event::Rule => {
                 b.start(Kind::Rule, range);

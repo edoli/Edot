@@ -1,5 +1,54 @@
 use super::*;
 
+#[gpui::test]
+fn reading_task_clicks_autosave_and_undo_without_changing_reading_mode(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let source = "- [ ] 저장할 한글🙂 항목\r\n";
+    f.update(cx, |this, window, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| s.replace_all(source, window, cx));
+        this.changed(f.ids[0], window, cx);
+        assert!(this.save_all(cx));
+        assert!(this.set_read_only(true, window, cx));
+        this.focus_editor(window, cx);
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let checkbox = visual.debug_bounds("reading-task-0").unwrap().center();
+    visual.simulate_click(checkbox, Default::default());
+    let checked = source.replace("[ ]", "[x]");
+    f.update(cx, |this, _, cx| {
+        assert_eq!(this.active_editor().unwrap().read(cx).value(), checked);
+        assert!(this.open[0].dirty);
+        assert!(cx.global::<AppState>().settings.read_only);
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(700));
+    cx.run_until_parked();
+    assert_eq!(
+        fs::read_to_string(f.dir.join(format!("notes/{}.txt", f.ids[0]))).unwrap(),
+        checked
+    );
+    f.press(cx, "ctrl-z");
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(700));
+    cx.run_until_parked();
+    assert_eq!(
+        fs::read_to_string(f.dir.join(format!("notes/{}.txt", f.ids[0]))).unwrap(),
+        source
+    );
+    f.update(cx, |this, _, cx| {
+        assert!(cx.global::<AppState>().settings.read_only);
+        assert!(!this.open[0].dirty);
+        assert_eq!(
+            fs::read_to_string(this.book.file(&this.dir, f.ids[1])).unwrap(),
+            "closed needle\n"
+        );
+    });
+}
+
 fn add_note(f: &Fixture, cx: &mut TestAppContext, title: &str) -> NoteId {
     f.update(cx, |this, _, _| {
         let id = this.book.add(0, title.into()).unwrap();

@@ -43,6 +43,7 @@ impl InputState {
             self.undo.last_mut().unwrap().after.push_str(text);
         } else {
             self.undo.push(Edit {
+                task_toggle: false,
                 start: range.start,
                 before: self.content[range.clone()].into(),
                 after: text.into(),
@@ -68,6 +69,7 @@ impl InputState {
         }) = self.composition.take()
         {
             self.undo.push(Edit {
+                task_toggle: false,
                 start: 0,
                 before: before.to_string(),
                 after: self.content.to_string(),
@@ -83,12 +85,17 @@ impl InputState {
         self.extra_marked.clear();
     }
     pub(super) fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_read_only() {
+        if self.is_read_only()
+            && !(self.is_markdown_reading()
+                && self.undo.last().is_some_and(|edit| edit.task_toggle))
+        {
             return;
         }
         self.finish_composition();
         self.last_edit = None;
         if let Some(edit) = self.undo.pop() {
+            let reading_scroll = (self.is_markdown_reading() && edit.task_toggle)
+                .then(|| self.reading.list.logical_scroll_top());
             let redo = Edit {
                 selection: self.selection.clone(),
                 reversed: self.reversed,
@@ -110,14 +117,23 @@ impl InputState {
             self.occurrence_word = false;
             self.redo.push(redo);
             self.changed(cx);
+            if let Some(offset) = reading_scroll {
+                self.reading.list.scroll_to(offset);
+                self.reveal = false;
+            }
         }
     }
     pub(super) fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_read_only() {
+        if self.is_read_only()
+            && !(self.is_markdown_reading()
+                && self.redo.last().is_some_and(|edit| edit.task_toggle))
+        {
             return;
         }
         self.last_edit = None;
         if let Some(edit) = self.redo.pop() {
+            let reading_scroll = (self.is_markdown_reading() && edit.task_toggle)
+                .then(|| self.reading.list.logical_scroll_top());
             let undo = Edit {
                 selection: self.selection.clone(),
                 reversed: self.reversed,
@@ -139,6 +155,10 @@ impl InputState {
             self.occurrence_word = false;
             self.undo.push(undo);
             self.changed(cx);
+            if let Some(offset) = reading_scroll {
+                self.reading.list.scroll_to(offset);
+                self.reveal = false;
+            }
         }
     }
     pub(super) fn clipboard_range(&self) -> Range<usize> {

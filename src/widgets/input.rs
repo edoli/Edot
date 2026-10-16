@@ -36,6 +36,7 @@ impl TextMode {
 }
 #[derive(Clone)]
 struct Edit {
+    task_toggle: bool,
     start: usize,
     before: String,
     after: String,

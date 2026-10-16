@@ -313,6 +313,7 @@ impl InputState {
             let mut changes = changes.into_iter();
             if let Some(first) = changes.next() {
                 self.undo.push(Edit {
+                    task_toggle: false,
                     start: first.start,
                     before: first.before,
                     after: first.after,

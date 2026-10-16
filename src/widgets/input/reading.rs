@@ -164,7 +164,7 @@ pub(super) struct Reading {
     pub(super) document: Arc<Document>,
     revision: Option<u64>,
     task: Option<Task<()>>,
-    list: ListState,
+    pub(super) list: ListState,
     font: Option<(Font, Pixels)>,
     directory: PathBuf,
     anchor: usize,
@@ -233,6 +233,7 @@ impl InputState {
         self
     }
     fn install_reading(&mut self, document: Document, revision: u64, cx: &mut Context<Self>) {
+        let offset = self.reading.list.logical_scroll_top();
         self.reading.anchor = 0;
         self.reading.head = 0;
         self.reading.drag = None;
@@ -244,7 +245,11 @@ impl InputState {
         self.reading.document = Arc::new(document);
         self.reading.revision = Some(revision);
         self.reading.list.reset(self.reading.document.blocks.len());
-        self.reveal_reading();
+        if self.reveal {
+            self.reveal_reading();
+        } else {
+            self.reading.list.scroll_to(offset);
+        }
         cx.notify();
     }
     fn reading_selection(&self) -> ReadingSelection {
@@ -280,6 +285,57 @@ impl InputState {
             });
         }));
         cx.notify();
+    }
+    fn toggle_reading_task(
+        &mut self,
+        index: usize,
+        revision: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.is_markdown_reading()
+            || self.is_composing()
+            || revision != self.revision
+            || self.reading.revision != Some(revision)
+        {
+            return false;
+        }
+        let Some(block) = self.reading.document.blocks.get(index) else {
+            return false;
+        };
+        let Some(marker) = block.task_marker else {
+            return false;
+        };
+        let replacement = match (
+            block.prefix.as_str(),
+            self.content.get(marker - 1..marker + 2),
+        ) {
+            ("☐", Some("[ ]")) => "x",
+            ("☑", Some("[x]" | "[X]")) => " ",
+            _ => return false,
+        };
+        let selection = (
+            self.selection.clone(),
+            self.reversed,
+            self.caret_after_wrap,
+            self.extra.clone(),
+            self.occurrence_word,
+        );
+        let offset = self.reading.list.logical_scroll_top();
+        self.commit(marker..marker + 1, replacement, false, cx);
+        self.undo.last_mut().unwrap().task_toggle = true;
+        (
+            self.selection,
+            self.reversed,
+            self.caret_after_wrap,
+            self.extra,
+            self.occurrence_word,
+        ) = selection;
+        self.reveal = false;
+        self.reading.list.scroll_to(offset);
+        self.ensure_reading(cx);
+        self.focus(window, cx);
+        true
     }
     fn reading_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(start) = self.reading.drag else {
@@ -559,8 +615,13 @@ impl InputState {
             .child(
                 list(self.reading.list.clone(), move |i, window, cx| {
                     let block = &document.blocks[i];
+                    let view = ReadingView {
+                        window,
+                        editor: copy_entity.clone(),
+                        revision,
+                    };
                     let rendered =
-                        render_block(block, i, font_size, &directory, &selection, window, cx);
+                        render_block(block, i, font_size, &directory, &selection, &view, cx);
                     if !matches!(block.kind, Kind::Code | Kind::Mermaid(_)) {
                         return rendered;
                     }
@@ -746,15 +807,113 @@ fn render_image(image: &ReadingImage, directory: &std::path::Path) -> AnyElement
         .into_any_element()
 }
 
+struct ReadingView<'a> {
+    window: &'a Window,
+    editor: WeakEntity<InputState>,
+    revision: u64,
+}
+
+fn render_task_marker(
+    block: &Block,
+    checked: bool,
+    index: usize,
+    font_size: Pixels,
+    selection: &ReadingSelection,
+    view: &ReadingView<'_>,
+    cx: &App,
+) -> AnyElement {
+    let size = (font_size * 1.1).max(px(12.));
+    let height = view.window.line_height().max(size);
+    let selected = selection.range.start < block.offset + block.prefix.len()
+        && selection.range.end > block.offset;
+    let editor = view.editor.clone();
+    let revision = view.revision;
+    div()
+        .id(("reading-task", index))
+        .debug_selector(move || format!("reading-task-{index}"))
+        .role(Role::CheckBox)
+        .aria_label(if checked {
+            "완료된 항목"
+        } else {
+            "미완료 항목"
+        })
+        .aria_toggled(if checked {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .relative()
+        .block_mouse_except_scroll()
+        .cursor_pointer()
+        .flex_shrink_0()
+        .w(size)
+        .h(height)
+        .rounded(px(3.))
+        .when(selected, |d| d.bg(cx.theme().selection))
+        .hover(|d| d.bg(cx.theme().primary.opacity(0.1)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, cx| {
+            let _ = editor.update(cx, |s, cx| {
+                s.toggle_reading_task(index, revision, window, cx);
+            });
+            cx.stop_propagation();
+        })
+        // Retain the prefix's text layout for hit testing and rendered-text copy.
+        .child(div().absolute().inset_0().opacity(0.).child(render_text(
+            &block.prefix,
+            &[],
+            block.offset,
+            false,
+            selection,
+            cx,
+        )))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top((height - size) / 2.)
+                .size(size)
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(size * 0.25)
+                .border((font_size / 14.).max(px(1.)))
+                .border_color(if checked {
+                    cx.theme().primary
+                } else {
+                    cx.theme().muted_foreground.opacity(0.65)
+                })
+                .bg(if checked {
+                    cx.theme().primary
+                } else {
+                    cx.theme().background
+                })
+                .when(checked, |d| {
+                    d.child(
+                        Icon::new(IconName::Check)
+                            .size(size * 0.8)
+                            .text_color(cx.theme().primary_foreground),
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
 fn render_block(
     block: &Block,
     index: usize,
     font_size: Pixels,
     directory: &std::path::Path,
     selection: &ReadingSelection,
-    window: &Window,
+    view: &ReadingView<'_>,
     cx: &App,
 ) -> AnyElement {
+    let window = view.window;
+    let task = match block.prefix.as_str() {
+        "☐" => Some(false),
+        "☑" => Some(true),
+        _ => None,
+    };
     let mut body = div().v_flex().min_w_0().flex_1();
     match &block.kind {
         Kind::Rule => {
@@ -867,19 +1026,32 @@ fn render_block(
             .iter()
             .map(|image| render_image(image, directory)),
     );
+    if task == Some(true) {
+        body = body.text_color(cx.theme().muted_foreground);
+    }
     let row = div()
         .h_flex()
         .items_start()
-        .gap(px(4.))
+        .gap(if task.is_some() {
+            font_size * 0.5
+        } else {
+            px(4.)
+        })
         .when(!block.prefix.is_empty(), |d| {
-            d.child(div().flex_shrink_0().child(render_text(
-                &block.prefix,
-                &[],
-                block.offset,
-                false,
-                selection,
-                cx,
-            )))
+            if let Some(checked) = task {
+                d.child(render_task_marker(
+                    block, checked, index, font_size, selection, view, cx,
+                ))
+            } else {
+                d.child(div().flex_shrink_0().child(render_text(
+                    &block.prefix,
+                    &[],
+                    block.offset,
+                    false,
+                    selection,
+                    cx,
+                )))
+            }
         })
         .child(body);
     let (top, bottom) = match block.kind {
@@ -887,6 +1059,7 @@ fn render_block(
             if header { px(8.) } else { px(0.) },
             if last { px(8.) } else { px(0.) },
         ),
+        _ if task.is_some() => (font_size * 0.2, font_size * 0.2),
         _ if block.prefix.is_empty() => (px(8.), px(8.)),
         _ => (px(2.), px(2.)),
     };
@@ -923,6 +1096,126 @@ fn web_url(target: &str) -> bool {
 mod tests {
     use super::{Copy, InputState, SelectAll, TextMode};
     use gpui::{AppContext, MouseButton, point, px};
+
+    #[gpui::test]
+    fn task_clicks_preserve_source_and_only_task_undo_is_allowed_in_reading(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::widgets::init);
+        let source = "앞🙂 [ ] 일반 텍스트\r\n\r\n- [ ] 한글 **항목**\r\n  - [X] 하위 완료\r\n\r\n```\r\n- [ ] 코드\r\n```\r\n";
+        let window = cx.add_window(|w, cx| {
+            let mut state = InputState::new(w, cx).default_value("이전 일반 편집".into());
+            state.replace_all(source, w, cx);
+            state.set_selected_range(0.."앞🙂".len(), cx);
+            state.set_read_only(true, cx);
+            state.focus(w, cx);
+            state
+        });
+        let editor = window.root(cx).unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |v: &mut gpui::VisualTestContext| {
+            v.update(|w, cx| {
+                w.refresh();
+                w.draw(cx).clear(cx);
+            })
+        };
+        draw(&mut visual);
+        let revision = editor.read_with(cx, |s, _| s.revision);
+        let checkbox = visual.debug_bounds("reading-task-1").unwrap().center();
+        visual.simulate_click(checkbox, Default::default());
+        draw(&mut visual);
+        let checked = source.replacen("- [ ] 한글", "- [x] 한글", 1);
+        editor.read_with(cx, |s, _| {
+            assert_eq!(s.value(), checked);
+            assert_eq!(s.selection, 0.."앞🙂".len());
+            assert!(s.is_read_only());
+            assert!(s.reading.drag.is_none());
+            assert!(s.reading.anchor == s.reading.head);
+        });
+        visual.update(|w, cx| {
+            editor.update(cx, |s, cx| {
+                assert!(!s.toggle_reading_task(1, revision, w, cx));
+                assert_eq!(s.value(), checked);
+            })
+        });
+        visual.update(|w, cx| w.dispatch_action(Box::new(super::Undo), cx));
+        draw(&mut visual);
+        editor.read_with(cx, |s, _| assert_eq!(s.value(), source));
+        visual.update(|w, cx| w.dispatch_action(Box::new(super::Undo), cx));
+        editor.read_with(cx, |s, _| assert_eq!(s.value(), source)); // General edit stays blocked.
+        visual.update(|w, cx| w.dispatch_action(Box::new(super::Redo), cx));
+        draw(&mut visual);
+        editor.read_with(cx, |s, _| assert_eq!(s.value(), checked));
+        let child = visual.debug_bounds("reading-task-2").unwrap().center();
+        visual.simulate_click(child, Default::default());
+        draw(&mut visual);
+        editor.read_with(cx, |s, _| {
+            assert_eq!(s.value(), checked.replace("[X]", "[ ]"))
+        });
+        visual.update(|w, cx| w.dispatch_action(Box::new(super::Undo), cx));
+        draw(&mut visual);
+        editor.read_with(cx, |s, _| assert_eq!(s.value(), checked));
+        assert!(visual.debug_bounds("reading-task-3").is_none()); // Fenced code is inert.
+        let checkbox = visual.debug_bounds("reading-task-1").unwrap().center();
+        visual.simulate_click(checkbox, Default::default());
+        draw(&mut visual);
+        editor.read_with(cx, |s, _| assert_eq!(s.value(), source));
+        visual.update(|w, cx| w.dispatch_action(Box::new(SelectAll), cx));
+        visual.update(|w, cx| w.dispatch_action(Box::new(Copy), cx));
+        cx.update(|cx| {
+            assert!(
+                cx.read_from_clipboard()
+                    .unwrap()
+                    .text()
+                    .unwrap()
+                    .contains("☐ 한글 항목")
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn task_toggle_keeps_scrolled_position_through_background_reparse(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::widgets::init);
+        let source = "긴 한글 본문입니다.\r\n\r\n".repeat(4000) + "- [ ] 마지막 항목\r\n";
+        let window = cx.add_window(|w, cx| {
+            let mut state = InputState::new(w, cx).default_value(source.clone());
+            state.set_read_only(true, cx);
+            state.focus(w, cx);
+            state
+        });
+        let editor = window.root(cx).unwrap();
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |v: &mut gpui::VisualTestContext| {
+            v.update(|w, cx| {
+                w.refresh();
+                w.draw(cx).clear(cx);
+            })
+        };
+        visual.update(|_, cx| {
+            editor.update(cx, |s, cx| {
+                s.reading.list.scroll_to_end();
+                cx.notify();
+            })
+        });
+        draw(&mut visual);
+        let checkbox = visual.debug_bounds("reading-task-4000").unwrap().center();
+        let offset = editor.read_with(cx, |s, _| s.reading.list.logical_scroll_top());
+        visual.simulate_click(checkbox, Default::default());
+        cx.run_until_parked();
+        draw(&mut visual);
+        assert!(visual.debug_bounds("reading-task-4000").is_some());
+        editor.read_with(cx, |s, _| {
+            assert_eq!(
+                s.value(),
+                source.replacen("- [ ] 마지막", "- [x] 마지막", 1)
+            );
+            assert_eq!(s.reading.list.logical_scroll_top().item_ix, offset.item_ix);
+            assert_eq!(s.selection, 0..0);
+        });
+    }
 
     #[gpui::test]
     fn code_buttons_copy_only_the_target_block_without_changing_selection(
@@ -1212,7 +1505,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(crate::widgets::init);
-        let source = "# 머리\n\n앞 **한글🙂** [링크](https://example.org) 뒤\n\n- 항목\n\n~~~\n\t가\t나\n~~~\n\n| A | B |\n|---|---|\n| 한 | 글 |\n\n".to_owned() + &"다음 문단\n\n".repeat(80);
+        let source = "# 머리\n\n앞 **한글🙂** [링크](https://example.org) 뒤\n\n- [x] 항목\n\n~~~\n\t가\t나\n~~~\n\n| A | B |\n|---|---|\n| 한 | 글 |\n\n".to_owned() + &"다음 문단\n\n".repeat(80);
         let window = cx.add_window(|w, cx| {
             InputState::new(w, cx)
                 .soft_wrap(true)
@@ -1273,7 +1566,7 @@ mod tests {
         cx.update(|cx| {
             assert_eq!(
                 cx.read_from_clipboard().unwrap().text().unwrap(),
-                "한글🙂 링크 뒤\n\n• 항목\n\n\t가\t나\n\n\nA\tB\n\n한\t글"
+                "한글🙂 링크 뒤\n\n☑ 항목\n\n\t가\t나\n\n\nA\tB\n\n한\t글"
             )
         });
         assert!(cx.opened_url().is_none());
