@@ -243,9 +243,31 @@ impl InputState {
         if self.is_read_only() {
             return;
         }
-        if let Some(item) = cx.read_from_clipboard()
-            && let Some(text) = item.text()
-        {
+        if let Some(item) = cx.read_from_clipboard() {
+            if self.can_insert_images()
+                && item.entries().iter().any(|entry| match entry {
+                    ClipboardEntry::Image(image) => matches!(
+                        image.format,
+                        gpui::ImageFormat::Png
+                            | gpui::ImageFormat::Jpeg
+                            | gpui::ImageFormat::Webp
+                            | gpui::ImageFormat::Gif
+                            | gpui::ImageFormat::Svg
+                            | gpui::ImageFormat::Bmp
+                    ),
+                    ClipboardEntry::ExternalPaths(paths) => {
+                        paths.0.iter().any(|path| Self::supports_image_path(path))
+                    }
+                    _ => false,
+                })
+            {
+                let insertion = self.begin_image_paste();
+                cx.emit(InputEvent::PasteImages { item, insertion });
+                return;
+            }
+            let Some(text) = item.text() else {
+                return;
+            };
             if self.multiline
                 && item.metadata().is_some_and(|m| m == LINE_COPY_METADATA)
                 && self.selected_ranges().all(|r| r.is_empty())

@@ -139,6 +139,9 @@ impl Edot {
                         InputEvent::DropImages { paths, position } => {
                             this.drop_images(editor.clone(), paths, *position, window, cx);
                         }
+                        InputEvent::PasteImages { item, insertion } => {
+                            this.paste_images(editor.clone(), item, insertion.clone(), window, cx);
+                        }
                         _ => {}
                     }
                     cx.notify();

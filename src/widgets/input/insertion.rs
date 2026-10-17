@@ -1,8 +1,12 @@
-//! Keep an asynchronous file drop attached to its original text position.
+//! Keep asynchronous image insertion attached to its original text range.
 use super::*;
 use std::cell::Cell;
 
-pub struct DropInsertion(Rc<Cell<Option<usize>>>);
+#[derive(Clone)]
+pub struct DropInsertion {
+    start: Rc<Cell<Option<usize>>>,
+    end: Rc<Cell<Option<usize>>>,
+}
 
 impl InputState {
     pub fn can_insert_images(&self) -> bool {
@@ -72,9 +76,21 @@ impl InputState {
         let index = self.mouse_index(position);
         self.set_selected_range(index..index, cx);
         self.focus(window, cx);
-        let anchor = Rc::new(Cell::new(Some(index)));
-        self.pending_insertions.push(Rc::downgrade(&anchor));
-        DropInsertion(anchor)
+        self.begin_image_insertion(index..index)
+    }
+
+    pub(super) fn begin_image_paste(&mut self) -> DropInsertion {
+        self.finish_composition();
+        self.stop_pointer_drag();
+        self.begin_image_insertion(self.selection.clone())
+    }
+
+    fn begin_image_insertion(&mut self, range: Range<usize>) -> DropInsertion {
+        let start = Rc::new(Cell::new(Some(range.start)));
+        let end = Rc::new(Cell::new(Some(range.end)));
+        self.pending_insertions.push(Rc::downgrade(&start));
+        self.pending_insertions.push(Rc::downgrade(&end));
+        DropInsertion { start, end }
     }
 
     pub fn finish_drop(
@@ -86,10 +102,13 @@ impl InputState {
         if !self.can_insert_images() || self.is_composing() {
             return false;
         }
-        let Some(index) = anchor.0.take() else {
+        let Some(start) = anchor.start.take() else {
             return false;
         };
-        self.commit(index..index, text, false, cx);
+        let Some(end) = anchor.end.take() else {
+            return false;
+        };
+        self.commit(start..end, text, false, cx);
         true
     }
 

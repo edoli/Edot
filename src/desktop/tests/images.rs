@@ -41,6 +41,139 @@ fn drop_files(
     .unwrap();
 }
 
+#[gpui::test]
+fn pasted_images_replace_selection_follow_edits_and_undo(cx: &mut TestAppContext) {
+    use gpui::{ClipboardItem, Image, ImageFormat};
+    let f = Fixture::new(cx);
+    let png = fs::read("assets/app-icon/edot.png").unwrap();
+    let item = ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, png.clone()));
+    let editor = f.update(cx, |this, window, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |state, cx| {
+            state.set_value("AB🙂CD", window, cx);
+            state.set_selected_range(2..6, cx);
+            state.focus(window, cx);
+        });
+        cx.write_to_clipboard(item.clone());
+        editor
+    });
+    f.press(cx, "ctrl-v");
+    // The copy completes asynchronously: retain the selection until success and
+    // follow intervening edits instead of replacing the new cursor's selection.
+    f.update(cx, |_, window, cx| {
+        assert_eq!(editor.read(cx).value(), "AB🙂CD");
+        editor.update(cx, |state, cx| {
+            state.set_selected_range(0..0, cx);
+            state.replace("앞", window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let tag = "![clipboard-image](<images/clipboard-image.png>)";
+    let expected = format!("앞AB{tag}CD");
+    f.update(cx, |this, _, cx| {
+        assert_eq!(editor.read(cx).value(), expected);
+        assert!(this.save_all(cx));
+    });
+    assert_eq!(
+        fs::read(f.dir.join("images/clipboard-image.png")).unwrap(),
+        png
+    );
+    assert_eq!(
+        fs::read_to_string(f.dir.join(format!("notes/{}.txt", f.ids[0]))).unwrap(),
+        expected
+    );
+    f.press(cx, "ctrl-z");
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).value(), "앞AB🙂CD")
+    });
+    f.press(cx, "ctrl-y");
+    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), expected));
+    f.press(cx, "ctrl-v");
+    cx.run_until_parked();
+    assert_eq!(
+        fs::read(f.dir.join("images/clipboard-image-2.png")).unwrap(),
+        png
+    );
+
+    // A failed import must leave the selected text and existing images intact.
+    f.update(cx, |_, window, cx| {
+        editor.update(cx, |state, cx| state.select_all(window, cx));
+        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+            ImageFormat::Png,
+            b"invalid".to_vec(),
+        )));
+    });
+    let before = f.update(cx, |_, _, cx| editor.read(cx).value().to_string());
+    f.press(cx, "ctrl-v");
+    cx.run_until_parked();
+    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), before));
+    assert_eq!(fs::read_dir(f.dir.join("images")).unwrap().count(), 2);
+}
+
+#[gpui::test]
+fn pasted_image_files_and_text_respect_editor_mode(cx: &mut TestAppContext) {
+    use crate::widgets::TextMode;
+    use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat};
+    let f = Fixture::new(cx);
+    let png = fs::read("assets/app-icon/edot.png").unwrap();
+    let image = ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, png.clone()));
+    let editor = f.update(cx, |this, window, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |state, cx| {
+            state.set_value("keep", window, cx);
+            state.select_all(window, cx);
+            state.focus(window, cx);
+            state.set_text_mode(TextMode::PlainText, cx);
+        });
+        cx.write_to_clipboard(image.clone());
+        editor
+    });
+    f.press(cx, "ctrl-v");
+    cx.run_until_parked();
+    assert!(!f.dir.join("images").exists());
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).value(), "keep");
+        editor.update(cx, |state, cx| {
+            state.set_text_mode(TextMode::Markdown, cx);
+            state.set_read_only(true, cx);
+        });
+    });
+    f.press(cx, "ctrl-v");
+    cx.run_until_parked();
+    assert!(!f.dir.join("images").exists());
+
+    let sources = f.dir.join("paste-sources");
+    fs::create_dir_all(&sources).unwrap();
+    let first = sources.join("사진.png");
+    let second = sources.join("second.png");
+    fs::write(&first, &png).unwrap();
+    fs::write(&second, &png).unwrap();
+    f.update(cx, |_, _, cx| {
+        editor.update(cx, |state, cx| state.set_read_only(false, cx));
+        cx.write_to_clipboard(
+            ClipboardEntry::ExternalPaths(ExternalPaths(
+                vec![first.clone(), second.clone()].into(),
+            ))
+            .into(),
+        );
+    });
+    f.press(cx, "ctrl-v");
+    cx.run_until_parked();
+    let tags = "![사진](<images/사진.png>)\n![second](<images/second.png>)";
+    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), tags));
+    assert_eq!(fs::read(f.dir.join("images/사진.png")).unwrap(), png);
+    assert_eq!(fs::read(&first).unwrap(), png);
+    f.press(cx, "ctrl-z");
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).value(), "keep");
+        cx.write_to_clipboard(ClipboardItem::new_string("ordinary text".into()));
+    });
+    f.press(cx, "ctrl-v");
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).value(), "ordinary text")
+    });
+}
+
 // A real COM IDataObject exercises the same formats supplied by browser OLE
 // drags without sending input to a user's browser or desktop.
 mod native {

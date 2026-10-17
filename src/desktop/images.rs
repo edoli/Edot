@@ -1,6 +1,31 @@
-//! Copy dropped images into the Space and insert references into the owning note.
+//! Import dropped or pasted images and insert references into the owning note.
 use super::*;
+use crate::widgets::input::DropInsertion;
 use std::{fs::OpenOptions, io::Read, path::Path, time::Duration};
+
+fn import_clipboard_images(space: &Path, images: &[gpui::Image]) -> io::Result<String> {
+    let mut created = Vec::new();
+    let result = (|| {
+        let mut tags = Vec::new();
+        for image in images {
+            let extension = image_extension(&image.bytes)?;
+            let name = copy_image(
+                &space.join("images"),
+                &format!("clipboard-image.{extension}"),
+                &mut image.bytes.as_slice(),
+                &mut created,
+            )?;
+            tags.push(image_tag(&name, &name));
+        }
+        Ok(tags.join("\n"))
+    })();
+    if result.is_err() {
+        for path in created {
+            let _ = fs::remove_file(path);
+        }
+    }
+    result
+}
 
 fn copy_image(
     directory: &Path,
@@ -160,6 +185,42 @@ pub(super) fn import_images(space: &Path, paths: &[PathBuf]) -> io::Result<Strin
 }
 
 impl Edot {
+    pub(super) fn paste_images(
+        &mut self,
+        editor: Entity<InputState>,
+        item: &ClipboardItem,
+        anchor: DropInsertion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths: Vec<_> = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::ExternalPaths(paths) => Some(&paths.0),
+                _ => None,
+            })
+            .flatten()
+            .filter(|path| InputState::supports_image_path(path))
+            .cloned()
+            .collect();
+        // Explorer may include a thumbnail too; import the original files once.
+        let sources = if paths.is_empty() {
+            ImageSources::Clipboard(
+                item.entries()
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        ClipboardEntry::Image(image) => Some(image.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        } else {
+            ImageSources::Files(paths)
+        };
+        self.start_image_import(editor, sources, anchor, window, cx);
+    }
+
     pub(super) fn drop_web_images(
         &mut self,
         editor: Entity<InputState>,
@@ -200,6 +261,21 @@ impl Edot {
         if self.startup_failed || !editor.read(cx).can_insert_images() {
             return;
         }
+        let anchor = editor.update(cx, |state, cx| state.begin_drop(position, window, cx));
+        self.start_image_import(editor, sources, anchor, window, cx);
+    }
+
+    fn start_image_import(
+        &mut self,
+        editor: Entity<InputState>,
+        sources: ImageSources,
+        anchor: DropInsertion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.startup_failed || !editor.read(cx).can_insert_images() {
+            return;
+        }
         let Some(id) = self
             .open
             .iter()
@@ -208,7 +284,6 @@ impl Edot {
         else {
             return;
         };
-        let anchor = editor.update(cx, |state, cx| state.begin_drop(position, window, cx));
         let space = self.dir.clone();
         let destination = space.clone();
         self.status = "이미지 복사 중…".into();
@@ -217,6 +292,7 @@ impl Edot {
         cx.spawn_in(window, async move |this, cx| {
             let mut result = Some(match sources {
                 ImageSources::Files(paths) => cx.background_executor().spawn(async move { import_images(&destination, &paths) }).await,
+                ImageSources::Clipboard(images) => cx.background_executor().spawn(async move { import_clipboard_images(&destination, &images) }).await,
                 ImageSources::Web(urls) => {
                     let mut images = Vec::new();
                     let mut error = None;
@@ -275,4 +351,5 @@ impl Edot {
 enum ImageSources {
     Files(Vec<PathBuf>),
     Web(Vec<String>),
+    Clipboard(Vec<gpui::Image>),
 }

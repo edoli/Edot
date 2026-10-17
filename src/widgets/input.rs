@@ -19,6 +19,10 @@ pub enum InputEvent {
         paths: Vec<std::path::PathBuf>,
         position: Point<Pixels>,
     },
+    PasteImages {
+        item: ClipboardItem,
+        insertion: DropInsertion,
+    },
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextMode {
@@ -374,6 +378,7 @@ mod highlighting;
 mod history;
 mod ime;
 mod insertion;
+pub use insertion::DropInsertion;
 mod layout;
 mod links;
 mod markdown;
