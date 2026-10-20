@@ -25,4 +25,15 @@ embed-resource = "=3.0.11"
 debug = 0
 
 [profile.release]
+strip = "none"
+
+[profile.release-dist]
+inherits = "release"
+# Spend more build time on cross-crate optimization for distributed binaries.
+opt-level = 3
+codegen-units = 1
+lto = "thin"
+incremental = false
+panic = "abort"
+debug = 0
 strip = "symbols"

@@ -36,9 +36,9 @@ Push-Location $projectRoot
 try {
     $env:EDOT_REPOSITORY = $Repository
     $env:EDOT_BUILD_LABEL = $BuildLabel
-    & cargo build --release --target-dir target
-    if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
-    $executable = Join-Path $projectRoot 'target\release\edot.exe'
+    & cargo build --profile release-dist --target-dir target
+    if ($LASTEXITCODE -ne 0) { throw 'release-dist build failed' }
+    $executable = Join-Path $projectRoot 'target\release-dist\edot.exe'
     if ((Get-Item -LiteralPath $executable).VersionInfo.ProductVersion -ne $Version) {
         throw 'EXE version does not match the package version'
     }

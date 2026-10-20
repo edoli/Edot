@@ -71,13 +71,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Clippy failed' }
       - name: Install packaging tool
         run: ./tools/install_inno.ps1
-      - name: Build installer and portable ZIP
+      - name: Build release-dist installer and portable ZIP
         env:
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           ./tools/package.ps1 -Version $env:RELEASE_VERSION -Repository $env:RELEASE_REPOSITORY -BuildLabel $env:EDOT_BUILD_LABEL
-          python tools/check_binary_paths.py
+          python tools/check_binary_paths.py target/release-dist/edot.exe
           if ($LASTEXITCODE -ne 0) { throw 'Binary path checks failed' }
       - uses: actions/upload-artifact@v4
         with:
