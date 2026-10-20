@@ -112,13 +112,13 @@ fn external_tree_updates_keep_tabs_selection_and_expansion_and_reject_partial_in
 ) {
     let f = Fixture::new(cx);
     let editor = f.update(cx, |this, _, _| {
-        this.collapsed.insert(f.ids[0]);
+        this.collapsed.insert(f.folder);
         this.active_editor().unwrap()
     });
     let mut book = Notebook::reload(&f.dir).unwrap();
     book.get_mut(f.ids[0]).unwrap().title = "external title".into();
-    book.get_mut(f.ids[1]).unwrap().parent = f.ids[0];
-    let added = book.add(0, "added".into()).unwrap();
+    book.get_mut(f.ids[1]).unwrap().parent = f.folder;
+    let added = book.add_folder(0, "added".into()).unwrap();
     book.add(added, "new child".into()).unwrap();
     book.save(&f.dir).unwrap();
     f.update(cx, |this, window, cx| {
@@ -127,18 +127,18 @@ fn external_tree_updates_keep_tabs_selection_and_expansion_and_reject_partial_in
     cx.run_until_parked();
     f.update(cx, |this, _, _| {
         assert_eq!(this.book.get(f.ids[0]).unwrap().title, "external title");
-        assert_eq!(this.book.get(f.ids[1]).unwrap().parent, f.ids[0]);
+        assert_eq!(this.book.get(f.ids[1]).unwrap().parent, f.folder);
         assert_eq!(this.active_editor().unwrap(), editor);
         assert_eq!(this.session.active, Some(f.ids[0]));
         assert!(this.selection.ids.contains(&f.ids[0]));
-        assert!(this.collapsed.contains(&f.ids[0]));
+        assert!(this.collapsed.contains(&f.folder));
         assert!(this.collapsed.contains(&added));
         assert_eq!(
             this.open.iter().map(|tab| tab.id).collect::<Vec<_>>(),
             vec![f.ids[0], f.ids[1]]
         );
     });
-    fs::write(f.dir.join("tree.tsv"), "EDOT4\nAAAAAAAAAAE\t").unwrap();
+    fs::write(f.dir.join("tree.tsv"), "EDOT5\nAAAAAAAAAAE\t").unwrap();
     f.update(cx, |this, window, cx| {
         this.request_file_sync(Changes::all(), window, cx);
     });
@@ -183,7 +183,7 @@ fn external_tree_deletion_removes_clean_tabs_but_keeps_dirty_app_notes(cx: &mut 
         });
         this.changed(f.ids[0], window, cx);
     });
-    fs::write(f.dir.join("tree.tsv"), "EDOT4\n").unwrap();
+    fs::write(f.dir.join("tree.tsv"), "EDOT5\n").unwrap();
     assert!(sync(&f, Changes::all(), cx).is_empty());
     f.update(cx, |this, _, cx| {
         assert_eq!(this.book.notes.len(), 1);

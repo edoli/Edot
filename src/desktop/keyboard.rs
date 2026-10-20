@@ -59,6 +59,8 @@ impl Edot {
             let mut next = cx.global::<AppState>().settings.clone();
             next.wrap = !next.wrap;
             self.change_settings(next, window, cx);
+        } else if ctrl && shift && key == "n" {
+            self.create_folder(None, window, cx);
         } else if ctrl && key == "n" {
             self.create_note(None, window, cx);
         } else if ctrl && key == "s" {
@@ -245,7 +247,11 @@ impl Edot {
         }
         if key == "enter" {
             if let Some(id) = self.caret {
-                self.open_note(id, true, window, cx);
+                if self.book.is_folder(id) {
+                    self.set_collapsed(id, !self.collapsed.contains(&id), cx);
+                } else {
+                    self.open_note(id, true, window, cx);
+                }
             }
             return true;
         }
@@ -261,7 +267,7 @@ impl Edot {
             "home" => visible.first().copied(),
             "end" => visible.last().copied(),
             "left" => self.caret.and_then(|id| {
-                if !self.book.children(id).is_empty() && !self.collapsed.contains(&id) {
+                if self.book.is_folder(id) && !self.collapsed.contains(&id) {
                     self.set_collapsed(id, true, cx);
                     None
                 } else {

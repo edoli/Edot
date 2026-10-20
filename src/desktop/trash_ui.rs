@@ -79,13 +79,16 @@ impl Edot {
         if self.startup_failed || !self.save_all(cx) {
             return Err(io::Error::other("현재 노트를 저장한 뒤 복원하세요."));
         }
+        let old_folders = Session::folders(&self.book);
         let restored = trash::restore(&mut self.book, &self.dir, key)?;
+        self.collapsed
+            .extend(Session::folders(&self.book).difference(&old_folders));
         self.file_sync.tree_revision = self.file_sync.tree_revision.wrapping_add(1);
         if let Some(id) = restored.ids.first() {
             self.caret = Some(*id);
             self.selection.single(*id);
         }
-        self.status = format!("{}개 노트 복원됨", restored.ids.len());
+        self.status = format!("{}개 항목 복원됨", restored.ids.len());
         cx.notify();
         Ok(restored)
     }
@@ -183,7 +186,7 @@ impl TrashBrowser {
             Ok(Ok(restored)) => {
                 self.message =
                     Some(restored.warning.unwrap_or_else(|| {
-                        format!("{}개 노트를 복원했습니다.", restored.ids.len())
+                        format!("{}개 항목을 복원했습니다.", restored.ids.len())
                     }));
                 self.reload(window, cx);
             }
@@ -236,7 +239,7 @@ impl TrashBrowser {
             let selected = trash::subtree(&self.entries, entry);
             let description = if selected.len() > 1 {
                 format!(
-                    "‘{}’와 하위 노트 {}개를 영구 삭제할까요?",
+                    "‘{}’와 하위 항목 {}개를 영구 삭제할까요?",
                     entry.note.title,
                     selected.len() - 1
                 )
@@ -375,7 +378,6 @@ impl Render for TrashBrowser {
         let selected = self.selected.and_then(|i| self.entries.get(i));
         let count = selected.map_or(0, |e| trash::subtree(&self.entries, e).len());
         let title = selected.map_or("본문 미리보기".to_owned(), |e| e.note.title.clone());
-        let legacy = selected.is_some_and(|e| !e.has_metadata);
         let list = uniform_list(
             "trash-list",
             self.entries.len(),
@@ -541,13 +543,6 @@ impl Render for TrashBrowser {
                                             .overflow_hidden()
                                             .child(title),
                                     )
-                                    .when(legacy, |v| {
-                                        v.child(
-                                            div().text_color(cx.theme().muted_foreground).child(
-                                                "이름·폴더 정보가 없어 최상위로 복원됩니다.",
-                                            ),
-                                        )
-                                    })
                                     .when(self.preview_loading || self.preview_truncated, |v| {
                                         v.child(
                                             div().text_color(cx.theme().muted_foreground).child(

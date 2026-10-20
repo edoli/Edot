@@ -42,8 +42,8 @@ impl DropTarget {
                 let target = book.get(id)?;
                 match zone {
                     DropZone::Before => (target.parent, Some(id)),
-                    DropZone::Inside | DropZone::InsideLast => (id, None),
-                    DropZone::InsideFirst => (
+                    DropZone::Inside | DropZone::InsideLast if target.is_folder() => (id, None),
+                    DropZone::InsideFirst if target.is_folder() => (
                         id,
                         book.children(id).into_iter().find(|id| !roots.contains(id)),
                     ),
@@ -56,7 +56,7 @@ impl DropTarget {
                             .find(|s| !roots.contains(s));
                         (target.parent, next)
                     }
-                    DropZone::Root => return None,
+                    _ => return None,
                 }
             }
             _ => return None,
@@ -95,7 +95,11 @@ impl DropTarget {
         if y >= height * 3 / 4 {
             return Self::resolve_boundary(book, sources, Some(row), next_visible, false);
         }
-        Self::resolve_many(book, sources, Some(row), DropZone::Inside)
+        if book.is_folder(row) {
+            Self::resolve_many(book, sources, Some(row), DropZone::Inside)
+        } else {
+            Self::resolve_boundary(book, sources, Some(row), next_visible, false)
+        }
     }
 
     fn resolve_boundary(

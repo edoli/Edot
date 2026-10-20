@@ -44,9 +44,7 @@ impl LoadedSpace {
         if !paths.space.join("tree.tsv").try_exists()? {
             book.save(&paths.space)?;
         }
-        if !paths.space.join(crate::session::FILE_NAME).try_exists()?
-            && !paths.space.join("session.tsv").try_exists()?
-        {
+        if !paths.space.join(crate::session::FILE_NAME).try_exists()? {
             session.save(&paths.space)?;
         }
         space::initialize_metadata(&paths.space)?;

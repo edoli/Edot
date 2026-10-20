@@ -362,6 +362,16 @@ impl Edot {
         if book.notes == self.book.notes {
             return Ok(false);
         }
+        if book.notes.iter().any(|note| {
+            self.book
+                .get(note.id)
+                .is_some_and(|old| old.kind != note.kind)
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "기존 항목의 유형은 변경할 수 없습니다.",
+            ));
+        }
         let mut valid: HashSet<_> = book.notes.iter().map(|note| note.id).collect();
         let mut root_order = book.notes.iter().filter(|note| note.parent == 0).count() as u32;
         let mut restored = false;

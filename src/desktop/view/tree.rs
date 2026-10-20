@@ -202,7 +202,7 @@ impl Edot {
         let (id, depth) = visible[index];
         let note = self.book.get(id).unwrap();
         let title = note.title.clone();
-        let folder = !self.book.children(id).is_empty();
+        let folder = note.is_folder();
         let expanded = !self.collapsed.contains(&id);
         let selected = self.selection.ids.contains(&id);
         let active = self.session.active == Some(id);

@@ -67,12 +67,16 @@ fn empty_snapshot_keeps_new_archives_unknown_files_and_directories() {
 
 #[test]
 fn invalid_keys_and_replaced_directories_are_never_deleted() {
-    let (data, mut book, [root, _, _]) = fixture();
+    let (data, mut book, [root, child, _]) = fixture();
     book.trash_notes(&data.0, &[root]).unwrap();
-    let entry = list(&data.0).unwrap().pop().unwrap();
+    let entry = list(&data.0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.note.id == child)
+        .unwrap();
     for invalid in ["../notes/1", "1-2/../3", "0-1", "01-1", "1-01"] {
         assert!(permanently_delete(&data.0, &[entry.key(), invalid.into()]).is_err());
-        assert!(entry.body(&data.0).is_file());
+        assert_eq!(entry.body(&data.0).is_file(), !entry.note.is_folder());
         assert!(entry.metadata(&data.0).is_file());
     }
     fs::remove_file(entry.body(&data.0)).unwrap();
@@ -92,11 +96,11 @@ fn invalid_keys_and_replaced_directories_are_never_deleted() {
 #[test]
 fn deletion_failures_preserve_metadata_and_orphans_can_be_retried() {
     use std::os::windows::fs::OpenOptionsExt;
-    let (data, mut book, [root, child, _]) = fixture();
-    book.trash_notes(&data.0, &[root]).unwrap();
+    let (data, mut book, [folder_id, note_id, _]) = fixture();
+    book.trash_notes(&data.0, &[folder_id]).unwrap();
     let entries = list(&data.0).unwrap();
-    let root = entries.iter().find(|e| e.note.id == root).unwrap();
-    let child = entries.iter().find(|e| e.note.id == child).unwrap();
+    let root = entries.iter().find(|e| e.note.id == note_id).unwrap();
+    let child = entries.iter().find(|e| e.note.id == folder_id).unwrap();
     let lock = fs::OpenOptions::new()
         .read(true)
         .share_mode(0)
@@ -154,14 +158,10 @@ impl Drop for Data {
 fn fixture() -> (Data, Notebook, [NoteId; 3]) {
     let data = Data::new();
     let mut book = Notebook::default();
-    let root = book.add(0, "한글 폴더 😀".into()).unwrap();
+    let root = book.add_folder(0, "한글 폴더 😀".into()).unwrap();
     let child = book.add(root, "하위 노트".into()).unwrap();
     let other = book.add(0, "기존 노트".into()).unwrap();
-    for (id, body) in [
-        (root, "폴더 본문\r\n"),
-        (child, "하위 본문\r\n\r끝\n"),
-        (other, "보존"),
-    ] {
+    for (id, body) in [(child, "하위 본문\r\n\r끝\n"), (other, "보존")] {
         fs::write(book.file(&data.0, id), body).unwrap();
     }
     book.save(&data.0).unwrap();
@@ -177,12 +177,9 @@ fn archive_preview_and_subtree_restore_preserve_names_hierarchy_and_bytes() {
     let entries = list(&data.0).unwrap();
     assert_eq!(entries.len(), 2);
     let entry = entries.iter().find(|e| e.note.id == root).unwrap();
-    assert!(entry.has_metadata);
     assert_eq!(entry.note.title, "한글 폴더 😀");
-    assert_eq!(
-        preview(&data.0, entry).unwrap(),
-        ("폴더 본문\r\n".into(), false)
-    );
+    assert!(preview(&data.0, entry).unwrap().0.contains("폴더입니다"));
+    assert!(!entry.body(&data.0).exists());
     assert_eq!(subtree(&entries, entry).len(), 2);
     let restored = restore(&mut book, &data.0, &entry.key()).unwrap();
     assert_eq!(restored.ids, [root, child]);
@@ -220,6 +217,7 @@ fn restore_remaps_collisions_without_overwriting_registered_or_orphan_bodies() {
         parent: 0,
         order: 0,
         title: "기존 충돌 노트".into(),
+        kind: NoteKind::Note,
     });
     fs::write(book.file(&data.0, root), "existing root").unwrap();
     fs::write(book.file(&data.0, child), "unregistered external file").unwrap();
@@ -236,10 +234,8 @@ fn restore_remaps_collisions_without_overwriting_registered_or_orphan_bodies() {
     assert_ne!(*new_root, root);
     assert_ne!(*new_child, child);
     assert_eq!(book.get(*new_child).unwrap().parent, *new_root);
-    assert_eq!(
-        fs::read_to_string(book.file(&data.0, *new_root)).unwrap(),
-        "폴더 본문\r\n"
-    );
+    assert!(book.is_folder(*new_root));
+    assert!(!book.file(&data.0, *new_root).exists());
     assert_eq!(
         fs::read_to_string(book.file(&data.0, root)).unwrap(),
         "existing root"
@@ -266,7 +262,7 @@ fn failed_restore_keeps_the_archive_model_and_index_and_allows_retry() {
     assert!(!book.file(&data.0, root).exists());
     assert!(!book.file(&data.0, child).exists());
     for entry in &entries {
-        assert!(entry.body(&data.0).is_file());
+        assert_eq!(entry.body(&data.0).is_file(), !entry.note.is_folder());
         assert!(entry.metadata(&data.0).is_file());
     }
     fs::remove_dir(data.0.join("tree.tmp")).unwrap();
@@ -274,35 +270,33 @@ fn failed_restore_keeps_the_archive_model_and_index_and_allows_retry() {
 }
 
 #[test]
-fn old_or_damaged_metadata_is_viewable_and_missing_parents_restore_at_root() {
+fn missing_parents_restore_at_root_and_damaged_metadata_is_not_overwritten() {
     let (data, mut book, [root, child, _]) = fixture();
     book.trash_notes(&data.0, &[child]).unwrap();
     let entry = list(&data.0).unwrap().pop().unwrap();
     restore(&mut book, &data.0, &entry.key()).unwrap();
     assert_eq!(book.get(child).unwrap().parent, root);
     book.trash_notes(&data.0, &[root]).unwrap();
-    let mut entries = list(&data.0).unwrap();
+    let entries = list(&data.0).unwrap();
     let child_entry = entries.iter().find(|e| e.note.id == child).unwrap();
     restore(&mut book, &data.0, &child_entry.key()).unwrap();
     assert_eq!(book.get(child).unwrap().parent, 0);
     let root_entry = entries.iter().find(|e| e.note.id == root).unwrap();
     fs::write(root_entry.metadata(&data.0), "broken metadata").unwrap();
-    entries = list(&data.0).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert!(!entries[0].has_metadata);
-    assert_eq!(preview(&data.0, &entries[0]).unwrap().0, "폴더 본문\r\n");
-    fs::remove_file(entries[0].metadata(&data.0)).unwrap();
-    let legacy = list(&data.0).unwrap().pop().unwrap();
-    restore(&mut book, &data.0, &legacy.key()).unwrap();
-    assert_eq!(book.get(root).unwrap().title, format!("삭제된 노트 {root}"));
-    assert_eq!(book.get(root).unwrap().parent, 0);
-    fs::write(data.0.join("trash/not-a-note.txt"), "preserve").unwrap();
-    assert!(list(&data.0).unwrap().is_empty());
+    assert_eq!(
+        list(&data.0).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert!(restore(&mut book, &data.0, &root_entry.key()).is_err());
+    assert_eq!(
+        fs::read_to_string(root_entry.metadata(&data.0)).unwrap(),
+        "broken metadata"
+    );
 }
 
 #[test]
 fn preview_is_bounded_and_keeps_valid_utf8_without_changing_the_body() {
-    let (data, mut book, [root, _, _]) = fixture();
+    let (data, mut book, [_, root, _]) = fixture();
     let body = "가".repeat((PREVIEW_LIMIT / 3 + 20) as usize);
     fs::write(book.file(&data.0, root), &body).unwrap();
     book.trash_notes(&data.0, &[root]).unwrap();

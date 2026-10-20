@@ -199,7 +199,7 @@ fn shortcut_search_filters_rows_and_preserves_input_and_editor_focus(cx: &mut Te
     f.press(cx, "ctrl-f");
     cx.simulate_input(f.window, "cTrL + ShIfT + p");
     draw(&mut visual);
-    assert!(visual.debug_bounds("shortcut-row-11").is_some());
+    assert!(visual.debug_bounds("shortcut-row-12").is_some());
     assert!(visual.debug_bounds("shortcut-row-2").is_none());
     f.press(cx, "enter");
     f.update(cx, |this, _, _| assert!(this.shortcut_help.is_some()));

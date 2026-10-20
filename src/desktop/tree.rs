@@ -18,6 +18,9 @@ impl Edot {
     }
 
     pub(super) fn set_collapsed(&mut self, id: NoteId, collapsed: bool, cx: &mut Context<Self>) {
+        if !self.book.is_folder(id) {
+            return;
+        }
         let was_collapsed = self.collapsed.contains(&id);
         if was_collapsed == collapsed {
             return;
@@ -46,27 +49,55 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.create_entry(child, false, window, cx);
+    }
+
+    pub(super) fn create_folder(
+        &mut self,
+        parent: Option<NoteId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_entry(parent, true, window, cx);
+    }
+
+    fn create_entry(
+        &mut self,
+        parent: Option<NoteId>,
+        folder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.startup_failed {
             return;
         }
-        let parent = child.unwrap_or_else(|| {
+        if !self.finish_rename(true, false, window, cx) {
+            return;
+        }
+        let parent = parent.unwrap_or_else(|| {
             self.caret
                 .and_then(|id| self.book.get(id))
-                .map_or(0, |n| n.parent)
+                .map_or(0, |n| if n.is_folder() { n.id } else { n.parent })
         });
         let previous = self.book.clone();
-        let id = match self.book.add(parent, "새 노트".into()) {
+        let added = if folder {
+            self.book.add_folder(parent, "새 폴더".into())
+        } else {
+            self.book.add(parent, "새 노트".into())
+        };
+        let id = match added {
             Ok(id) => id,
             Err(error) => {
-                self.fail("노트를 만들지 못했습니다", error, cx);
+                self.fail("항목을 만들지 못했습니다", error, cx);
                 return;
             }
         };
         let file = self.book.file(&self.dir, id);
-        if let Err(error) = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&file)
+        if !folder
+            && let Err(error) = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&file)
         {
             self.book = previous;
             self.fail("노트를 만들지 못했습니다", error, cx);
@@ -74,7 +105,9 @@ impl Edot {
         }
         if let Err(error) = self.save_tree() {
             self.book = previous;
-            let _ = fs::remove_file(file);
+            if !folder {
+                let _ = fs::remove_file(file);
+            }
             self.fail("노트 목록을 저장하지 못했습니다", error, cx);
             return;
         }
@@ -82,7 +115,11 @@ impl Edot {
         self.search_mode = false;
         self.selection.single(id);
         self.caret = Some(id);
-        if self.open_note(id, true, window, cx) {
+        if folder {
+            self.session.sidebar_visible = true;
+            self.collapsed.insert(id);
+            self.begin_rename(id, window, cx);
+        } else if self.open_note(id, true, window, cx) {
             self.begin_rename(id, window, cx);
         }
     }
@@ -185,6 +222,9 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !modifiers.control && !modifiers.shift && !self.finish_rename(true, false, window, cx) {
+            return;
+        }
         let visible: Vec<_> = self.visible_tree().iter().map(|(id, _)| *id).collect();
         let preserve = !modifiers.control && !modifiers.shift && self.selection.ids.contains(&id);
         if !preserve {
@@ -194,7 +234,11 @@ impl Edot {
         self.pressed = preserve.then_some(id);
         self.caret = Some(id);
         if !modifiers.control && !modifiers.shift {
-            self.open_tree_note(id, window, cx);
+            if self.book.is_folder(id) {
+                self.set_collapsed(id, !self.collapsed.contains(&id), cx);
+            } else {
+                self.open_tree_note(id, window, cx);
+            }
         }
         self.tree_focus.focus(window, cx);
         cx.notify();
@@ -221,9 +265,9 @@ impl Edot {
         }
         let name = &self.book.get(roots[0]).unwrap().title;
         let description = if count == 1 {
-            format!("정말로 \"{name}\" 파일을 삭제할까요?")
+            format!("정말로 \"{name}\" 항목을 삭제할까요?")
         } else {
-            format!("정말로 \"{name}\" 파일 포함 {count}개를 삭제할까요?")
+            format!("정말로 \"{name}\" 항목 포함 {count}개를 삭제할까요?")
         };
         let root_ids: HashSet<_> = roots.iter().copied().collect();
         let has_children = self
@@ -246,8 +290,8 @@ impl Edot {
                 dialog
             };
             dialog
-                .title("노트 삭제")
-                .description(format!("{description}\n파일은 휴지통 폴더에 보관됩니다."))
+                .title("항목 삭제")
+                .description(format!("{description}\n삭제한 항목은 휴지통에 보관됩니다."))
                 .confirm()
                 .default_confirm()
                 .dont_ask_again()
@@ -317,7 +361,7 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if ids.len() < 2 {
+        if ids.len() < 2 || !self.finish_rename(true, false, window, cx) {
             return;
         }
         let previous = self.book.clone();
@@ -329,26 +373,15 @@ impl Edot {
                 return;
             }
         };
-        let file = self.book.file(&self.dir, id);
-        if let Err(error) = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&file)
-        {
-            self.book = previous;
-            self.fail("폴더를 만들지 못했습니다", error, cx);
-            return;
-        }
         if let Err(error) = self.save_tree() {
             self.book = previous;
-            let _ = fs::remove_file(file);
             self.fail("폴더를 저장하지 못했습니다", error, cx);
             return;
         }
         self.selection.single(id);
         self.caret = Some(id);
         self.collapsed.remove(&id);
-        self.open_note(id, true, window, cx);
+        self.tree_focus.focus(window, cx);
         self.begin_rename(id, window, cx);
     }
     pub(super) fn move_notes(

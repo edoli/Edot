@@ -2,6 +2,78 @@ use super::*;
 use crate::widgets::WindowExt;
 
 #[gpui::test]
+fn folders_have_no_editors_or_bodies_and_support_creation_grouping_and_restore(
+    cx: &mut TestAppContext,
+) {
+    let f = Fixture::new(cx);
+    let active = f.update(cx, |this, window, cx| {
+        this.show_tree_background_menu(point(px(50.), px(100.)), window, cx);
+        this.session.active
+    });
+    f.press(cx, "down");
+    f.press(cx, "enter");
+    let folder = f.update(cx, |this, window, cx| {
+        let folder = this.rename.as_ref().unwrap().0;
+        assert!(this.finish_rename(true, true, window, cx));
+        assert!(this.book.is_folder(folder));
+        assert_eq!(this.book.get(folder).unwrap().parent, 0);
+        assert!(!this.book.file(&this.dir, folder).exists());
+        assert_eq!(this.session.active, active);
+        assert!(!this.open.iter().any(|tab| tab.id == folder));
+        assert!(!this.open_note(folder, true, window, cx));
+        assert!(this.prepare_external_note(folder, cx).is_none());
+        assert!(Notebook::reload(&this.dir).unwrap().is_folder(folder));
+        this.tree_click(folder, Default::default(), window, cx);
+        assert_eq!(this.session.active, active);
+        this.create_note(None, window, cx);
+        folder
+    });
+    let child = f.update(cx, |this, window, cx| {
+        assert!(this.finish_rename(true, true, window, cx));
+        let child = this.session.active.unwrap();
+        assert_eq!(this.book.get(child).unwrap().parent, folder);
+        assert!(this.book.is_note(child));
+        assert!(this.book.file(&this.dir, child).is_file());
+        this.create_folder(None, window, cx);
+        child
+    });
+    let nested = f.update(cx, |this, window, cx| {
+        let nested = this.rename.as_ref().unwrap().0;
+        assert!(this.finish_rename(true, true, window, cx));
+        assert_eq!(this.book.get(nested).unwrap().parent, folder);
+        assert!(this.book.is_folder(nested));
+        assert_eq!(this.session.active, Some(child));
+        let before = this.book.notes.clone();
+        fs::create_dir(this.dir.join("tree.tmp")).unwrap();
+        this.group_notes(&[child, nested], window, cx);
+        assert_eq!(this.book.notes, before);
+        fs::remove_dir(this.dir.join("tree.tmp")).unwrap();
+        this.error = None;
+        this.group_notes(&[child, nested], window, cx);
+        nested
+    });
+    f.update(cx, |this, window, cx| {
+        let group = this.rename.as_ref().unwrap().0;
+        assert!(this.finish_rename(true, true, window, cx));
+        assert!(this.book.is_folder(group));
+        assert!(!this.book.file(&this.dir, group).exists());
+        assert_eq!(this.book.get(child).unwrap().parent, group);
+        assert_eq!(this.book.get(nested).unwrap().parent, group);
+        assert_eq!(this.session.active, Some(child));
+        assert!(this.delete_confirmed(&[folder], window, cx));
+        let entries = crate::trash::list(&this.dir).unwrap();
+        let root = entries.iter().find(|e| e.note.id == folder).unwrap();
+        this.restore_trash(&root.key(), cx).unwrap();
+        assert!(this.book.is_folder(folder));
+        assert!(this.book.is_folder(nested));
+        assert_eq!(this.book.get(child).unwrap().parent, group);
+        assert!(!this.book.file(&this.dir, nested).exists());
+        let restored = Session::load(&this.dir, &this.book);
+        assert!(restored.tabs.iter().all(|id| this.book.is_note(*id)));
+    });
+}
+
+#[gpui::test]
 fn disclosure_hover_and_click_stay_distinct_from_note_selection(cx: &mut TestAppContext) {
     use crate::widgets::theme::ActiveTheme as _;
     use gpui::MouseButton;
@@ -14,8 +86,8 @@ fn disclosure_hover_and_click_stay_distinct_from_note_selection(cx: &mut TestApp
         visual.update(|w, cx| w.render_frame(cx));
     };
     draw(&mut visual);
-    let row_selector: &'static str = format!("tree-note-{}", f.ids[0]).leak();
-    let arrow_selector: &'static str = format!("tree-expand-{}", f.ids[0]).leak();
+    let row_selector: &'static str = format!("tree-note-{}", f.folder).leak();
+    let arrow_selector: &'static str = format!("tree-expand-{}", f.folder).leak();
     let child_selector: &'static str = format!("tree-note-{}", f.ids[2]).leak();
     let row = visual.debug_bounds(row_selector).unwrap();
     let arrow = visual.debug_bounds(arrow_selector).unwrap();
@@ -37,7 +109,7 @@ fn disclosure_hover_and_click_stay_distinct_from_note_selection(cx: &mut TestApp
         visual.simulate_mouse_up(arrow.center(), MouseButton::Left, Default::default());
         draw(&mut visual);
         f.update(cx, |this, _, _| {
-            assert_eq!(this.collapsed.contains(&f.ids[0]), collapsed);
+            assert_eq!(this.collapsed.contains(&f.folder), collapsed);
             assert_eq!(this.session.active, Some(f.ids[1]));
             assert_eq!(
                 this.selection.ids.as_ref(),
@@ -46,7 +118,7 @@ fn disclosure_hover_and_click_stay_distinct_from_note_selection(cx: &mut TestApp
             assert_eq!(
                 Session::load(&this.dir, &this.book)
                     .expanded
-                    .contains(&f.ids[0]),
+                    .contains(&f.folder),
                 !collapsed
             );
         });
@@ -65,6 +137,8 @@ fn disclosure_hover_and_click_stay_distinct_from_note_selection(cx: &mut TestApp
                 .any(|q| { q.background == hovered.into() && q.bounds.contains(&at) })
         );
     });
+    f.update(cx, |this, _, cx| this.set_collapsed(f.folder, false, cx));
+    draw(&mut visual);
     let leaf_selector: &'static str = format!("tree-expand-{}", f.ids[2]).leak();
     let blank = visual.debug_bounds(leaf_selector).unwrap().center();
     visual.simulate_mouse_down(blank, MouseButton::Left, Default::default());
@@ -75,7 +149,7 @@ fn disclosure_hover_and_click_stay_distinct_from_note_selection(cx: &mut TestApp
             this.selection.ids.as_ref(),
             &std::collections::HashSet::from([f.ids[2]])
         );
-        assert!(!this.collapsed.contains(&f.ids[0]));
+        assert!(!this.collapsed.contains(&f.folder));
     });
 }
 
@@ -118,7 +192,7 @@ fn tree_background_menu_creates_root_notes_with_a_nested_caret_and_an_empty_tree
             let note = this.book.get(id).unwrap();
             assert_eq!(note.parent, 0);
             assert_eq!(note.title, "새 노트");
-            assert_eq!(this.book.notes.len(), if empty { 1 } else { 4 });
+            assert_eq!(this.book.notes.len(), if empty { 1 } else { 5 });
             assert_eq!(this.rename.as_ref().map(|(id, _)| *id), Some(id));
             assert!(this.book.file(&this.dir, id).is_file());
         });
@@ -135,9 +209,9 @@ fn delete_dialog_keeps_controls_inline_and_warns_only_for_nonempty_folders(
     for (selected, warning) in [
         (vec![f.ids[1]], false),
         (vec![f.ids[1], f.ids[2]], false),
-        (vec![f.ids[0]], true),
-        (vec![f.ids[1], f.ids[0]], true),
-        (vec![f.ids[2], f.ids[0], f.ids[0]], true),
+        (vec![f.folder], true),
+        (vec![f.ids[1], f.folder], true),
+        (vec![f.ids[2], f.folder, f.folder], true),
     ] {
         f.update(cx, |this, window, cx| {
             this.confirm_delete_notes(selected, window, cx)
@@ -151,7 +225,7 @@ fn delete_dialog_keeps_controls_inline_and_warns_only_for_nonempty_folders(
         assert_eq!(visual.debug_bounds("delete-warning").is_some(), warning);
         f.press(cx, "escape");
     }
-    f.update(cx, |this, _, _| assert_eq!(this.book.notes.len(), 3));
+    f.update(cx, |this, _, _| assert_eq!(this.book.notes.len(), 4));
 }
 
 #[gpui::test]
@@ -295,7 +369,6 @@ fn tree_context_target_and_active_note_survive_selection_and_menu_dismissal(
             &std::collections::HashSet::from([f.ids[0], f.ids[1]])
         );
     });
-    f.press(cx, "down");
     f.press(cx, "enter");
     f.update(cx, |this, _, _| {
         assert_eq!(this.rename.as_ref().map(|(id, _)| *id), Some(f.ids[2]));
@@ -314,7 +387,7 @@ fn tree_context_target_and_active_note_survive_selection_and_menu_dismissal(
     f.update(cx, |this, window, cx| {
         this.show_tree_menu(f.ids[2], point(px(50.), px(90.)), window, cx);
     });
-    for _ in 0..4 {
+    for _ in 0..3 {
         f.press(cx, "down");
     }
     f.press(cx, "enter");
@@ -376,7 +449,7 @@ fn rename_pasted_tabs_and_newlines_become_spaces(cx: &mut TestAppContext) {
         assert!(!this.open[0].dirty);
     });
     let index = fs::read_to_string(f.dir.join("tree.tsv")).unwrap();
-    assert!(index.starts_with("EDOT4\n"));
+    assert!(index.starts_with("EDOT5\n"));
     assert!(index.contains("\t한글 제목 새 줄 끝 😀\n"));
     assert_eq!(
         fs::read_to_string(f.dir.join(format!("notes/{}.txt", f.ids[0]))).unwrap(),

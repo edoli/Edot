@@ -1,5 +1,5 @@
-//! Archived note bodies, optional metadata and collision-safe restoration.
-use crate::model::{Note, NoteId, Notebook};
+//! Typed archived entries, note bodies and collision-safe restoration.
+use crate::model::{Note, NoteId, NoteKind, Notebook};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -11,7 +11,6 @@ use std::{
 pub struct Entry {
     pub note: Note,
     pub stamp: u128,
-    pub has_metadata: bool,
 }
 impl Entry {
     pub fn key(&self) -> String {
@@ -40,7 +39,7 @@ pub fn list(dir: &Path) -> io::Result<Vec<Entry>> {
         let name = file.file_name();
         let Some((id, stamp)) = name
             .to_str()
-            .and_then(|name| name.strip_suffix(".txt"))
+            .and_then(|name| name.strip_suffix(".meta"))
             .and_then(|stem| stem.split_once('-'))
         else {
             continue;
@@ -48,25 +47,17 @@ pub fn list(dir: &Path) -> io::Result<Vec<Entry>> {
         let (Ok(id), Ok(stamp)) = (id.parse::<NoteId>(), stamp.parse::<u128>()) else {
             continue;
         };
-        if id == 0 || name != format!("{id}-{stamp}.txt").as_str() {
+        if id == 0 || name != format!("{id}-{stamp}.meta").as_str() {
             continue;
         }
-        let mut entry = Entry {
-            note: Note {
-                id,
-                parent: 0,
-                order: u32::MAX,
-                title: format!("삭제된 노트 {id}"),
-            },
-            stamp,
-            has_metadata: false,
-        };
-        if let Ok(text) = fs::read_to_string(entry.metadata(dir))
-            && let Some(note) = parse_metadata(&text, id)
-        {
-            entry.note = note;
-            entry.has_metadata = true;
-        }
+        let text = fs::read_to_string(file.path())?;
+        let note = parse_metadata(&text, id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "휴지통 항목 정보가 잘못되었습니다.",
+            )
+        })?;
+        let entry = Entry { note, stamp };
         entries.push(entry);
     }
     entries.sort_by(|a, b| {
@@ -80,15 +71,16 @@ pub fn list(dir: &Path) -> io::Result<Vec<Entry>> {
 
 fn parse_metadata(text: &str, id: NoteId) -> Option<Note> {
     let mut lines = text.lines();
-    if lines.next()? != "EDOTTRASH1" {
+    if lines.next()? != "EDOTTRASH2" {
         return None;
     }
-    let mut fields = lines.next()?.splitn(4, '\t');
+    let mut fields = lines.next()?.splitn(5, '\t');
     if fields.next()?.parse::<NoteId>().ok()? != id {
         return None;
     }
     let parent = fields.next()?.parse().ok()?;
     let order = fields.next()?.parse().ok()?;
+    let kind = NoteKind::parse(fields.next()?)?;
     let title = fields.next()?.to_owned();
     if parent == id || title.contains(['\t', '\r', '\n']) || lines.next().is_some() {
         return None;
@@ -98,6 +90,7 @@ fn parse_metadata(text: &str, id: NoteId) -> Option<Note> {
         parent,
         order,
         title,
+        kind,
     })
 }
 
@@ -134,7 +127,6 @@ pub fn archive(book: &mut Notebook, dir: &Path, selected: &[NoteId]) -> io::Resu
         .map(|id| Entry {
             note: book.get(*id).unwrap().clone(),
             stamp,
-            has_metadata: true,
         })
         .collect();
     let mut metadata = vec![];
@@ -153,11 +145,18 @@ pub fn archive(book: &mut Notebook, dir: &Path, selected: &[NoteId]) -> io::Resu
             metadata.push(path);
             writeln!(
                 file,
-                "EDOTTRASH1\n{}\t{}\t{}\t{}",
-                entry.note.id, entry.note.parent, entry.note.order, entry.note.title
+                "EDOTTRASH2\n{}\t{}\t{}\t{}\t{}",
+                entry.note.id,
+                entry.note.parent,
+                entry.note.order,
+                entry.note.kind.as_str(),
+                entry.note.title
             )?;
         }
         for entry in &entries {
+            if entry.note.is_folder() {
+                continue;
+            }
             let source = book.file(dir, entry.note.id);
             let target = entry.body(dir);
             if target.try_exists()? {
@@ -182,7 +181,7 @@ pub fn archive(book: &mut Notebook, dir: &Path, selected: &[NoteId]) -> io::Resu
             }
         }
         for path in metadata {
-            if !path.with_extension("txt").exists() {
+            if failures.is_empty() {
                 let _ = fs::remove_file(path);
             }
         }
@@ -200,11 +199,8 @@ pub fn archive(book: &mut Notebook, dir: &Path, selected: &[NoteId]) -> io::Resu
 
 pub fn subtree(entries: &[Entry], root: &Entry) -> Vec<Entry> {
     let mut children: HashMap<NoteId, Vec<&Entry>> = HashMap::new();
-    if root.has_metadata {
-        for entry in entries
-            .iter()
-            .filter(|e| e.has_metadata && e.stamp == root.stamp)
-        {
+    if root.note.is_folder() {
+        for entry in entries.iter().filter(|e| e.stamp == root.stamp) {
             children.entry(entry.note.parent).or_default().push(entry);
         }
     }
@@ -214,7 +210,9 @@ pub fn subtree(entries: &[Entry], root: &Entry) -> Vec<Entry> {
     while let Some(entry) = pending.pop() {
         if seen.insert(entry.note.id) {
             result.push(entry.clone());
-            if let Some(children) = children.get(&entry.note.id) {
+            if entry.note.is_folder()
+                && let Some(children) = children.get(&entry.note.id)
+            {
                 pending.extend(children.iter().rev().copied());
             }
         }
@@ -257,10 +255,12 @@ pub fn restore(book: &mut Notebook, dir: &Path, key: &str) -> io::Result<Restore
                     })
                     .ok_or_else(|| io::Error::other("복원할 노트 ID를 만들지 못했습니다"))??;
             }
-            let path = candidate.file(dir, id);
-            let mut target = fs::File::create_new(&path)?;
-            created.push(path);
-            io::copy(&mut fs::File::open(entry.body(dir))?, &mut target)?;
+            if !entry.note.is_folder() {
+                let path = candidate.file(dir, id);
+                let mut target = fs::File::create_new(&path)?;
+                created.push(path);
+                io::copy(&mut fs::File::open(entry.body(dir))?, &mut target)?;
+            }
             used.insert(id);
             mapped.insert(entry.note.id, id);
         }
@@ -268,9 +268,18 @@ pub fn restore(book: &mut Notebook, dir: &Path, key: &str) -> io::Result<Restore
             let mut note = entry.note.clone();
             note.id = mapped[&note.id];
             note.parent = if entry.note.id != root.note.id && mapped.contains_key(&note.parent) {
+                if !selected
+                    .iter()
+                    .any(|parent| parent.note.id == note.parent && parent.note.is_folder())
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "복원할 부모가 폴더가 아닙니다.",
+                    ));
+                }
                 mapped[&note.parent]
             } else if !mapped.contains_key(&note.parent)
-                && book.get(note.parent).is_some()
+                && book.is_folder(note.parent)
                 && !entries
                     .iter()
                     .any(|e| e.stamp == entry.stamp && e.note.id == note.parent)
@@ -302,10 +311,10 @@ pub fn restore(book: &mut Notebook, dir: &Path, key: &str) -> io::Result<Restore
     *book = candidate;
     let mut retained = 0;
     for entry in &selected {
-        if fs::remove_file(entry.body(dir)).is_err() {
+        if (!entry.note.is_folder() && fs::remove_file(entry.body(dir)).is_err())
+            || fs::remove_file(entry.metadata(dir)).is_err()
+        {
             retained += 1;
-        } else {
-            let _ = fs::remove_file(entry.metadata(dir));
         }
     }
     Ok(Restored {
@@ -441,6 +450,12 @@ fn remove_archived_file(path: &Path) -> io::Result<bool> {
 
 pub const PREVIEW_LIMIT: u64 = 256 * 1024;
 pub fn preview(dir: &Path, entry: &Entry) -> io::Result<(String, bool)> {
+    if entry.note.is_folder() {
+        return Ok((
+            "폴더입니다. 복원하면 남아 있는 하위 항목도 함께 복원됩니다.".into(),
+            false,
+        ));
+    }
     let mut bytes = vec![];
     fs::File::open(entry.body(dir))?
         .take(PREVIEW_LIMIT + 1)

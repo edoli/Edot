@@ -5,7 +5,7 @@ use crate::widgets::WindowExt;
 fn permanent_delete_requires_confirmation_and_keeps_live_notes(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     f.update(cx, |this, window, cx| {
-        assert!(this.delete_confirmed(&[f.ids[0]], window, cx));
+        assert!(this.delete_confirmed(&[f.folder], window, cx));
         cx.global_mut::<AppState>().settings.confirm_delete = false;
         this.show_trash(window, cx);
     });
@@ -20,7 +20,7 @@ fn permanent_delete_requires_confirmation_and_keeps_live_notes(cx: &mut TestAppC
                 let index = browser
                     .entries
                     .iter()
-                    .position(|e| e.note.id == f.ids[0])
+                    .position(|e| e.note.id == f.folder)
                     .unwrap();
                 browser.select(index, window, cx);
             });
@@ -53,7 +53,7 @@ fn permanent_delete_requires_confirmation_and_keeps_live_notes(cx: &mut TestAppC
         live
     );
     f.update(cx, |this, _, cx| {
-        assert_eq!(this.book.notes.len(), 1);
+        assert_eq!(this.book.notes.len(), 2);
         let browser = this.trash_browser.as_ref().unwrap().read(cx);
         assert!(browser.entries.is_empty());
         assert!(browser.preview.read(cx).value().is_empty());
@@ -81,6 +81,11 @@ fn empty_bin_confirms_a_snapshot_and_preserves_unrecognized_files(cx: &mut TestA
     f.press(cx, "ctrl-shift-delete");
     f.update(cx, |_, w, cx| assert!(w.has_active_dialog(cx)));
     fs::write(f.dir.join("trash/1-42.txt"), "new after confirmation").unwrap();
+    fs::write(
+        f.dir.join("trash/1-42.meta"),
+        "EDOTTRASH2\n1\t0\t0\tnote\tnew archive\n",
+    )
+    .unwrap();
     f.press(cx, "tab");
     f.press(cx, "enter");
     cx.run_until_parked();
@@ -110,9 +115,9 @@ fn empty_bin_confirms_a_snapshot_and_preserves_unrecognized_files(cx: &mut TestA
 #[gpui::test]
 fn recycle_bin_preview_restore_and_keyboard_preserve_the_existing_note(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
-    let original = fs::read(f.dir.join("notes").join(format!("{}.txt", f.ids[0]))).unwrap();
+    let original = fs::read(f.dir.join("notes").join(format!("{}.txt", f.ids[2]))).unwrap();
     f.update(cx, |this, window, cx| {
-        assert!(this.delete_confirmed(&[f.ids[0]], window, cx));
+        assert!(this.delete_confirmed(&[f.folder], window, cx));
     });
     let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
     visual.update(|window, cx| window.render_frame(cx));
@@ -126,7 +131,7 @@ fn recycle_bin_preview_restore_and_keyboard_preserve_the_existing_note(cx: &mut 
             let root = browser
                 .entries
                 .iter()
-                .position(|e| e.note.id == f.ids[0])
+                .position(|e| e.note.id == f.ids[2])
                 .unwrap();
             browser.select(root, window, cx);
         });
@@ -138,7 +143,7 @@ fn recycle_bin_preview_restore_and_keyboard_preserve_the_existing_note(cx: &mut 
         assert_eq!(browser.preview.read(cx).value().as_bytes(), original);
     });
     f.press(cx, "ctrl-n");
-    f.update(cx, |this, _, _| assert_eq!(this.book.notes.len(), 1));
+    f.update(cx, |this, _, _| assert_eq!(this.book.notes.len(), 2));
     f.press(cx, "tab");
     f.press(cx, "x");
     f.press(cx, "ctrl-a");
@@ -156,11 +161,25 @@ fn recycle_bin_preview_restore_and_keyboard_preserve_the_existing_note(cx: &mut 
         let browser = this.trash_browser.as_ref().unwrap().read(cx);
         assert_eq!(browser.preview.read(cx).value().as_bytes(), original);
     });
+    f.update(cx, |this, window, cx| {
+        this.trash_browser
+            .clone()
+            .unwrap()
+            .update(cx, |browser, cx| {
+                let folder = browser
+                    .entries
+                    .iter()
+                    .position(|e| e.note.id == f.folder)
+                    .unwrap();
+                browser.select(folder, window, cx);
+            });
+    });
+    cx.run_until_parked();
     f.press(cx, "ctrl-enter");
     cx.run_until_parked();
     f.update(cx, |this, _, cx| {
-        assert_eq!(this.book.notes.len(), 3);
-        assert_eq!(this.book.get(f.ids[2]).unwrap().parent, f.ids[0]);
+        assert_eq!(this.book.notes.len(), 4);
+        assert_eq!(this.book.get(f.ids[2]).unwrap().parent, f.folder);
         assert!(
             this.trash_browser
                 .as_ref()
@@ -170,7 +189,7 @@ fn recycle_bin_preview_restore_and_keyboard_preserve_the_existing_note(cx: &mut 
                 .is_empty()
         );
         assert_eq!(
-            fs::read(this.book.file(&this.dir, f.ids[0])).unwrap(),
+            fs::read(this.book.file(&this.dir, f.ids[2])).unwrap(),
             original
         );
         assert_eq!(
@@ -190,7 +209,7 @@ fn empty_bin_and_failed_restore_remain_safe_to_close(cx: &mut TestAppContext) {
     f.press(cx, "ctrl-enter");
     f.press(cx, "escape");
     f.update(cx, |this, window, cx| {
-        assert_eq!(this.book.notes.len(), 3);
+        assert_eq!(this.book.notes.len(), 4);
         assert!(this.trash_browser.is_none());
         assert!(this.delete_confirmed(&[f.ids[1]], window, cx));
         this.show_trash(window, cx);

@@ -27,6 +27,12 @@ impl Edot {
             .and_then(|tab| tab.editor.clone())
     }
     pub(super) fn text(&self, id: NoteId, cx: &App) -> io::Result<String> {
+        if !self.book.is_note(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "본문이 있는 노트가 아닙니다.",
+            ));
+        }
         if let Some(editor) = self
             .open
             .iter()
@@ -58,6 +64,9 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.book.is_note(id) {
+            return false;
+        }
         // Focus callbacks may still be queued when the next tree click arrives.
         // Protect edits and an in-progress IME composition even without focus.
         for tab in &mut self.open {
@@ -106,7 +115,7 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.book.get(id).is_none() || !self.finish_rename(true, false, window, cx) {
+        if !self.book.is_note(id) || !self.finish_rename(true, false, window, cx) {
             return false;
         }
         let existing = self.open.iter().position(|tab| tab.id == id);

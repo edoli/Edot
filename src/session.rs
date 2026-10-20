@@ -40,16 +40,10 @@ impl Default for Session {
 
 impl Session {
     pub fn load(dir: &Path, book: &Notebook) -> Self {
-        match std::fs::read(dir.join(FILE_NAME)) {
-            Ok(bytes) => Self::parse(&bytes, book),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                std::fs::read_to_string(dir.join("session.tsv"))
-                    .ok()
-                    .and_then(|text| Self::parse_legacy(&text, book))
-            }
-            Err(_) => None,
-        }
-        .unwrap_or_default()
+        std::fs::read(dir.join(FILE_NAME))
+            .ok()
+            .and_then(|bytes| Self::parse(&bytes, book))
+            .unwrap_or_default()
     }
 
     fn parse(bytes: &[u8], book: &Notebook) -> Option<Self> {
@@ -85,42 +79,13 @@ impl Session {
         Some(session.restore(book))
     }
 
-    fn parse_legacy(text: &str, book: &Notebook) -> Option<Self> {
-        let mut lines = text.lines();
-        if lines.next()? != "EDOTSESSION1" {
-            return None;
-        }
-        let fields: Vec<_> = lines.next()?.split('\t').collect();
-        if fields.len() != 3 || !matches!(fields[0], "0" | "1") {
-            return None;
-        }
-        let mut session = Self {
-            sidebar_visible: fields[0] == "1",
-            sidebar_width: fields[1]
-                .parse::<i32>()
-                .ok()?
-                .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
-            active: fields[2].parse::<NoteId>().ok().filter(|id| *id != 0),
-            tabs: vec![],
-            expanded: HashSet::new(),
-        };
-        for line in lines {
-            if let Some(id) = line
-                .strip_prefix("expanded\t")
-                .and_then(|id| id.parse::<NoteId>().ok())
-            {
-                session.expanded.insert(id);
-                continue;
-            }
-            if let Ok(id) = line.parse::<NoteId>() {
-                session.tabs.push(id);
-            }
-        }
-        Some(session.restore(book))
-    }
-
     fn restore(mut self, book: &Notebook) -> Self {
-        let valid: HashSet<_> = book.notes.iter().map(|note| note.id).collect();
+        let valid: HashSet<_> = book
+            .notes
+            .iter()
+            .filter(|note| !note.is_folder())
+            .map(|note| note.id)
+            .collect();
         let folders = Self::folders(book);
         let mut seen = HashSet::new();
         self.tabs
@@ -138,7 +103,7 @@ impl Session {
     pub fn folders(book: &Notebook) -> HashSet<NoteId> {
         book.notes
             .iter()
-            .filter_map(|note| (note.parent != 0).then_some(note.parent))
+            .filter_map(|note| note.is_folder().then_some(note.id))
             .collect()
     }
 
@@ -201,9 +166,11 @@ mod tests {
     fn book() -> Notebook {
         Notebook {
             notes: [
-                (u64::MAX, 0),
-                (0x0102030405060708, u64::MAX),
-                (1 << 63, 0x0102030405060708),
+                (u64::MAX, 7),
+                (0x0102030405060708, 7),
+                (1 << 63, 8),
+                (7, 0),
+                (8, 7),
             ]
             .into_iter()
             .map(|(id, parent)| crate::model::Note {
@@ -211,6 +178,11 @@ mod tests {
                 parent,
                 order: 0,
                 title: String::new(),
+                kind: if matches!(id, 7 | 8) {
+                    crate::model::NoteKind::Folder
+                } else {
+                    crate::model::NoteKind::Note
+                },
             })
             .collect(),
         }
@@ -223,13 +195,13 @@ mod tests {
             active: Some(0x0102030405060708),
             sidebar_visible: false,
             sidebar_width: 300,
-            expanded: HashSet::from([u64::MAX, 0x0102030405060708]),
+            expanded: HashSet::from([7, 8]),
         };
         // A wire-format fixture, independent of the encoder's field-writing code.
         let expected = [
             b'E', b'D', b'S', b'N', 1, 0, 0x2c, 1, 8, 7, 6, 5, 4, 3, 2, 1, 2, 0, 0, 0, 2, 0, 0, 0,
-            255, 255, 255, 255, 255, 255, 255, 255, 8, 7, 6, 5, 4, 3, 2, 1, 8, 7, 6, 5, 4, 3, 2, 1,
-            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255, 8, 7, 6, 5, 4, 3, 2, 1, 7, 0, 0, 0, 0, 0, 0, 0,
+            8, 0, 0, 0, 0, 0, 0, 0,
         ];
         assert_eq!(session.encode().unwrap(), expected);
         assert_eq!(Session::parse(&expected, &book()), Some(session));
@@ -243,7 +215,7 @@ mod tests {
         let bytes = Session {
             tabs: vec![u64::MAX],
             active: Some(u64::MAX),
-            expanded: HashSet::from([u64::MAX]),
+            expanded: HashSet::from([7]),
             ..Default::default()
         }
         .encode()
@@ -278,8 +250,8 @@ mod tests {
     fn binary_filters_stale_ids_and_clamps_width_on_restore() {
         let session = Session {
             tabs: vec![0, 7, 0x0102030405060708, u64::MAX, 0x0102030405060708],
-            active: Some(7),
-            expanded: HashSet::from([0, 7, u64::MAX, 0x0102030405060708, 1 << 63]),
+            active: Some(9),
+            expanded: HashSet::from([0, 7, 8, 9, u64::MAX, 0x0102030405060708, 1 << 63]),
             ..Default::default()
         };
         for (width, expected_width) in [(0u16, MIN_SIDEBAR_WIDTH), (u16::MAX, MAX_SIDEBAR_WIDTH)] {
@@ -288,39 +260,23 @@ mod tests {
             let restored = Session::parse(&bytes, &book()).unwrap();
             assert_eq!(restored.tabs, [0x0102030405060708, u64::MAX]);
             assert_eq!(restored.active, Some(u64::MAX));
-            assert_eq!(
-                restored.expanded,
-                HashSet::from([u64::MAX, 0x0102030405060708])
-            );
+            assert_eq!(restored.expanded, HashSet::from([7, 8]));
             assert_eq!(restored.sidebar_width, expected_width);
         }
     }
 
     #[test]
-    fn legacy_migrates_on_save_without_modifying_source_or_falling_back_from_binary() {
+    fn session_load_defaults_on_missing_or_invalid_binary_and_round_trips() {
         let dir = test_dir();
-        let legacy = format!(
-            "EDOTSESSION1\n0\t300\t{}\n{}\n{}\nexpanded\t{}\n",
-            0x0102030405060708u64,
-            u64::MAX,
-            0x0102030405060708u64,
-            u64::MAX
-        );
-        std::fs::write(dir.join("session.tsv"), &legacy).unwrap();
-        let migrated = Session::load(&dir, &book());
-        assert_eq!(migrated.tabs, [u64::MAX, 0x0102030405060708]);
-        assert_eq!(migrated.active, Some(0x0102030405060708));
-        assert!(!migrated.sidebar_visible);
-        assert_eq!(migrated.expanded, HashSet::from([u64::MAX]));
-        assert!(!dir.join(FILE_NAME).exists()); // Reading alone never migrates.
-        migrated.save(&dir).unwrap();
-        assert_eq!(Session::load(&dir, &book()), migrated);
-        assert_eq!(
-            std::fs::read_to_string(dir.join("session.tsv")).unwrap(),
-            legacy
-        );
-        Session::default().save(&dir).unwrap();
         assert_eq!(Session::load(&dir, &book()), Session::default());
+        let session = Session {
+            tabs: vec![u64::MAX],
+            active: Some(u64::MAX),
+            expanded: HashSet::from([7]),
+            ..Default::default()
+        };
+        session.save(&dir).unwrap();
+        assert_eq!(Session::load(&dir, &book()), session);
         std::fs::write(dir.join(FILE_NAME), b"damaged").unwrap();
         assert_eq!(Session::load(&dir, &book()), Session::default());
         std::fs::remove_file(dir.join(FILE_NAME)).unwrap();
@@ -332,14 +288,14 @@ mod tests {
     #[test]
     fn folders_default_to_collapsed_and_only_saved_expansions_restore() {
         let mut book = Notebook::default();
-        let root = book.add(0, "root".into()).unwrap();
-        let child = book.add(root, "child".into()).unwrap();
+        let root = book.add_folder(0, "root".into()).unwrap();
+        let child = book.add_folder(root, "child".into()).unwrap();
         let nested = book.add(child, "nested".into()).unwrap();
-        let session = Session::parse_legacy(
-            &format!("EDOTSESSION1\n1\t260\t{nested}\n{nested}\n"),
-            &book,
-        )
-        .unwrap();
+        let session = Session {
+            tabs: vec![nested],
+            active: Some(nested),
+            ..Default::default()
+        };
         assert_eq!(session.active, Some(nested));
         assert_eq!(session.collapsed(&book), HashSet::from([root, child]));
         let dir = test_dir();
@@ -351,7 +307,7 @@ mod tests {
         let restored = Session::load(&dir, &book);
         assert_eq!(restored.expanded, HashSet::from([root]));
         assert_eq!(restored.collapsed(&book), HashSet::from([child]));
-        let new_root = book.add(0, "new".into()).unwrap();
+        let new_root = book.add_folder(0, "new".into()).unwrap();
         book.add(new_root, "new child".into()).unwrap();
         assert_eq!(
             Session::load(&dir, &book).collapsed(&book),

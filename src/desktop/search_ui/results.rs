@@ -216,6 +216,7 @@ impl Edot {
             .book
             .notes
             .iter()
+            .filter(|note| !note.is_folder())
             .map(|note| {
                 let loaded = self
                     .open

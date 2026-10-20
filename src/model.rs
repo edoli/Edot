@@ -53,11 +53,41 @@ fn random_note_id() -> io::Result<NoteId> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoteKind {
+    Note,
+    Folder,
+}
+
+impl NoteKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Note => "note",
+            Self::Folder => "folder",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "note" => Some(Self::Note),
+            "folder" => Some(Self::Folder),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
     pub id: NoteId,
     pub parent: NoteId,
     pub order: u32,
     pub title: String,
+    pub kind: NoteKind,
+}
+
+impl Note {
+    pub fn is_folder(&self) -> bool {
+        self.kind == NoteKind::Folder
+    }
 }
 
 #[derive(Clone, Default)]
@@ -82,12 +112,12 @@ impl Notebook {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) if recover && error.kind() == io::ErrorKind::NotFound => {
-                String::from("EDOT4\n")
+                String::from("EDOT5\n")
             }
             Err(error) => return Err(error),
         };
         let mut lines = text.lines();
-        if lines.next() != Some("EDOT4") {
+        if lines.next() != Some("EDOT5") {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Unsupported tree index",
@@ -105,6 +135,7 @@ impl Notebook {
                 .ok_or_else(invalid)?
                 .parse()
                 .map_err(|_| invalid())?;
+            let kind = NoteKind::parse(parts.next().ok_or_else(invalid)?).ok_or_else(invalid)?;
             let field = parts.next().ok_or_else(invalid)?;
             if field.contains(['\t', '\r', '\n']) {
                 return Err(invalid());
@@ -118,13 +149,18 @@ impl Notebook {
                 parent,
                 order,
                 title,
+                kind,
             });
         }
         for note in &notes {
-            if note.parent != 0 && !indices.contains_key(&note.parent) {
+            if note.parent != 0
+                && indices
+                    .get(&note.parent)
+                    .is_none_or(|&index| !notes[index].is_folder())
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "Missing parent note",
+                    "Parent must be an existing folder",
                 ));
             }
         }
@@ -159,6 +195,7 @@ impl Notebook {
                 parent: 0,
                 order,
                 title: format!("복구된 노트 {id}"),
+                kind: NoteKind::Note,
             });
         }
         // 0 = unseen, 1 = on this parent chain, 2 = checked. Each note is
@@ -194,7 +231,7 @@ impl Notebook {
     }
 
     pub fn save(&self, dir: &Path) -> io::Result<()> {
-        let mut text = String::from("EDOT4\n");
+        let mut text = String::from("EDOT5\n");
         for n in &self.notes {
             if n.title.contains(['\t', '\r', '\n']) {
                 return Err(io::Error::new(
@@ -208,7 +245,12 @@ impl Notebook {
             text.push_str(std::str::from_utf8(&id).expect("base64url is ASCII"));
             text.push('\t');
             text.push_str(std::str::from_utf8(&parent).expect("base64url is ASCII"));
-            text.push_str(&format!("\t{}\t{}\n", n.order, n.title));
+            text.push_str(&format!(
+                "\t{}\t{}\t{}\n",
+                n.order,
+                n.kind.as_str(),
+                n.title
+            ));
         }
         replace_file(&dir.join("tree.tsv"), text.as_bytes())
     }
@@ -218,15 +260,26 @@ impl Notebook {
     }
 
     pub fn add(&mut self, parent: NoteId, title: String) -> io::Result<NoteId> {
-        self.add_with_rng(parent, title, random_note_id)
+        self.add_with_rng(parent, title, NoteKind::Note, random_note_id)
+    }
+
+    pub fn add_folder(&mut self, parent: NoteId, title: String) -> io::Result<NoteId> {
+        self.add_with_rng(parent, title, NoteKind::Folder, random_note_id)
     }
 
     fn add_with_rng(
         &mut self,
         parent: NoteId,
         title: String,
+        kind: NoteKind,
         mut random: impl FnMut() -> io::Result<NoteId>,
     ) -> io::Result<NoteId> {
+        if !self.accepts_children(parent) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "폴더 안에만 항목을 만들 수 있습니다.",
+            ));
+        }
         for _ in 0..64 {
             let id = random()?;
             if id == 0 || self.get(id).is_some() {
@@ -238,6 +291,7 @@ impl Notebook {
                 parent,
                 order,
                 title,
+                kind,
             });
             return Ok(id);
         }
@@ -251,6 +305,18 @@ impl Notebook {
     }
     pub fn get_mut(&mut self, id: NoteId) -> Option<&mut Note> {
         self.notes.iter_mut().find(|n| n.id == id)
+    }
+
+    pub fn is_folder(&self, id: NoteId) -> bool {
+        self.get(id).is_some_and(Note::is_folder)
+    }
+
+    pub fn is_note(&self, id: NoteId) -> bool {
+        self.get(id).is_some_and(|note| !note.is_folder())
+    }
+
+    pub fn accepts_children(&self, id: NoteId) -> bool {
+        id == 0 || self.is_folder(id)
     }
 
     pub fn children(&self, parent: NoteId) -> Vec<NoteId> {
@@ -274,10 +340,7 @@ impl Notebook {
     }
 
     pub fn move_note(&mut self, id: NoteId, parent: NoteId, before: Option<NoteId>) -> bool {
-        if id == parent
-            || (parent != 0 && self.get(parent).is_none())
-            || self.is_descendant(id, parent)
-        {
+        if id == parent || !self.accepts_children(parent) || self.is_descendant(id, parent) {
             return false;
         }
         if let Some(before_id) = before
@@ -345,7 +408,7 @@ impl Notebook {
             return false;
         }
         let roots = self.selected_roots(ids);
-        if (parent != 0 && self.get(parent).is_none())
+        if !self.accepts_children(parent)
             || roots
                 .iter()
                 .any(|&id| id == parent || self.is_descendant(id, parent))
@@ -424,7 +487,7 @@ impl Notebook {
                 .iter()
                 .any(|&root| root == id || self.is_descendant(id, root))
         });
-        let folder = self.add(parent, "새 폴더".into())?;
+        let folder = self.add_folder(parent, "새 폴더".into())?;
         self.move_note(folder, parent, before);
         self.move_notes(&roots, folder, None);
         Ok(Some(folder))
@@ -532,23 +595,30 @@ mod tests {
     #[test]
     fn random_ids_survive_reload_and_reject_collisions_without_mutation() {
         let dir = loader_test_dir("random-ids");
-        let original = "EDOT4\nAAAAAAAAAAc\tAAAAAAAAAAA\t0\told\nAAAAAAAAAAo\tAAAAAAAAAAA\t1\tten\n__________8\tAAAAAAAAAAo\t0\tmax\n";
+        let original = "EDOT5\nAAAAAAAAAAc\tAAAAAAAAAAA\t0\tfolder\told\nAAAAAAAAAAo\tAAAAAAAAAAA\t1\tfolder\tten\n__________8\tAAAAAAAAAAo\t0\tnote\tmax\n";
         fs::write(dir.join("tree.tsv"), original).unwrap();
         fs::write(dir.join("notes/7.txt"), "existing body").unwrap();
         let mut book = Notebook::load(&dir).unwrap();
         let high = (1u64 << 63) + 7;
         let mut candidates = [0, 7, NoteId::MAX, high].into_iter();
         assert_eq!(
-            book.add_with_rng(7, "child".into(), || Ok(candidates.next().unwrap()))
+            book.add_with_rng(7, "child".into(), NoteKind::Note, || Ok(candidates
+                .next()
+                .unwrap()))
                 .unwrap(),
             high
         );
         let before = book.notes.clone();
         assert!(
-            book.add_with_rng(0, "failed".into(), || Err(io::Error::other("rng failed")))
+            book.add_with_rng(0, "failed".into(), NoteKind::Note, || Err(
+                io::Error::other("rng failed")
+            ))
+            .is_err()
+        );
+        assert!(
+            book.add_with_rng(0, "collision".into(), NoteKind::Note, || Ok(7))
                 .is_err()
         );
-        assert!(book.add_with_rng(0, "collision".into(), || Ok(7)).is_err());
         assert_eq!(book.notes, before);
         // Equal snapshots represent independent devices with no shared counter.
         let mut other = book.clone();
@@ -563,10 +633,10 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), original);
         book.save(&dir).unwrap();
         let saved = fs::read_to_string(dir.join("tree.tsv")).unwrap();
-        assert!(saved.starts_with("EDOT4\n"));
-        assert!(saved.contains("AAAAAAAAAAo\tAAAAAAAAAAA\t1\tten\n"));
-        assert!(saved.contains("__________8\tAAAAAAAAAAo\t0\tmax\n"));
-        assert!(saved.contains("gAAAAAAAAAc\tAAAAAAAAAAc\t0\tchild\n"));
+        assert!(saved.starts_with("EDOT5\n"));
+        assert!(saved.contains("AAAAAAAAAAo\tAAAAAAAAAAA\t1\tfolder\tten\n"));
+        assert!(saved.contains("__________8\tAAAAAAAAAAo\t0\tnote\tmax\n"));
+        assert!(saved.contains("gAAAAAAAAAc\tAAAAAAAAAAc\t0\tnote\tchild\n"));
         assert_eq!(Notebook::reload(&dir).unwrap().notes, book.notes);
         assert_eq!(book.file(&dir, high), dir.join(format!("notes/{high}.txt")));
         assert_eq!(
@@ -584,7 +654,7 @@ mod tests {
     #[test]
     fn plain_titles_and_decimal_order_round_trip() {
         let dir = loader_test_dir("plain-titles");
-        let text = "EDOT4\r\nAAAAAAAAABA\tAAAAAAAAAAA\t10\t한글 😀 제목\r\nAAAAAAAAAAI\tAAAAAAAAABA\t0\t414243\r\nAAAAAAAAAAM\tAAAAAAAAAAA\t1\t\r\n";
+        let text = "EDOT5\r\nAAAAAAAAABA\tAAAAAAAAAAA\t10\tfolder\t한글 😀 제목\r\nAAAAAAAAAAI\tAAAAAAAAABA\t0\tnote\t414243\r\nAAAAAAAAAAM\tAAAAAAAAAAA\t1\tnote\t\r\n";
         fs::write(dir.join("tree.tsv"), text).unwrap();
         let mut book = Notebook::reload(&dir).unwrap();
         assert_eq!(book.get(16).unwrap().title, "한글 😀 제목");
@@ -616,7 +686,7 @@ mod tests {
         fs::write(dir.join("notes/7.txt"), "leftover body").unwrap();
         assert!(Notebook::reload(&dir).is_err());
         assert!(!dir.join("tree.tsv").exists());
-        fs::write(dir.join("tree.tsv"), "EDOT4\n").unwrap();
+        fs::write(dir.join("tree.tsv"), "EDOT5\n").unwrap();
         assert!(Notebook::reload(&dir).unwrap().notes.is_empty());
         let recovered = Notebook::load(&dir).unwrap();
         assert_eq!(recovered.notes[0].id, 7);
@@ -629,20 +699,20 @@ mod tests {
         fs::write(dir.join("notes/9.txt"), "unchanged orphan").unwrap();
         for text in [
             "WRONG\n",
-            "EDOT1\n1\t0\t0\t414243\n",
-            "EDOT2\n1\t0\t0\tplain title\n",
-            "EDOT3\n1\t0\t0\tplain title\n",
-            "EDOT4\n1\t0\t0\tdecimal IDs\n",
-            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAA\t0\tbad\rtitle\n",
-            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAA\t0",
-            "EDOT4\nAAAAAAAAAAA\tAAAAAAAAAAA\t0\t41\n",
-            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAA\t0\t41\nAAAAAAAAAAE\tAAAAAAAAAAA\t1\t42\n",
-            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAA\t0\t41\textra\n",
-            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAk\t0\t41\n", // An orphan file cannot repair a missing parent.
-            "EDOT4\nAAAAAAAAAAE\tAAAAAAAAAAE\t0\t41\n",
-            "EDOT4\nAAAAAAAAAAM\tAAAAAAAAAAE\t0\t43\nAAAAAAAAAAQ\tAAAAAAAAAAA\t0\t44\nAAAAAAAAAAE\tAAAAAAAAAAI\t0\t41\nAAAAAAAAAAI\tAAAAAAAAAAE\t0\t42\n",
-            "EDOT4\nAAAAAAAAAAF\tAAAAAAAAAAA\t0\tinvalid padding bits\n",
-            "EDOT4\nAAAAAAAAAAE\t___________\t0\tinvalid parent\n",
+            "EDOT1\n1\t0\tnote\t0\t414243\n",
+            "EDOT2\n1\t0\tnote\t0\tplain title\n",
+            "EDOT3\n1\t0\tnote\t0\tplain title\n",
+            "EDOT5\n1\t0\tnote\t0\tdecimal IDs\n",
+            "EDOT5\nAAAAAAAAAAE\tAAAAAAAAAAA\t0\tnote\tbad\rtitle\n",
+            "EDOT5\nAAAAAAAAAAE\tAAAAAAAAAAA\t0",
+            "EDOT5\nAAAAAAAAAAA\tAAAAAAAAAAA\t0\tnote\t41\n",
+            "EDOT5\nAAAAAAAAAAE\tAAAAAAAAAAA\t0\tnote\t41\nAAAAAAAAAAE\tAAAAAAAAAAA\t1\tnote\t42\n",
+            "EDOT5\nAAAAAAAAAAE\tAAAAAAAAAAA\t0\tnote\t41\textra\n",
+            "EDOT5\nAAAAAAAAAAE\tAAAAAAAAAAk\t0\tnote\t41\n", // An orphan file cannot repair a missing parent.
+            "EDOT5\nAAAAAAAAAAE\tAAAAAAAAAAE\t0\tnote\t41\n",
+            "EDOT5\nAAAAAAAAAAM\tAAAAAAAAAAE\t0\tnote\t43\nAAAAAAAAAAQ\tAAAAAAAAAAA\t0\tnote\t44\nAAAAAAAAAAE\tAAAAAAAAAAI\t0\tnote\t41\nAAAAAAAAAAI\tAAAAAAAAAAE\t0\tnote\t42\n",
+            "EDOT5\nAAAAAAAAAAF\tAAAAAAAAAAA\t0\tnote\tinvalid padding bits\n",
+            "EDOT5\nAAAAAAAAAAE\t___________\t0\tnote\tinvalid parent\n",
         ] {
             fs::write(dir.join("tree.tsv"), text).unwrap();
             let error = Notebook::load(&dir).err().expect("invalid tree accepted");
@@ -657,13 +727,43 @@ mod tests {
     }
 
     #[test]
+    fn explicit_empty_folders_round_trip_and_notes_cannot_have_children() {
+        let dir = loader_test_dir("typed-folders");
+        let mut book = Notebook::default();
+        let folder = book.add_folder(0, "빈 폴더".into()).unwrap();
+        let note = book.add(0, "노트".into()).unwrap();
+        fs::write(book.file(&dir, note), "본문").unwrap();
+        let before = book.notes.clone();
+        assert!(book.add(note, "invalid".into()).is_err());
+        assert!(book.add_folder(note, "invalid".into()).is_err());
+        assert!(!book.move_note(folder, note, None));
+        assert!(!book.move_notes(&[folder], note, None));
+        assert_eq!(book.notes, before);
+        book.save(&dir).unwrap();
+        let restored = Notebook::load(&dir).unwrap();
+        assert_eq!(restored.notes, before);
+        assert!(restored.is_folder(folder));
+        assert!(restored.children(folder).is_empty());
+        assert!(!restored.file(&dir, folder).exists());
+        // A complete index with a note parent is invalid, even if the ID exists.
+        book.get_mut(note).unwrap().parent = folder;
+        book.get_mut(folder).unwrap().kind = NoteKind::Note;
+        book.save(&dir).unwrap();
+        let bytes = fs::read(dir.join("tree.tsv")).unwrap();
+        assert!(Notebook::load(&dir).is_err());
+        assert_eq!(fs::read(dir.join("tree.tsv")).unwrap(), bytes);
+        assert_eq!(fs::read_to_string(book.file(&dir, note)).unwrap(), "본문");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn batch_moves_preserve_tree_order_and_validate_before_mutating() {
         let mut book = Notebook::default();
-        let a = book.add(0, "A".into()).unwrap();
+        let a = book.add_folder(0, "A".into()).unwrap();
         let b = book.add(0, "B".into()).unwrap();
         let c = book.add(0, "C".into()).unwrap();
         let child = book.add(a, "A1".into()).unwrap();
-        let folder = book.add(0, "Folder".into()).unwrap();
+        let folder = book.add_folder(0, "Folder".into()).unwrap();
         let existing = book.add(folder, "existing".into()).unwrap();
         let selected = [c, child, a, c];
         assert_eq!(book.selected_roots(&selected), vec![a, c]);
@@ -691,10 +791,10 @@ mod tests {
                 .as_nanos()
         ));
         let mut book = Notebook::load(&dir).unwrap();
-        let a = book.add(0, "A".into()).unwrap();
+        let a = book.add_folder(0, "A".into()).unwrap();
         let child = book.add(a, "child".into()).unwrap();
         let b = book.add(0, "B".into()).unwrap();
-        for id in [a, child, b] {
+        for id in [child, b] {
             fs::write(book.file(&dir, id), format!("text {id}")).unwrap();
         }
         book.save(&dir).unwrap();
@@ -702,17 +802,15 @@ mod tests {
         fs::remove_file(book.file(&dir, b)).unwrap();
         assert!(book.trash_notes(&dir, &[a, child, b]).is_err());
         assert_eq!(book.notes, previous);
-        for id in [a, child] {
-            assert_eq!(
-                fs::read_to_string(book.file(&dir, id)).unwrap(),
-                format!("text {id}")
-            );
-        }
+        assert_eq!(
+            fs::read_to_string(book.file(&dir, child)).unwrap(),
+            format!("text {child}")
+        );
         fs::write(book.file(&dir, b), format!("text {b}")).unwrap();
         fs::create_dir(dir.join("tree.tmp")).unwrap(); // Force index write failure.
         assert!(book.trash_notes(&dir, &[a, child, b]).is_err());
         assert_eq!(book.notes, previous);
-        for id in [a, child, b] {
+        for id in [child, b] {
             assert!(book.file(&dir, id).is_file());
         }
         fs::remove_dir(dir.join("tree.tmp")).unwrap();

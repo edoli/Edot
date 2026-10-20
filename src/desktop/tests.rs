@@ -44,6 +44,7 @@ struct Fixture {
     view: Entity<Edot>,
     dir: PathBuf,
     ids: [NoteId; 3],
+    folder: NoteId,
 }
 impl Fixture {
     fn new(cx: &mut TestAppContext) -> Self {
@@ -61,7 +62,8 @@ impl Fixture {
         let mut book = Notebook::load(&dir).unwrap();
         let first = book.add(0, "첫 노트".into()).unwrap();
         let second = book.add(0, "둘째 노트".into()).unwrap();
-        let third = book.add(first, "하위 노트".into()).unwrap();
+        let folder = book.add_folder(0, "폴더".into()).unwrap();
+        let third = book.add(folder, "하위 노트".into()).unwrap();
         for (id, text) in [
             (first, "🙂 한글12\r\n한글3\rkeep\n"),
             (second, "closed needle\n"),
@@ -73,7 +75,7 @@ impl Fixture {
         Session {
             tabs: vec![first, second],
             active: Some(first),
-            expanded: std::collections::HashSet::from([first]),
+            expanded: std::collections::HashSet::from([folder]),
             ..Default::default()
         }
         .save(&dir)
@@ -115,6 +117,7 @@ impl Fixture {
             view,
             dir,
             ids: [first, second, third],
+            folder,
         }
     }
     fn update<R>(

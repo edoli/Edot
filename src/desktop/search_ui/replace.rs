@@ -49,7 +49,7 @@ impl Edot {
         let replacement = self.global.replacement.read(cx).value();
         let plan = (|| -> io::Result<Vec<global_search::Change>> {
             let mut changes = vec![];
-            for note in &self.book.notes {
+            for note in self.book.notes.iter().filter(|note| !note.is_folder()) {
                 let path = self.book.file(&self.dir, note.id);
                 let before_disk = fs::read(&path)?;
                 let text = self.text(note.id, cx)?;

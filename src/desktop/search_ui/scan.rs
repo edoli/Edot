@@ -32,7 +32,12 @@ impl Edot {
         self.search_results.scan_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(SEARCH_DELAY).await;
             let Ok(ids) = this.update(cx, |this, _| {
-                this.book.notes.iter().map(|n| n.id).collect::<Vec<_>>()
+                this.book
+                    .notes
+                    .iter()
+                    .filter(|n| !n.is_folder())
+                    .map(|n| n.id)
+                    .collect::<Vec<_>>()
             }) else {
                 return;
             };
@@ -136,6 +141,9 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.book.is_note(id) {
+            return;
+        }
         // A full scan may already have read this note. Reconcile after it finishes.
         if self.search_results.scanning {
             self.search_results.pending_notes.insert(id);
@@ -149,7 +157,7 @@ impl Edot {
         let task = cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(SEARCH_DELAY).await;
             let Ok(Some((path, loaded, revision))) = this.update(cx, |this, cx| {
-                this.book.get(id)?;
+                this.book.is_note(id).then_some(())?;
                 let editor = this
                     .open
                     .iter()

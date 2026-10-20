@@ -106,7 +106,7 @@ fn missing_font_is_saved_as_the_actual_fallback_after_refresh(cx: &mut TestAppCo
 }
 
 #[test]
-fn space_open_initializes_binary_but_defers_legacy_migration_until_save() {
+fn space_open_initializes_and_restores_binary_session() {
     let dir = std::env::temp_dir().join(format!(
         "edot-session-space-{}-{}",
         std::process::id(),
@@ -127,23 +127,23 @@ fn space_open_initializes_binary_but_defers_legacy_migration_until_save() {
     assert!(!paths.space.join("session.tsv").exists());
     drop(loaded);
 
-    paths.space = dir.join("legacy");
+    paths.space = dir.join("existing");
     let mut book = Notebook::load(&paths.space).unwrap();
-    let root = book.add(0, "root".into()).unwrap();
+    let root = book.add_folder(0, "root".into()).unwrap();
     let child = book.add(root, "child".into()).unwrap();
     book.save(&paths.space).unwrap();
-    let legacy = format!("EDOTSESSION1\n0\t300\t{child}\n{root}\n{child}\nexpanded\t{root}\n");
-    fs::write(paths.space.join("session.tsv"), &legacy).unwrap();
+    Session {
+        tabs: vec![root, child],
+        active: Some(child),
+        expanded: HashSet::from([root]),
+        ..Default::default()
+    }
+    .save(&paths.space)
+    .unwrap();
     let loaded = LoadedSpace::open(&paths).unwrap();
-    assert_eq!(loaded.session.tabs, [root, child]);
+    assert_eq!(loaded.session.tabs, [child]);
     assert_eq!(loaded.session.active, Some(child));
     assert_eq!(loaded.session.expanded, HashSet::from([root]));
-    assert!(!paths.space.join("session.bin").exists());
-    loaded.session.save(&paths.space).unwrap();
-    assert_eq!(
-        fs::read_to_string(paths.space.join("session.tsv")).unwrap(),
-        legacy
-    );
     let expected = loaded.session.clone();
     drop(loaded);
     let loaded = LoadedSpace::open(&paths).unwrap();
@@ -157,10 +157,9 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
     let f = Fixture::new(cx);
     let other = f.dir.join("other-space");
     let mut book = Notebook::load(&other).unwrap();
-    let root = book.add(0, "root".into()).unwrap();
+    let root = book.add_folder(0, "root".into()).unwrap();
     let child = book.add(root, "child".into()).unwrap();
     book.save(&other).unwrap();
-    fs::write(book.file(&other, root), "root body").unwrap();
     fs::write(book.file(&other, child), "active child body").unwrap();
     Session {
         tabs: vec![child],
@@ -187,7 +186,7 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
         });
         this.changed(f.ids[0], window, cx);
         assert!(this.set_read_only(true, window, cx));
-        this.set_collapsed(f.ids[0], true, cx);
+        this.set_collapsed(f.folder, true, cx);
         // Switching does not read external settings edits or rebuild the font cache.
         Settings::default()
             .save(&cx.global::<AppState>().config_dir)
@@ -214,7 +213,7 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
         );
         this.set_collapsed(root, false, cx);
         assert!(this.switch_space(f.dir.clone(), window, cx));
-        assert!(this.collapsed.contains(&f.ids[0]));
+        assert!(this.collapsed.contains(&f.folder));
         assert_eq!(
             this.active_editor().unwrap().read(cx).value(),
             "saved before switching"
@@ -367,8 +366,8 @@ fn failed_space_or_session_write_preserves_current_state(cx: &mut TestAppContext
         this.close_space_list(window, cx);
         fs::create_dir(f.dir.join("session.tmp")).unwrap();
         let session = this.session.clone();
-        this.set_collapsed(f.ids[0], true, cx);
-        assert!(!this.collapsed.contains(&f.ids[0]));
+        this.set_collapsed(f.folder, true, cx);
+        assert!(!this.collapsed.contains(&f.folder));
         assert_eq!(this.session, session);
         assert!(this.error.is_some());
         this.error = None;

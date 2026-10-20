@@ -16,12 +16,21 @@ impl Edot {
         let multiple = targets.len() > 1;
         let nested = self.book.get(id).is_some_and(|note| note.parent != 0);
         if !multiple {
-            let weak = view.clone();
-            menu = menu.item(PopupMenuItem::new("하위 노트 추가").on_click(
-                move |_, window, cx| {
-                    let _ = weak.update(cx, |this, cx| this.create_note(Some(id), window, cx));
-                },
-            ));
+            if self.book.is_folder(id) {
+                let weak = view.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("새 노트").on_click(move |_, window, cx| {
+                        let _ = weak.update(cx, |this, cx| this.create_note(Some(id), window, cx));
+                    }),
+                );
+                let weak = view.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("새 폴더").on_click(move |_, window, cx| {
+                        let _ =
+                            weak.update(cx, |this, cx| this.create_folder(Some(id), window, cx));
+                    }),
+                );
+            }
             let weak = view.clone();
             menu = menu.item(PopupMenuItem::new("이름 바꾸기").shortcut("F2").on_click(
                 move |_, window, cx| {
@@ -36,18 +45,20 @@ impl Edot {
                         let _ = weak.update(cx, |this, cx| this.outdent(id, cx));
                     }),
             );
-            let weak = view.clone();
-            menu = menu
-                .separator()
-                .item(
-                    PopupMenuItem::new("다른 프로그램으로 열기").on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            if let Some(path) = this.prepare_external_note(id, cx) {
-                                cx.open_with_system(&path);
-                            }
-                        });
-                    }),
-                );
+            if self.book.is_note(id) {
+                let weak = view.clone();
+                menu =
+                    menu.separator()
+                        .item(PopupMenuItem::new("다른 프로그램으로 열기").on_click(
+                            move |_, _, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    if let Some(path) = this.prepare_external_note(id, cx) {
+                                        cx.open_with_system(&path);
+                                    }
+                                });
+                            },
+                        ));
+            }
         } else {
             let weak = view.clone();
             let targets = targets.clone();
@@ -158,7 +169,7 @@ impl Edot {
         id: NoteId,
         cx: &mut Context<Self>,
     ) -> Option<PathBuf> {
-        if self.book.get(id).is_none() || self.startup_failed {
+        if !self.book.is_note(id) || self.startup_failed {
             return None;
         }
         if let Some(tab) = self.open.iter_mut().find(|tab| tab.id == id)
@@ -262,12 +273,20 @@ impl Edot {
         self.pressed = None;
         self.tree_focus.focus(window, cx);
         let weak = cx.entity().downgrade();
+        let folder_weak = weak.clone();
         let menu = PopupMenu::build(window, cx, |menu, _, _| {
-            menu.action_context(self.tree_focus.clone()).item(
-                PopupMenuItem::new("새 노트").on_click(move |_, window, cx| {
-                    let _ = weak.update(cx, |this, cx| this.create_note(Some(0), window, cx));
-                }),
-            )
+            menu.action_context(self.tree_focus.clone())
+                .item(
+                    PopupMenuItem::new("새 노트").on_click(move |_, window, cx| {
+                        let _ = weak.update(cx, |this, cx| this.create_note(Some(0), window, cx));
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("새 폴더").on_click(move |_, window, cx| {
+                        let _ = folder_weak
+                            .update(cx, |this, cx| this.create_folder(Some(0), window, cx));
+                    }),
+                )
         });
         self.install_menu(menu, None, position, window, cx);
     }

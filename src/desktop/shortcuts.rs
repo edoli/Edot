@@ -13,6 +13,7 @@ const SECTIONS: &[ShortcutSection] = &[
             ("F1", "단축키 열기 / 닫기"),
             ("F11", "전체화면 켜기 / 끄기"),
             ("Ctrl+N", "새 노트 만들기"),
+            ("Ctrl+Shift+N", "새 폴더 만들기"),
             ("Ctrl+S", "수정한 노트 저장"),
             ("Ctrl+W / Ctrl+F4", "현재 탭 닫기"),
             ("Ctrl+Shift+T", "최근 닫은 탭 다시 열기"),
@@ -23,7 +24,7 @@ const SECTIONS: &[ShortcutSection] = &[
             ("Ctrl+Shift+P", "읽기 / 편집 모드 전환"),
             ("Ctrl+,", "설정 열기 / 닫기"),
             ("Alt+Z", "자동 줄 바꿈 켜기 / 끄기"),
-            ("F2", "노트 이름 바꾸기"),
+            ("F2", "항목 이름 바꾸기"),
             ("Shift+F10 / Menu 키", "현재 대상의 메뉴 열기"),
             ("Esc", "드래그·이름 편집 취소 또는 열린 패널·팝업 닫기"),
             (
