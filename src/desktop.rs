@@ -390,6 +390,7 @@ pub fn run() {
                 window_min_size: Some(size(px(560.), px(360.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some(format!("Edot — {}", space::name(&dir)).into()),
+                    appears_transparent: true,
                     ..Default::default()
                 }),
                 ..Default::default()

@@ -35,4 +35,4 @@ pub use button::{Button, Tooltip};
 pub use icon::{Assets, Icon, IconName};
 pub use switch::Switch;
 pub use theme::{ActiveTheme, Theme};
-pub use window::open_window;
+pub use window::{WINDOW_CONTROLS_WIDTH, WindowControls, open_window};

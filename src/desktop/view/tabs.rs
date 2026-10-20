@@ -14,7 +14,14 @@ impl Edot {
             } else {
                 36.
             };
-        let available = (f32::from(window.viewport_size().width) - sidebar_width - 80.).max(1.);
+        let controls_width = if window.is_fullscreen() {
+            0.
+        } else {
+            component::WINDOW_CONTROLS_WIDTH + WINDOW_DRAG_WIDTH
+        };
+        let available =
+            (f32::from(window.viewport_size().width) - sidebar_width - 80. - controls_width)
+                .max(1.);
         let layout = crate::tabs::TabLayout::new(
             available as i32,
             self.open.len(),
@@ -29,6 +36,7 @@ impl Edot {
             .h_full()
             .flex_1()
             .min_w_0()
+            .window_control_area(WindowControlArea::Drag)
             .overflow_x_scroll()
             .track_scroll(&self.tab_scroll);
         for (index, tab) in self.open.iter().enumerate() {
@@ -46,6 +54,7 @@ impl Edot {
             strip = strip.child(
                 div()
                     .id(("tab", id))
+                    .occlude()
                     .text_size(px(component::theme::TAB_FONT_SIZE))
                     .debug_selector(move || {
                         if active {
@@ -195,6 +204,7 @@ impl Edot {
                     )
                     .w(px(36.))
                     .h(px(34.))
+                    .flex_shrink_0()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.session.sidebar_visible = true;
                         cx.notify();
@@ -216,6 +226,7 @@ impl Edot {
                 tool("new-note", IconName::Plus, "새 노트 · Ctrl+N")
                     .w(px(40.))
                     .h(px(34.))
+                    .flex_shrink_0()
                     .on_click(
                         cx.listener(|this, _, window, cx| this.create_note(None, window, cx)),
                     ),
@@ -224,9 +235,20 @@ impl Edot {
                 tool("preferences", IconName::Settings, "설정 · Ctrl+,")
                     .w(px(40.))
                     .h(px(34.))
+                    .flex_shrink_0()
                     .selected(self.settings_visible)
                     .on_click(cx.listener(|this, _, window, cx| this.show_settings(window, cx))),
             )
+            .when(!window.is_fullscreen(), |row| {
+                row.child(
+                    div()
+                        .w(px(WINDOW_DRAG_WIDTH))
+                        .h_full()
+                        .flex_shrink_0()
+                        .window_control_area(WindowControlArea::Drag),
+                )
+                .child(component::WindowControls)
+            })
             .into_any_element()
     }
 }

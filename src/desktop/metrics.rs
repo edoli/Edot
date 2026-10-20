@@ -3,7 +3,9 @@ use crate::session::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 use std::time::Duration;
 
 pub(super) const SIDEBAR_RESIZE_WIDTH: f32 = 6.;
-pub(super) const EDITOR_MIN_WIDTH: f32 = 220.;
+pub(super) const EDITOR_MIN_WIDTH: f32 = 300.;
+// Draggable gap between Settings and the native window controls.
+pub(super) const WINDOW_DRAG_WIDTH: f32 = 24.;
 pub(super) const TAB_MIN_WIDTH: i32 = 100;
 pub(super) const TAB_PREFERRED_WIDTH: i32 = 180;
 pub(super) const CLOSED_TAB_HISTORY_LIMIT: usize = 100;

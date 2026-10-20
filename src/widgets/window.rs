@@ -1,5 +1,72 @@
 use super::*;
 
+const CAPTION_BUTTON_WIDTH: f32 = 46.;
+pub const WINDOW_CONTROLS_WIDTH: f32 = CAPTION_BUTTON_WIDTH * 3.;
+
+#[derive(IntoElement)]
+pub struct WindowControls;
+
+impl RenderOnce for WindowControls {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let maximized = window.is_maximized();
+        let colors = cx.theme().colors;
+        let button = |id, area, icon, label: &'static str| {
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label)
+                .h_flex()
+                .justify_center()
+                .w(px(CAPTION_BUTTON_WIDTH))
+                .h_full()
+                .flex_shrink_0()
+                .occlude()
+                // Native non-client handling keeps Snap Layouts, system commands,
+                // and WM_CLOSE's save/veto callback on the same path as Alt+F4.
+                .window_control_area(area)
+                .hover(move |s| {
+                    if area == WindowControlArea::Close {
+                        s.bg(rgb(0xe81123)).text_color(gpui::white())
+                    } else {
+                        s.bg(colors.accent)
+                    }
+                })
+                .active(move |s| s.bg(colors.selection))
+                .font_family("Segoe MDL2 Assets")
+                .text_size(px(10.))
+                .line_height(px(10.))
+                .child(icon)
+        };
+        div()
+            .h_flex()
+            .h_full()
+            .flex_shrink_0()
+            .text_color(colors.foreground)
+            .child(button(
+                "window-minimize",
+                WindowControlArea::Min,
+                "\u{e921}",
+                "최소화",
+            ))
+            .child(button(
+                "window-maximize",
+                WindowControlArea::Max,
+                if maximized { "\u{e923}" } else { "\u{e922}" },
+                if maximized {
+                    "이전 크기로 복원"
+                } else {
+                    "최대화"
+                },
+            ))
+            .child(button(
+                "window-close",
+                WindowControlArea::Close,
+                "\u{e8bb}",
+                "닫기 · Alt+F4",
+            ))
+    }
+}
+
 pub fn open_window<V: Render + 'static>(
     options: WindowOptions,
     cx: &mut App,
@@ -7,6 +74,9 @@ pub fn open_window<V: Render + 'static>(
 ) -> Result<(AnyWindowHandle, Entity<V>)> {
     let mut view = None;
     let window = cx.open_window(options, |window, cx| {
+        if let Err(error) = crate::platform::suppress_caption_tooltips(window) {
+            eprintln!("창 컨트롤 툴팁을 비활성화하지 못했습니다: {error}");
+        }
         let content = build(window, cx);
         view = Some(content.clone());
         let overlays = cx.new(|_| menu::Overlays::default());

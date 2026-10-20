@@ -8,11 +8,13 @@ impl Edot {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let height = (f32::from(window.viewport_size().height) - 300.).clamp(80., 360.);
-        div()
+        let body = div()
             .id("space-recovery")
             .debug_selector(|| "space-recovery".into())
             .relative()
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .p_4()
             .v_flex()
             .items_center()
@@ -41,7 +43,28 @@ impl Edot {
                             .child("다른 Space를 선택하거나 새로 만들어 계속할 수 있습니다."),
                     )
                     .child(self.space_panel(height, cx)),
-            )
+            );
+        div()
+            .id("space-recovery-window")
+            .size_full()
+            .v_flex()
+            .when(!window.is_fullscreen(), |root| {
+                root.child(
+                    div()
+                        .h_flex()
+                        .h(px(36.))
+                        .flex_shrink_0()
+                        .bg(cx.theme().bar)
+                        .child(
+                            div()
+                                .flex_1()
+                                .h_full()
+                                .window_control_area(WindowControlArea::Drag),
+                        )
+                        .child(component::WindowControls),
+                )
+            })
+            .child(body)
     }
 
     pub(in crate::desktop) fn space_footer(&self, cx: &mut Context<Self>) -> AnyElement {
