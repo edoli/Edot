@@ -234,18 +234,37 @@ impl Edot {
     }
 
     pub(super) fn open_space(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_space(false, window, cx);
+    }
+
+    pub(super) fn new_space(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_space(true, window, cx);
+    }
+
+    fn prompt_space(&mut self, create: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.close_space_list(window, cx);
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("노트 space 폴더 선택".into()),
+            prompt: Some(
+                if create {
+                    "새 Space를 만들 상위 폴더 선택"
+                } else {
+                    "Space 폴더 선택"
+                }
+                .into(),
+            ),
         });
         cx.spawn_in(window, async move |this, cx| match prompt.await {
             Ok(Ok(Some(paths))) => {
                 if let Some(path) = paths.into_iter().next() {
                     let _ = this.update_in(cx, |this, window, cx| {
-                        this.switch_space(path, window, cx);
+                        if create {
+                            this.create_space(path, window, cx);
+                        } else {
+                            this.switch_space(path, window, cx);
+                        }
                     });
                 }
             }
@@ -259,13 +278,35 @@ impl Edot {
         .detach();
     }
 
+    pub(super) fn create_space(
+        &mut self,
+        parent: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let path = match space::create(&parent) {
+            Ok(path) => path,
+            Err(error) => {
+                self.fail("Space를 만들지 못했습니다", error, cx);
+                return false;
+            }
+        };
+        if self.switch_space(path.clone(), window, cx) {
+            true
+        } else {
+            // Remove only our still-empty directory; never remove initialized data.
+            let _ = fs::remove_dir(path);
+            false
+        }
+    }
+
     pub(super) fn switch_space(
         &mut self,
         path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if space::same_path(&path, &self.dir) {
+        if !self.startup_failed && space::same_path(&path, &self.dir) {
             return match space::Registry::register(&cx.global::<AppState>().config_dir, &path) {
                 Ok(registry) => {
                     self.space_ui.registry = registry;
@@ -282,13 +323,24 @@ impl Edot {
                 }
             };
         }
-        if !self.finish_rename(true, false, window, cx) || !self.save_all(cx) {
-            return false;
-        }
-        if let Err(error) = self.save_session() {
-            self.fail("세션을 저장하지 못했습니다", error, cx);
-            return false;
-        }
+        let recovered_settings = if self.startup_failed {
+            match Settings::load_or_create(&cx.global::<AppState>().config_dir) {
+                Ok(settings) => Some(settings),
+                Err(error) => {
+                    self.fail("전역 설정을 읽지 못했습니다", error, cx);
+                    return false;
+                }
+            }
+        } else {
+            if !self.finish_rename(true, false, window, cx) || !self.save_all(cx) {
+                return false;
+            }
+            if let Err(error) = self.save_session() {
+                self.fail("세션을 저장하지 못했습니다", error, cx);
+                return false;
+            }
+            None
+        };
         let paths = space::Paths {
             space: path.clone(),
             config: cx.global::<AppState>().config_dir.clone(),
@@ -300,6 +352,9 @@ impl Edot {
         });
         match loaded {
             Ok(loaded) => {
+                if let Some(settings) = recovered_settings {
+                    cx.global_mut::<AppState>().settings = settings;
+                }
                 *self = Self::new(path, Ok(loaded), window, cx);
                 cx.notify();
                 true

@@ -2,6 +2,48 @@
 use super::*;
 
 impl Edot {
+    pub(in crate::desktop) fn space_recovery_view(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let height = (f32::from(window.viewport_size().height) - 300.).clamp(80., 360.);
+        div()
+            .id("space-recovery")
+            .debug_selector(|| "space-recovery".into())
+            .relative()
+            .size_full()
+            .p_4()
+            .v_flex()
+            .items_center()
+            .overflow_y_scroll()
+            .track_focus(&self.focus)
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .font_family(component::theme::UI_FONT)
+            .child(
+                div()
+                    .v_flex()
+                    .w(px(460.))
+                    .max_w_full()
+                    .my_auto()
+                    .flex_shrink_0()
+                    .gap_4()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Space를 열지 못했습니다"),
+                    )
+                    .child(div().child(self.error.clone().unwrap_or_default()))
+                    .child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("다른 Space를 선택하거나 새로 만들어 계속할 수 있습니다."),
+                    )
+                    .child(self.space_panel(height, cx)),
+            )
+    }
+
     pub(in crate::desktop) fn space_footer(&self, cx: &mut Context<Self>) -> AnyElement {
         let bounds = self.space_ui.bounds.clone();
         div()
@@ -62,6 +104,27 @@ impl Edot {
     ) -> AnyElement {
         let width = (f32::from(window.viewport_size().width) - 16.).clamp(0., 380.);
         let height = (f32::from(window.viewport_size().height) - 132.).clamp(0., 360.);
+        div()
+            .id("space-popup")
+            .debug_selector(|| "space-popup".into())
+            .absolute()
+            .left(px(8.))
+            .bottom(px(48.))
+            .w(px(width))
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if !window.has_active_dialog(cx)
+                    && !this.space_ui.bounds.get().contains(&event.position)
+                {
+                    this.close_space_list(window, cx);
+                }
+            }))
+            .child(self.space_panel(height, cx))
+            .into_any_element()
+    }
+
+    fn space_panel(&self, height: f32, cx: &mut Context<Self>) -> Stateful<Div> {
         let mut list = div()
             .id("space-list")
             .v_flex()
@@ -79,7 +142,7 @@ impl Edot {
         }
         for (index, entry) in self.space_ui.registry.entries.iter().enumerate() {
             let path = entry.path.clone();
-            let current = space::same_path(&path, &self.dir);
+            let current = !self.startup_failed && space::same_path(&path, &self.dir);
             let rename = self
                 .space_ui
                 .rename
@@ -193,12 +256,9 @@ impl Edot {
             list = list.child(row);
         }
         div()
-            .id("space-popup")
-            .debug_selector(|| "space-popup".into())
-            .absolute()
-            .left(px(8.))
-            .bottom(px(48.))
-            .w(px(width))
+            .id("space-panel")
+            .debug_selector(|| "space-panel".into())
+            .w_full()
             .v_flex()
             .gap_2()
             .p_2()
@@ -206,16 +266,7 @@ impl Edot {
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
-            .shadow_lg()
-            .occlude()
             .track_focus(&self.space_ui.focus)
-            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                if !window.has_active_dialog(cx)
-                    && !this.space_ui.bounds.get().contains(&event.position)
-                {
-                    this.close_space_list(window, cx);
-                }
-            }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if window.has_active_dialog(cx) {
                     return;
@@ -236,7 +287,7 @@ impl Edot {
                     }
                 } else {
                     match key {
-                        "escape" => this.close_space_list(window, cx),
+                        "escape" if !this.startup_failed => this.close_space_list(window, cx),
                         "up" | "down" if this.space_ui.focus.is_focused(window) => {
                             let count = this.space_ui.registry.entries.len();
                             if count > 0 {
@@ -284,6 +335,13 @@ impl Edot {
                     .justify_start()
                     .on_click(cx.listener(|this, _, window, cx| this.open_space(window, cx))),
             )
-            .into_any_element()
+            .child(
+                Button::new("space-create")
+                    .icon(IconName::Folder)
+                    .label("새 Space 만들기")
+                    .w_full()
+                    .justify_start()
+                    .on_click(cx.listener(|this, _, window, cx| this.new_space(window, cx))),
+            )
     }
 }

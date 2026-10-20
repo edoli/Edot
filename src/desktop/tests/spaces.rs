@@ -331,6 +331,133 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
 }
 
 #[gpui::test]
+fn startup_failure_can_select_a_registered_space_without_saving_the_failed_space(
+    cx: &mut TestAppContext,
+) {
+    let f = Fixture::new(cx);
+    let broken = f.dir.join("broken-startup");
+    fs::create_dir(&broken).unwrap();
+    fs::write(broken.join("tree.tsv"), "broken index").unwrap();
+    fs::write(broken.join("session.bin"), "preserve session").unwrap();
+    f.update(cx, |this, window, cx| {
+        let settings = Settings {
+            font_size: 23,
+            wrap: false,
+            ..Default::default()
+        };
+        settings.save(&cx.global::<AppState>().config_dir).unwrap();
+        *this = Edot::new(broken.clone(), Err("열 수 없는 Space".into()), window, cx);
+    });
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|window, cx| window.render_frame(cx));
+    assert!(visual.debug_bounds("space-recovery").is_some());
+    assert!(visual.debug_bounds("dismiss-error").is_none());
+    assert!(visual.debug_bounds("space-panel").is_some());
+    assert!(visual.debug_bounds("space-row-0").is_some());
+    assert!(visual.debug_bounds("space-popup").is_none());
+    // Recovery shows the shared list immediately and cannot dismiss it with Escape.
+    f.press(cx, "escape");
+    visual.update(|window, cx| window.render_frame(cx));
+    assert!(visual.debug_bounds("space-panel").is_some());
+    assert!(visual.debug_bounds("space-popup").is_none());
+    f.press(cx, "enter");
+    f.update(cx, |this, _, cx| {
+        assert!(!this.startup_failed);
+        assert_eq!(this.dir, fs::canonicalize(&f.dir).unwrap());
+        assert_eq!(
+            this.active_editor().unwrap().read(cx).value(),
+            "🙂 한글12\r\n한글3\rkeep\n"
+        );
+        assert_eq!(cx.global::<AppState>().settings.font_size, 23);
+        assert!(!cx.global::<AppState>().settings.wrap);
+    });
+    assert_eq!(
+        fs::read_to_string(broken.join("tree.tsv")).unwrap(),
+        "broken index"
+    );
+    assert_eq!(
+        fs::read_to_string(broken.join("session.bin")).unwrap(),
+        "preserve session"
+    );
+    assert!(!broken.join("notes").exists());
+}
+
+#[gpui::test]
+fn startup_failure_can_retry_the_same_space_after_its_lock_is_released(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let locked = f.dir.join("locked-startup");
+    let lock = StoreLock::acquire(&locked).unwrap();
+    let mut book = Notebook::load(&locked).unwrap();
+    let note = book.add(0, "보존".into()).unwrap();
+    fs::write(book.file(&locked, note), "locked note").unwrap();
+    book.save(&locked).unwrap();
+    let index = fs::read(locked.join("tree.tsv")).unwrap();
+    f.update(cx, |this, window, cx| {
+        *this = Edot::new(locked.clone(), Err("이미 열린 Space".into()), window, cx);
+        assert!(!this.switch_space(locked.clone(), window, cx));
+        assert!(this.startup_failed);
+        assert!(!locked.join("session.bin").exists());
+    });
+    assert_eq!(fs::read(locked.join("tree.tsv")).unwrap(), index);
+    drop(lock);
+    f.update(cx, |this, window, cx| {
+        assert!(this.switch_space(locked.clone(), window, cx));
+        assert!(!this.startup_failed);
+        assert!(this.book.is_note(note));
+        assert!(this.error.is_none());
+    });
+    assert_eq!(
+        fs::read_to_string(book.file(&locked, note)).unwrap(),
+        "locked note"
+    );
+}
+
+#[gpui::test]
+fn startup_failure_can_create_a_space_without_recreating_missing_paths_or_replacing_existing_data(
+    cx: &mut TestAppContext,
+) {
+    let f = Fixture::new(cx);
+    let missing = f.dir.join("missing-startup");
+    let parent = f.dir.join("new-parent");
+    fs::create_dir(&parent).unwrap();
+    fs::write(parent.join("새 Space"), "preserve file").unwrap();
+    fs::create_dir(parent.join("새 Space 2")).unwrap();
+    fs::write(parent.join("새 Space 2/keep.txt"), "preserve directory").unwrap();
+    f.update(cx, |this, window, cx| {
+        let config = cx.global::<AppState>().config_dir.clone();
+        let settings_path = config.join("settings.ini");
+        fs::write(&settings_path, "version = 1\nversion = 2\n").unwrap();
+        *this = Edot::new(missing.clone(), Err("사라진 Space".into()), window, cx);
+        assert!(!this.create_space(parent.clone(), window, cx));
+        assert!(this.startup_failed);
+        assert!(!parent.join("새 Space 3").exists());
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            "version = 1\nversion = 2\n"
+        );
+        fs::remove_file(settings_path).unwrap();
+        Settings::default().save(&config).unwrap();
+        assert!(this.create_space(parent.clone(), window, cx));
+        assert!(!this.startup_failed);
+        assert_eq!(this.dir, parent.join("새 Space 3"));
+        assert!(this.book.notes.is_empty());
+        assert!(this.open.is_empty());
+        assert!(this.dir.join("tree.tsv").is_file());
+        assert!(this.dir.join("session.bin").is_file());
+        assert_eq!(this.current_space_name(), "새 Space 3");
+    });
+    assert!(!missing.exists());
+    assert_eq!(
+        fs::read_to_string(parent.join("새 Space")).unwrap(),
+        "preserve file"
+    );
+    assert_eq!(
+        fs::read_to_string(parent.join("새 Space 2/keep.txt")).unwrap(),
+        "preserve directory"
+    );
+}
+
+#[gpui::test]
 fn failed_space_or_session_write_preserves_current_state(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let invalid = f.dir.join("invalid-space");

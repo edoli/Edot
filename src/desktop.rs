@@ -328,6 +328,8 @@ impl Edot {
             this.caret = Some(id);
             this.selection.single(id);
             this.focus_editor(window, cx);
+        } else if this.startup_failed {
+            this.space_ui.focus.focus(window, cx);
         } else {
             this.tree_focus.focus(window, cx);
         }
@@ -352,16 +354,18 @@ pub fn run() {
         |_| (PathBuf::new(), space::config_dir()),
         |paths| (paths.space.clone(), paths.config.clone()),
     );
-    let loaded = paths
-        .and_then(|paths| {
-            let state = AppState::load(paths.config.clone())?;
+    let state = AppState::load(config_dir.clone());
+    let loaded = match &state {
+        Ok(_) => paths.and_then(|paths| {
             let loaded = LoadedSpace::open(&paths)?;
             paths.remember()?;
-            Ok((state, loaded))
-        })
-        .map_err(|error| {
-            format!("노트 저장소를 열지 못했습니다. 파일을 덮어쓰지 않습니다.\n{error}")
-        });
+            Ok(loaded)
+        }),
+        Err(error) => Err(io::Error::other(format!(
+            "전역 설정을 읽지 못했습니다.\n{error}"
+        ))),
+    }
+    .map_err(|error| format!("노트 저장소를 열지 못했습니다. 파일을 덮어쓰지 않습니다.\n{error}"));
     gpui_platform::application()
         .with_assets(component::Assets)
         .run(move |cx| {
@@ -369,16 +373,7 @@ pub fn run() {
                 crate::image_http::ImageHttpClient::new(cx.background_executor().clone()),
             ));
             component::init(cx);
-            let loaded = match loaded {
-                Ok((state, loaded)) => {
-                    cx.set_global(state);
-                    Ok(loaded)
-                }
-                Err(error) => {
-                    cx.set_global(AppState::new(config_dir, Settings::default()));
-                    Err(error)
-                }
-            };
+            cx.set_global(state.unwrap_or_else(|_| AppState::new(config_dir, Settings::default())));
 
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {

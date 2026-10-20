@@ -45,6 +45,9 @@ mod tree;
 
 impl Render for Edot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.startup_failed {
+            return self.space_recovery_view(window, cx);
+        }
         let (sidebar_progress, sidebar_moving) = self.sidebar_motion.tick(
             self.session.sidebar_visible,
             cx.background_executor().now(),
@@ -337,18 +340,10 @@ impl Render for Edot {
                             .child(
                                 Button::new("dismiss-error")
                                     .primary()
-                                    .label(if self.startup_failed {
-                                        "닫기"
-                                    } else {
-                                        "확인"
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        if this.startup_failed {
-                                            window.remove_window();
-                                        } else {
-                                            this.error = None;
-                                            cx.notify();
-                                        }
+                                    .label("확인")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.error = None;
+                                        cx.notify();
                                     })),
                             ),
                     ),

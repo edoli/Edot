@@ -99,6 +99,30 @@ pub fn name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Reserve a new Space directory without adopting or replacing existing data.
+pub fn create(parent: &Path) -> io::Result<PathBuf> {
+    if !parent.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "상위 폴더가 존재하지 않습니다.",
+        ));
+    }
+    for index in 1..=10_000 {
+        let name = if index == 1 {
+            "새 Space".into()
+        } else {
+            format!("새 Space {index}")
+        };
+        let path = parent.join(name);
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::other("새 Space 폴더 이름을 만들지 못했습니다."))
+}
+
 const METADATA_FILE: &str = "space.ini";
 
 fn metadata(path: &Path) -> io::Result<crate::settings::ini::Document> {
