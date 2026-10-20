@@ -19,6 +19,7 @@ impl Edot {
         } else {
             component::WINDOW_CONTROLS_WIDTH + WINDOW_DRAG_WIDTH
         };
+        // Reserve 40px each for Settings and the trailing new-note button.
         let available =
             (f32::from(window.viewport_size().width) - sidebar_width - 80. - controls_width)
                 .max(1.);
@@ -30,13 +31,13 @@ impl Edot {
             0,
         );
         self.tab_width = layout.width;
+        let tabs_extent = (layout.width as f32 * self.open.len() as f32).min(available);
         let mut strip = div()
             .id("tabs-scroll")
             .h_flex()
             .h_full()
             .flex_1()
             .min_w_0()
-            .window_control_area(WindowControlArea::Drag)
             .overflow_x_scroll()
             .track_scroll(&self.tab_scroll);
         for (index, tab) in self.open.iter().enumerate() {
@@ -54,7 +55,7 @@ impl Edot {
             strip = strip.child(
                 div()
                     .id(("tab", id))
-                    .occlude()
+                    .block_mouse_except_scroll()
                     .text_size(px(component::theme::TAB_FONT_SIZE))
                     .debug_selector(move || {
                         if active {
@@ -215,7 +216,8 @@ impl Edot {
                 div()
                     .relative()
                     .h_flex()
-                    .flex_1()
+                    .w(px(tabs_extent))
+                    .flex_shrink_0()
                     .min_w_0()
                     .h_full()
                     .overflow_hidden()
@@ -230,6 +232,13 @@ impl Edot {
                     .on_click(
                         cx.listener(|this, _, window, cx| this.create_note(None, window, cx)),
                     ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag),
             )
             .child(
                 tool("preferences", IconName::Settings, "설정 · Ctrl+,")
