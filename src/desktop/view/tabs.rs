@@ -80,8 +80,8 @@ impl Edot {
                                 div()
                                     .absolute()
                                     .right_0()
-                                    .top(px(7.))
-                                    .bottom(px(7.))
+                                    .top(px(0.))
+                                    .bottom(px(0.))
                                     .w(px(1.))
                                     .bg(cx.theme().border),
                             )
@@ -89,8 +89,8 @@ impl Edot {
                                 div()
                                     .absolute()
                                     .top(px(1.))
-                                    .left(px(2.))
-                                    .right(px(2.))
+                                    .left(px(-1.))
+                                    .right(px(0.))
                                     .h(px(2.))
                                     .bg(cx.theme().primary),
                             )
@@ -100,8 +100,8 @@ impl Edot {
                             div()
                                 .absolute()
                                 .right_0()
-                                .top(px(7.))
-                                .bottom(px(7.))
+                                .top(px(0.))
+                                .bottom(px(0.))
                                 .w(px(1.))
                                 .bg(cx.theme().border),
                         )
