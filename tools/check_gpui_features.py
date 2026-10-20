@@ -81,6 +81,8 @@ for name in ["gpui", "gpui_windows"]:
     }, (name, enabled)
 
 assert "windows-manifest" in features("gpui")
+assert "deferred-fonts" in features("gpui_platform")
+assert "deferred-fonts" in features("gpui_windows")
 assert "test-support" in features("gpui")
 assert features("image") == {"bmp", "gif", "jpeg", "png", "webp"}
 assert not features("resvg") & {

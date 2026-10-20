@@ -4,7 +4,7 @@
 - upstream: https://github.com/zed-industries/zed
 - 적용 브랜치: `edot-gpui`
 - 원본 기준 commit: `279fe070bb389b79652e52065b2f001edcc0b11b`
-- 앱 고정 commit: `d910aecc63523831fd947ea0f631d91604e02963`
+- 앱 고정 commit: `875c8a83520b79c27e0b097e7464ebb73c562414`
 
 Zed 원본 Git 이력을 공유하는 fork다. Edot의 일반·테스트 `gpui`와 `gpui_platform`은 같은 Git URL과 전체 40자리 `rev`를 지정한다. 내부 workspace crate도 같은 Git tree에서 가져온다. Cargo.lock을 함께 관리하며 브랜치가 변경되어도 앱은 자동 업그레이드되지 않는다. 앱 빌드에는 별도 fork checkout이 필요하지 않다.
 
@@ -15,12 +15,16 @@ Zed 원본 Git 이력을 공유하는 fork다. Edot의 일반·테스트 `gpui`�
 | `crates/gpui/Cargo.toml` | 추가 이미지 코덱, SVG 텍스트·폰트와 내장 래스터를 선택 feature로 분리 |
 | `crates/gpui_windows/Cargo.toml` | Windows 백엔드의 추가 이미지 코덱을 선택 feature로 분리 |
 | `crates/gpui/src/svg_renderer.rs` | SVG 텍스트·폰트 초기화를 `svg-text`로 조건부 컴파일 |
+| `crates/gpui/src/platform.rs`, `crates/gpui/src/text_system.rs` | 백그라운드에서 한 번만 시스템 글꼴을 갱신하는 API, 대체 적용 전 글꼴 조회 결과 공개 |
+| `crates/gpui_platform/Cargo.toml` | `deferred-fonts` 정책을 Windows 백엔드로 전달 |
+| `crates/gpui_windows/src/direct_write.rs` | 시작 시 캐시 사용, 한 번 갱신 뒤 시스템 글꼴 컬렉션 고정 |
 
 - `extended-image-formats`: 추가 코덱과 image/rayon. BMP/GIF/JPEG/PNG/WebP는 기본 지원한다.
 - `svg-text`: SVG 문자·폰트 로딩·shaping·이모지 폴백.
 - `svg-raster-images`: SVG 내부 래스터 이미지.
+- `deferred-fonts`: Edot이 명시적으로 켜는 Windows 글꼴 정책. 초기 즉시 변경 확인과 선택 실패 시 재조회를 끄고, 첫 화면 뒤 백그라운드에서 한 번만 갱신한다. 기존 글꼴 ID·배치 캐시는 유지한다. 이 feature를 끄면 upstream 글꼴 동작을 유지한다.
 
-GPUI 기본 feature에는 위 기능을 모두 포함하고 Edot의 일반·테스트 의존성에서 `default-features=false`로 끈다. `windows-manifest`는 유지한다. SVG 도형과 본문 DirectWrite 렌더링은 유지한다.
+GPUI 기본 feature에는 이미지·SVG 확장 세 기능을 포함하고 Edot의 일반·테스트 의존성에서 `default-features=false`로 끈다. `deferred-fonts`는 기본으로 꺼져 있으며 Edot에서 별도로 켠다. `windows-manifest`는 유지한다. SVG 도형과 본문 DirectWrite 렌더링은 유지한다.
 
 workspace의 image/resvg feature를 상속하면 제외 기능이 다시 켜지므로 해당 의존성은 명시적으로 선언한다. upstream 병합 시 그 버전 요구사항을 workspace와 맞춘다. fork의 유지 관리 문서는 `EDOT_GPUI.md`다.
 
@@ -37,7 +41,7 @@ git merge upstream/main
 
 마지막 두 명령은 `git pull --no-rebase upstream main`으로 합칠 수 있다. 일반 `git pull`은 origin의 현재 브랜치를 가져온다.
 
-충돌을 해결할 때 세 선택 feature와 원래 GPUI 기본 동작을 유지하고 API·workspace 의존성 변경을 확인한다. 필요하면 소비 앱의 임시 path 의존성으로 검증하되 최종 manifest에 남기지 않는다. 검증한 브랜치를 push하고 commit을 확인한다.
+충돌을 해결할 때 선택 feature와 원래 GPUI 기본 동작을 유지하고 API·workspace 의존성 변경을 확인한다. 필요하면 소비 앱의 임시 path 의존성으로 검증하되 최종 manifest에 남기지 않는다. 검증한 브랜치를 push하고 commit을 확인한다.
 
 ```powershell
 git push origin edot-gpui
