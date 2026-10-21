@@ -44,7 +44,9 @@ impl Edot {
         fs::read_to_string(self.book.file(&self.dir, id))
     }
     pub(super) fn focus_editor(&self, window: &mut Window, cx: &mut App) {
-        if let Some(editor) = self.active_editor() {
+        if self.startup_failed {
+            self.space_ui.focus.focus(window, cx);
+        } else if let Some(editor) = self.active_editor() {
             editor.update(cx, |state, cx| state.focus(window, cx));
         } else {
             self.tree_focus.focus(window, cx);

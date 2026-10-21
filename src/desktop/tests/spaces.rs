@@ -406,12 +406,48 @@ fn startup_failure_can_retry_the_same_space_after_its_lock_is_released(cx: &mut 
         assert!(!locked.join(".edot/session.bin").exists());
     });
     assert_eq!(fs::read(locked.join(".edot/tree.tsv")).unwrap(), index);
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|window, cx| window.render_frame(cx));
+    let settings_button = visual
+        .debug_bounds("recovery-preferences")
+        .unwrap()
+        .center();
+    visual.simulate_click(settings_button, Default::default());
+    visual.update(|window, cx| window.render_frame(cx));
+    assert!(visual.debug_bounds("settings-panel").is_some());
+    assert!(visual.debug_bounds("space-panel").is_some());
+    let wrap = visual.debug_bounds("settings-wrap").unwrap().center();
+    visual.simulate_click(wrap, Default::default());
+    f.update(cx, |this, _, cx| {
+        assert!(this.startup_failed);
+        assert!(!cx.global::<AppState>().settings.wrap);
+        assert!(
+            !Settings::load(&cx.global::<AppState>().config_dir)
+                .unwrap()
+                .wrap
+        );
+    });
+    f.press(cx, "escape");
+    f.update(cx, |this, window, _| {
+        assert!(!this.settings_visible);
+        assert!(this.space_ui.focus.is_focused(window));
+    });
+    f.press(cx, "ctrl-,");
+    f.update(cx, |this, _, _| assert!(this.settings_visible));
+    f.press(cx, "ctrl-,");
+    f.update(cx, |this, window, _| {
+        assert!(!this.settings_visible);
+        assert!(this.space_ui.focus.is_focused(window));
+    });
+    assert_eq!(fs::read(locked.join(".edot/tree.tsv")).unwrap(), index);
+    assert!(!locked.join(".edot/session.bin").exists());
     drop(lock);
     f.update(cx, |this, window, cx| {
         assert!(this.switch_space(locked.clone(), window, cx));
         assert!(!this.startup_failed);
         assert!(this.book.is_note(note));
         assert!(this.error.is_none());
+        assert!(!cx.global::<AppState>().settings.wrap);
     });
     assert_eq!(
         fs::read_to_string(book.file(&locked, note)).unwrap(),

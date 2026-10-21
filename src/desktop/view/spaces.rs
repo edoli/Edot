@@ -43,27 +43,65 @@ impl Edot {
                             .child("다른 Space를 선택하거나 새로 만들어 계속할 수 있습니다."),
                     )
                     .child(self.space_panel(height, cx)),
-            );
+            )
+            .when(self.settings_visible, |body| {
+                body.child(self.settings_view(cx))
+            });
         div()
             .id("space-recovery-window")
             .size_full()
             .v_flex()
-            .when(!window.is_fullscreen(), |root| {
-                root.child(
-                    div()
-                        .h_flex()
-                        .h(px(36.))
-                        .flex_shrink_0()
-                        .bg(cx.theme().bar)
-                        .child(
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if !window.has_active_dialog(cx)
+                    && event.keystroke.modifiers.control
+                    && event.keystroke.key == ","
+                {
+                    if !event.is_held {
+                        this.show_settings(window, cx);
+                    }
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                div()
+                    .h_flex()
+                    .h(px(36.))
+                    .flex_shrink_0()
+                    .bg(cx.theme().bar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .when(!window.is_fullscreen(), |area| {
+                                area.window_control_area(WindowControlArea::Drag)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "recovery-preferences".into())
+                            .w(px(40.))
+                            .h(px(34.))
+                            .flex_shrink_0()
+                            .child(
+                                tool("preferences", IconName::Settings, "설정 · Ctrl+,")
+                                    .size_full()
+                                    .selected(self.settings_visible)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.show_settings(window, cx)
+                                    })),
+                            ),
+                    )
+                    .when(!window.is_fullscreen(), |row| {
+                        row.child(
                             div()
-                                .flex_1()
+                                .w(px(WINDOW_DRAG_WIDTH))
                                 .h_full()
+                                .flex_shrink_0()
                                 .window_control_area(WindowControlArea::Drag),
                         )
-                        .child(component::WindowControls),
-                )
-            })
+                        .child(component::WindowControls)
+                    }),
+            )
             .child(body)
     }
 
