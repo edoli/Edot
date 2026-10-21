@@ -14,7 +14,7 @@ fn update_close_saves_dirty_notes_and_session(cx: &mut TestAppContext) {
             fs::read_to_string(this.book.file(&this.dir, fixture.ids[0])).unwrap(),
             "업데이트 전 보존할 메모"
         );
-        assert!(this.dir.join("session.bin").is_file());
+        assert!(this.dir.join(".edot/session.bin").is_file());
     });
 }
 

@@ -6,7 +6,7 @@ use std::{collections::HashSet, io, path::Path};
 pub const DEFAULT_SIDEBAR_WIDTH: i32 = 260;
 pub const MIN_SIDEBAR_WIDTH: i32 = 150;
 pub const MAX_SIDEBAR_WIDTH: i32 = 600;
-pub const FILE_NAME: &str = "session.bin";
+pub const FILE_PATH: &str = ".edot/session.bin";
 const MAGIC: &[u8; 4] = b"EDSN";
 const VERSION: u8 = 1;
 const HEADER_LEN: usize = 24;
@@ -40,7 +40,7 @@ impl Default for Session {
 
 impl Session {
     pub fn load(dir: &Path, book: &Notebook) -> Self {
-        std::fs::read(dir.join(FILE_NAME))
+        std::fs::read(dir.join(FILE_PATH))
             .ok()
             .and_then(|bytes| Self::parse(&bytes, book))
             .unwrap_or_default()
@@ -115,7 +115,7 @@ impl Session {
     }
 
     pub fn save(&self, dir: &Path) -> io::Result<()> {
-        replace_file(&dir.join(FILE_NAME), &self.encode()?)
+        replace_file(&dir.join(FILE_PATH), &self.encode()?)
     }
 
     fn encode(&self) -> io::Result<Vec<u8>> {
@@ -159,7 +159,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir_all(dir.join(".edot")).unwrap();
         dir
     }
 
@@ -277,10 +277,10 @@ mod tests {
         };
         session.save(&dir).unwrap();
         assert_eq!(Session::load(&dir, &book()), session);
-        std::fs::write(dir.join(FILE_NAME), b"damaged").unwrap();
+        std::fs::write(dir.join(FILE_PATH), b"damaged").unwrap();
         assert_eq!(Session::load(&dir, &book()), Session::default());
-        std::fs::remove_file(dir.join(FILE_NAME)).unwrap();
-        std::fs::create_dir(dir.join(FILE_NAME)).unwrap();
+        std::fs::remove_file(dir.join(FILE_PATH)).unwrap();
+        std::fs::create_dir(dir.join(FILE_PATH)).unwrap();
         assert_eq!(Session::load(&dir, &book()), Session::default());
         std::fs::remove_dir_all(dir).unwrap();
     }

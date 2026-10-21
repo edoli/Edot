@@ -120,8 +120,15 @@ fn space_open_initializes_and_restores_binary_session() {
         config: dir.join("config"),
     };
     let loaded = LoadedSpace::open(&paths).unwrap();
+    for file in ["tree.tsv", "session.bin", "space.ini", ".space.lock"] {
+        assert!(paths.space.join(".edot").join(file).is_file());
+        assert!(!paths.space.join(file).exists());
+    }
+    assert!(paths.space.join("notes").is_dir());
     assert_eq!(
-        fs::metadata(paths.space.join("session.bin")).unwrap().len(),
+        fs::metadata(paths.space.join(".edot/session.bin"))
+            .unwrap()
+            .len(),
         24
     );
     assert!(!paths.space.join("session.tsv").exists());
@@ -336,9 +343,9 @@ fn startup_failure_can_select_a_registered_space_without_saving_the_failed_space
 ) {
     let f = Fixture::new(cx);
     let broken = f.dir.join("broken-startup");
-    fs::create_dir(&broken).unwrap();
-    fs::write(broken.join("tree.tsv"), "broken index").unwrap();
-    fs::write(broken.join("session.bin"), "preserve session").unwrap();
+    fs::create_dir_all(broken.join(".edot")).unwrap();
+    fs::write(broken.join(".edot/tree.tsv"), "broken index").unwrap();
+    fs::write(broken.join(".edot/session.bin"), "preserve session").unwrap();
     f.update(cx, |this, window, cx| {
         let settings = Settings {
             font_size: 23,
@@ -372,11 +379,11 @@ fn startup_failure_can_select_a_registered_space_without_saving_the_failed_space
         assert!(!cx.global::<AppState>().settings.wrap);
     });
     assert_eq!(
-        fs::read_to_string(broken.join("tree.tsv")).unwrap(),
+        fs::read_to_string(broken.join(".edot/tree.tsv")).unwrap(),
         "broken index"
     );
     assert_eq!(
-        fs::read_to_string(broken.join("session.bin")).unwrap(),
+        fs::read_to_string(broken.join(".edot/session.bin")).unwrap(),
         "preserve session"
     );
     assert!(!broken.join("notes").exists());
@@ -391,14 +398,14 @@ fn startup_failure_can_retry_the_same_space_after_its_lock_is_released(cx: &mut 
     let note = book.add(0, "보존".into()).unwrap();
     fs::write(book.file(&locked, note), "locked note").unwrap();
     book.save(&locked).unwrap();
-    let index = fs::read(locked.join("tree.tsv")).unwrap();
+    let index = fs::read(locked.join(".edot/tree.tsv")).unwrap();
     f.update(cx, |this, window, cx| {
         *this = Edot::new(locked.clone(), Err("이미 열린 Space".into()), window, cx);
         assert!(!this.switch_space(locked.clone(), window, cx));
         assert!(this.startup_failed);
-        assert!(!locked.join("session.bin").exists());
+        assert!(!locked.join(".edot/session.bin").exists());
     });
-    assert_eq!(fs::read(locked.join("tree.tsv")).unwrap(), index);
+    assert_eq!(fs::read(locked.join(".edot/tree.tsv")).unwrap(), index);
     drop(lock);
     f.update(cx, |this, window, cx| {
         assert!(this.switch_space(locked.clone(), window, cx));
@@ -442,8 +449,8 @@ fn startup_failure_can_create_a_space_without_recreating_missing_paths_or_replac
         assert_eq!(this.dir, parent.join("새 Space 3"));
         assert!(this.book.notes.is_empty());
         assert!(this.open.is_empty());
-        assert!(this.dir.join("tree.tsv").is_file());
-        assert!(this.dir.join("session.bin").is_file());
+        assert!(this.dir.join(".edot/tree.tsv").is_file());
+        assert!(this.dir.join(".edot/session.bin").is_file());
         assert_eq!(this.current_space_name(), "새 Space 3");
     });
     assert!(!missing.exists());
@@ -461,8 +468,8 @@ fn startup_failure_can_create_a_space_without_recreating_missing_paths_or_replac
 fn failed_space_or_session_write_preserves_current_state(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let invalid = f.dir.join("invalid-space");
-    fs::create_dir(&invalid).unwrap();
-    fs::write(invalid.join("tree.tsv"), "corrupt tree").unwrap();
+    fs::create_dir_all(invalid.join(".edot")).unwrap();
+    fs::write(invalid.join(".edot/tree.tsv"), "corrupt tree").unwrap();
     f.update(cx, |this, window, cx| {
         let editor = this.active_editor().unwrap();
         assert!(!this.switch_space(invalid.clone(), window, cx));
@@ -484,14 +491,14 @@ fn failed_space_or_session_write_preserves_current_state(cx: &mut TestAppContext
             .unwrap()
             .1
             .update(cx, |input, cx| input.set_value("failed name", window, cx));
-        fs::create_dir(f.dir.join("space.ini")).unwrap();
+        fs::create_dir(f.dir.join(".edot/space.ini")).unwrap();
         this.finish_space_rename(window, cx);
         assert_eq!(this.current_space_name(), old_name);
         assert!(this.space_ui.rename.is_some());
         assert!(this.error.is_some());
         this.error = None;
         this.close_space_list(window, cx);
-        fs::create_dir(f.dir.join("session.tmp")).unwrap();
+        fs::create_dir(f.dir.join(".edot/session.tmp")).unwrap();
         let session = this.session.clone();
         this.set_collapsed(f.folder, true, cx);
         assert!(!this.collapsed.contains(&f.folder));
@@ -503,7 +510,7 @@ fn failed_space_or_session_write_preserves_current_state(cx: &mut TestAppContext
         assert!(!f.dir.join("new-space").exists());
     });
     assert_eq!(
-        fs::read_to_string(invalid.join("tree.tsv")).unwrap(),
+        fs::read_to_string(invalid.join(".edot/tree.tsv")).unwrap(),
         "corrupt tree"
     );
 }

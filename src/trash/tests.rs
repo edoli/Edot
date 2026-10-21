@@ -10,7 +10,7 @@ fn permanent_deletion_removes_only_the_confirmed_subtree_and_keeps_live_notes() 
         entries.iter().find(|e| e.note.id == root).unwrap(),
     );
     let keys: Vec<_> = selected.iter().map(Entry::key).collect();
-    let tree = fs::read(data.0.join("tree.tsv")).unwrap();
+    let tree = fs::read(data.0.join(".edot/tree.tsv")).unwrap();
     let notes = book.notes.clone();
     let result = permanently_delete(&data.0, &keys).unwrap();
     assert_eq!(result.count, 2);
@@ -21,7 +21,7 @@ fn permanent_deletion_removes_only_the_confirmed_subtree_and_keeps_live_notes() 
         assert!(!entry.metadata(&data.0).exists());
     }
     assert_eq!(book.notes, notes);
-    assert_eq!(fs::read(data.0.join("tree.tsv")).unwrap(), tree);
+    assert_eq!(fs::read(data.0.join(".edot/tree.tsv")).unwrap(), tree);
     assert_eq!(
         fs::read_to_string(book.file(&data.0, other)).unwrap(),
         "보존"
@@ -146,6 +146,7 @@ impl Data {
         ));
         fs::create_dir(&path).unwrap();
         fs::create_dir(path.join("notes")).unwrap();
+        fs::create_dir(path.join(".edot")).unwrap();
         Self(path)
     }
 }
@@ -254,18 +255,18 @@ fn failed_restore_keeps_the_archive_model_and_index_and_allows_retry() {
     let entries = list(&data.0).unwrap();
     let root_entry = entries.iter().find(|e| e.note.id == root).unwrap();
     let model = book.notes.clone();
-    let index = fs::read(data.0.join("tree.tsv")).unwrap();
-    fs::create_dir(data.0.join("tree.tmp")).unwrap();
+    let index = fs::read(data.0.join(".edot/tree.tsv")).unwrap();
+    fs::create_dir(data.0.join(".edot/tree.tmp")).unwrap();
     assert!(restore(&mut book, &data.0, &root_entry.key()).is_err());
     assert_eq!(book.notes, model);
-    assert_eq!(fs::read(data.0.join("tree.tsv")).unwrap(), index);
+    assert_eq!(fs::read(data.0.join(".edot/tree.tsv")).unwrap(), index);
     assert!(!book.file(&data.0, root).exists());
     assert!(!book.file(&data.0, child).exists());
     for entry in &entries {
         assert_eq!(entry.body(&data.0).is_file(), !entry.note.is_folder());
         assert!(entry.metadata(&data.0).is_file());
     }
-    fs::remove_dir(data.0.join("tree.tmp")).unwrap();
+    fs::remove_dir(data.0.join(".edot/tree.tmp")).unwrap();
     restore(&mut book, &data.0, &root_entry.key()).unwrap();
 }
 

@@ -10,7 +10,7 @@ fn permanent_delete_requires_confirmation_and_keeps_live_notes(cx: &mut TestAppC
         this.show_trash(window, cx);
     });
     cx.run_until_parked();
-    let tree = fs::read(f.dir.join("tree.tsv")).unwrap();
+    let tree = fs::read(f.dir.join(".edot/tree.tsv")).unwrap();
     let live = fs::read(f.dir.join(format!("notes/{}.txt", f.ids[1]))).unwrap();
     f.update(cx, |this, window, cx| {
         this.trash_browser
@@ -47,7 +47,7 @@ fn permanent_delete_requires_confirmation_and_keeps_live_notes(cx: &mut TestAppC
     f.press(cx, "enter");
     cx.run_until_parked();
     assert!(crate::trash::deletion_keys(&f.dir).unwrap().is_empty());
-    assert_eq!(fs::read(f.dir.join("tree.tsv")).unwrap(), tree);
+    assert_eq!(fs::read(f.dir.join(".edot/tree.tsv")).unwrap(), tree);
     assert_eq!(
         fs::read(f.dir.join(format!("notes/{}.txt", f.ids[1]))).unwrap(),
         live
@@ -70,7 +70,7 @@ fn empty_bin_confirms_a_snapshot_and_preserves_unrecognized_files(cx: &mut TestA
         this.show_trash(window, cx);
     });
     cx.run_until_parked();
-    let index = fs::read(f.dir.join("tree.tsv")).unwrap();
+    let index = fs::read(f.dir.join(".edot/tree.tsv")).unwrap();
     fs::write(f.dir.join("trash/unknown.txt"), "preserve").unwrap();
     let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
     visual.update(|w, cx| w.render_frame(cx));
@@ -105,7 +105,7 @@ fn empty_bin_confirms_a_snapshot_and_preserves_unrecognized_files(cx: &mut TestA
         fs::read_to_string(f.dir.join("trash/unknown.txt")).unwrap(),
         "preserve"
     );
-    assert_eq!(fs::read(f.dir.join("tree.tsv")).unwrap(), index);
+    assert_eq!(fs::read(f.dir.join(".edot/tree.tsv")).unwrap(), index);
     f.press(cx, "ctrl-shift-delete");
     f.update(cx, |_, w, cx| assert!(!w.has_active_dialog(cx)));
     f.press(cx, "escape");
@@ -215,7 +215,7 @@ fn empty_bin_and_failed_restore_remain_safe_to_close(cx: &mut TestAppContext) {
         this.show_trash(window, cx);
     });
     cx.run_until_parked();
-    fs::create_dir(f.dir.join("tree.tmp")).unwrap();
+    fs::create_dir(f.dir.join(".edot/tree.tmp")).unwrap();
     f.press(cx, "ctrl-enter");
     f.update(cx, |this, _, cx| {
         assert!(this.book.get(f.ids[1]).is_none());

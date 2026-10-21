@@ -123,10 +123,10 @@ pub fn create(parent: &Path) -> io::Result<PathBuf> {
     Err(io::Error::other("새 Space 폴더 이름을 만들지 못했습니다."))
 }
 
-const METADATA_FILE: &str = "space.ini";
+const METADATA_PATH: &str = ".edot/space.ini";
 
 fn metadata(path: &Path) -> io::Result<crate::settings::ini::Document> {
-    let text = match std::fs::read_to_string(path.join(METADATA_FILE)) {
+    let text = match std::fs::read_to_string(path.join(METADATA_PATH)) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(error),
@@ -164,23 +164,24 @@ pub fn rename(path: &Path, name: &str) -> io::Result<()> {
     if !path.is_dir() {
         return Err(io::Error::other("Space 폴더가 존재하지 않습니다."));
     }
+    std::fs::create_dir_all(path.join(".edot"))?;
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(path.join(".space.lock"))?;
+        .open(path.join(".edot/.space.lock"))?;
     lock.lock()?;
     let document = metadata(path)?;
     let quoted = name.trim().replace('\\', "\\\\").replace('"', "\\\"");
     let text =
         document.updated_values(&[("version", "1".into()), ("name", format!("\"{quoted}\""))]);
-    replace_config_file(&path.join(METADATA_FILE), text.as_bytes())
+    replace_config_file(&path.join(METADATA_PATH), text.as_bytes())
 }
 
 pub fn initialize_metadata(path: &Path) -> io::Result<()> {
     let name = read_name(path)?;
-    if !path.join(METADATA_FILE).try_exists()? {
+    if !path.join(METADATA_PATH).try_exists()? {
         rename(path, &name)?;
     }
     Ok(())
@@ -370,9 +371,9 @@ mod tests {
         std::fs::create_dir(&second).unwrap();
         std::fs::write(first.join("memo.txt"), "keep me").unwrap();
         initialize_metadata(&first).unwrap();
-        assert!(first.join("space.ini").is_file());
+        assert!(first.join(".edot/space.ini").is_file());
         std::fs::write(
-            first.join(METADATA_FILE),
+            first.join(METADATA_PATH),
             "# keep\r\nversion = 1\r\nname = \"first\" # label\r\ncustom = yes\r\n",
         )
         .unwrap();
@@ -387,7 +388,7 @@ mod tests {
         Registry::register(&config, &first.join(".")).unwrap();
         let label = r#"한글 \ "이름" # ; 🙂"#;
         rename(&first, label).unwrap();
-        let metadata = std::fs::read_to_string(first.join(METADATA_FILE)).unwrap();
+        let metadata = std::fs::read_to_string(first.join(METADATA_PATH)).unwrap();
         assert!(metadata.contains("# keep\r\n"));
         assert!(metadata.contains("# label\r\ncustom = yes\r\n"));
         assert_eq!(read_name(&first).unwrap(), label);
@@ -419,10 +420,10 @@ mod tests {
             Registry::load(&config).unwrap().entries[0].path,
             std::fs::canonicalize(&second).unwrap()
         );
-        std::fs::write(first.join(METADATA_FILE), "version = 9\nname = old\n").unwrap();
+        std::fs::write(first.join(METADATA_PATH), "version = 9\nname = old\n").unwrap();
         assert!(rename(&first, "new").is_err());
         assert_eq!(
-            std::fs::read_to_string(first.join(METADATA_FILE)).unwrap(),
+            std::fs::read_to_string(first.join(METADATA_PATH)).unwrap(),
             "version = 9\nname = old\n"
         );
         std::fs::write(config.join(Registry::FILE), "bad list").unwrap();

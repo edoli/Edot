@@ -1,4 +1,4 @@
-//! Space directory notifications. Only tree.tsv and numeric note files are relevant.
+//! Space directory notifications. Only .edot/tree.tsv and numeric note files are relevant.
 use crate::model::NoteId;
 use std::{
     collections::HashSet,
@@ -44,9 +44,9 @@ impl Changes {
             return;
         }
         let name = name.replace('\\', "/").to_ascii_lowercase();
-        if name == "tree.tsv" {
+        if name == ".edot/tree.tsv" {
             self.tree = true;
-        } else if name == "notes" {
+        } else if name == "notes" || name == ".edot" {
             self.rescan = true;
         } else if let Some(name) = name.strip_prefix("notes/")
             && let Some(id) = name
@@ -323,9 +323,11 @@ mod native {
                 .collect();
             let name = String::from_utf16_lossy(&wide);
             let action = u32::from_le_bytes(header[4..8].try_into().unwrap());
-            // Creating a child also touches the notes directory's timestamp.
+            // Creating a child also touches its directory's timestamp.
             // The child's own notification is sufficient for that case.
-            if !name.eq_ignore_ascii_case("notes") || action != FILE_ACTION_MODIFIED {
+            if action != FILE_ACTION_MODIFIED
+                || !(name.eq_ignore_ascii_case("notes") || name.eq_ignore_ascii_case(".edot"))
+            {
                 changes.path(&name);
             }
             if next == 0 {
@@ -357,6 +359,7 @@ mod native {
                     .as_nanos()
             ));
             std::fs::create_dir_all(dir.join("notes")).unwrap();
+            std::fs::create_dir(dir.join(".edot")).unwrap();
             let (watcher, events) = Watcher::new(&dir).unwrap();
             let wait = |predicate: &dyn Fn(&Changes) -> bool| {
                 let start = Instant::now();
@@ -387,16 +390,22 @@ mod native {
             wait(&|changes| changes.notes.contains(&7) && changes.notes.contains(&8));
             std::fs::remove_file(dir.join("notes/8.txt")).unwrap();
             wait(&|changes| changes.notes.contains(&8));
-            std::fs::write(dir.join("tree.tmp"), "EDOT4\n").unwrap();
-            std::fs::rename(dir.join("tree.tmp"), dir.join("tree.tsv")).unwrap();
+            std::fs::write(dir.join(".edot/tree.tmp"), "EDOT4\n").unwrap();
+            std::fs::rename(dir.join(".edot/tree.tmp"), dir.join(".edot/tree.tsv")).unwrap();
             wait(&|changes| changes.tree);
             std::thread::sleep(Duration::from_millis(30));
             let _ = events.take();
             std::fs::write(dir.join("session.tsv"), "session").unwrap();
-            std::fs::write(dir.join("session.bin"), "session").unwrap();
+            std::fs::write(dir.join("tree.tsv"), "ignored root index").unwrap();
+            std::fs::write(dir.join(".edot/session.bin"), "session").unwrap();
+            std::fs::write(dir.join(".edot/space.ini"), "name = test").unwrap();
+            std::fs::write(dir.join(".edot/.space.lock"), "").unwrap();
+            std::fs::write(dir.join(".edot/tree.tmp"), "partial index").unwrap();
             std::fs::write(dir.join("settings.ini"), "settings").unwrap();
             std::thread::sleep(Duration::from_millis(50));
             assert!(events.take().is_none());
+            std::fs::rename(dir.join(".edot"), dir.join("metadata-moved")).unwrap();
+            wait(&|changes| changes.rescan);
             let start = Instant::now();
             drop(watcher); // Cancels a pending native read, joins and closes handles.
             assert!(start.elapsed() < Duration::from_secs(2));

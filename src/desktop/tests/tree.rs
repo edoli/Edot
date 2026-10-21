@@ -44,10 +44,10 @@ fn folders_have_no_editors_or_bodies_and_support_creation_grouping_and_restore(
         assert!(this.book.is_folder(nested));
         assert_eq!(this.session.active, Some(child));
         let before = this.book.notes.clone();
-        fs::create_dir(this.dir.join("tree.tmp")).unwrap();
+        fs::create_dir(this.dir.join(".edot/tree.tmp")).unwrap();
         this.group_notes(&[child, nested], window, cx);
         assert_eq!(this.book.notes, before);
-        fs::remove_dir(this.dir.join("tree.tmp")).unwrap();
+        fs::remove_dir(this.dir.join(".edot/tree.tmp")).unwrap();
         this.error = None;
         this.group_notes(&[child, nested], window, cx);
         nested
@@ -448,7 +448,7 @@ fn rename_pasted_tabs_and_newlines_become_spaces(cx: &mut TestAppContext) {
         );
         assert!(!this.open[0].dirty);
     });
-    let index = fs::read_to_string(f.dir.join("tree.tsv")).unwrap();
+    let index = fs::read_to_string(f.dir.join(".edot/tree.tsv")).unwrap();
     assert!(index.starts_with("EDOT5\n"));
     assert!(index.contains("\t한글 제목 새 줄 끝 😀\n"));
     assert_eq!(

@@ -41,10 +41,10 @@ impl LoadedSpace {
         let _span = startup::span("notebook.load");
         let book = Notebook::load(&paths.space)?;
         let session = Session::load(&paths.space, &book);
-        if !paths.space.join("tree.tsv").try_exists()? {
+        if !paths.space.join(".edot/tree.tsv").try_exists()? {
             book.save(&paths.space)?;
         }
-        if !paths.space.join(crate::session::FILE_NAME).try_exists()? {
+        if !paths.space.join(crate::session::FILE_PATH).try_exists()? {
             session.save(&paths.space)?;
         }
         space::initialize_metadata(&paths.space)?;

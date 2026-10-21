@@ -97,6 +97,7 @@ pub struct Notebook {
 
 impl Notebook {
     pub fn load(dir: &Path) -> io::Result<Self> {
+        fs::create_dir_all(dir.join(".edot"))?;
         fs::create_dir_all(dir.join("notes"))?;
         Self::read_index(dir, true)
     }
@@ -108,7 +109,7 @@ impl Notebook {
     }
 
     fn read_index(dir: &Path, recover: bool) -> io::Result<Self> {
-        let path = dir.join("tree.tsv");
+        let path = dir.join(".edot/tree.tsv");
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) if recover && error.kind() == io::ErrorKind::NotFound => {
@@ -252,7 +253,7 @@ impl Notebook {
                 n.title
             ));
         }
-        replace_file(&dir.join("tree.tsv"), text.as_bytes())
+        replace_file(&dir.join(".edot/tree.tsv"), text.as_bytes())
     }
 
     pub fn file(&self, dir: &Path, id: NoteId) -> PathBuf {
@@ -552,6 +553,7 @@ mod tests {
             SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         fs::create_dir_all(dir.join("notes")).unwrap();
+        fs::create_dir(dir.join(".edot")).unwrap();
         dir
     }
 
@@ -596,7 +598,7 @@ mod tests {
     fn random_ids_survive_reload_and_reject_collisions_without_mutation() {
         let dir = loader_test_dir("random-ids");
         let original = "EDOT5\nAAAAAAAAAAc\tAAAAAAAAAAA\t0\tfolder\told\nAAAAAAAAAAo\tAAAAAAAAAAA\t1\tfolder\tten\n__________8\tAAAAAAAAAAo\t0\tnote\tmax\n";
-        fs::write(dir.join("tree.tsv"), original).unwrap();
+        fs::write(dir.join(".edot/tree.tsv"), original).unwrap();
         fs::write(dir.join("notes/7.txt"), "existing body").unwrap();
         let mut book = Notebook::load(&dir).unwrap();
         let high = (1u64 << 63) + 7;
@@ -630,9 +632,12 @@ mod tests {
                 assert!(ids.insert(id));
             }
         }
-        assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(dir.join(".edot/tree.tsv")).unwrap(),
+            original
+        );
         book.save(&dir).unwrap();
-        let saved = fs::read_to_string(dir.join("tree.tsv")).unwrap();
+        let saved = fs::read_to_string(dir.join(".edot/tree.tsv")).unwrap();
         assert!(saved.starts_with("EDOT5\n"));
         assert!(saved.contains("AAAAAAAAAAo\tAAAAAAAAAAA\t1\tfolder\tten\n"));
         assert!(saved.contains("__________8\tAAAAAAAAAAo\t0\tnote\tmax\n"));
@@ -655,7 +660,7 @@ mod tests {
     fn plain_titles_and_decimal_order_round_trip() {
         let dir = loader_test_dir("plain-titles");
         let text = "EDOT5\r\nAAAAAAAAABA\tAAAAAAAAAAA\t10\tfolder\t한글 😀 제목\r\nAAAAAAAAAAI\tAAAAAAAAABA\t0\tnote\t414243\r\nAAAAAAAAAAM\tAAAAAAAAAAA\t1\tnote\t\r\n";
-        fs::write(dir.join("tree.tsv"), text).unwrap();
+        fs::write(dir.join(".edot/tree.tsv"), text).unwrap();
         let mut book = Notebook::reload(&dir).unwrap();
         assert_eq!(book.get(16).unwrap().title, "한글 😀 제목");
         assert_eq!(book.get(16).unwrap().order, 10);
@@ -664,10 +669,16 @@ mod tests {
         assert_eq!(book.file(&dir, 16), dir.join("notes/16.txt"));
         assert_eq!(book.get(2).unwrap().title, "414243");
         assert_eq!(book.get(3).unwrap().title, "");
-        assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), text);
+        assert_eq!(
+            fs::read_to_string(dir.join(".edot/tree.tsv")).unwrap(),
+            text
+        );
         book.save(&dir).unwrap();
         let saved = text.replace("\r\n", "\n");
-        assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), saved);
+        assert_eq!(
+            fs::read_to_string(dir.join(".edot/tree.tsv")).unwrap(),
+            saved
+        );
         assert_eq!(Notebook::load(&dir).unwrap().notes, book.notes);
         for title in ["탭\t제목", "줄\r\n바꿈"] {
             book.get_mut(16).unwrap().title = title.into();
@@ -675,7 +686,10 @@ mod tests {
                 book.save(&dir).unwrap_err().kind(),
                 io::ErrorKind::InvalidInput
             );
-            assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), saved);
+            assert_eq!(
+                fs::read_to_string(dir.join(".edot/tree.tsv")).unwrap(),
+                saved
+            );
         }
         fs::remove_dir_all(dir).unwrap();
     }
@@ -685,8 +699,8 @@ mod tests {
         let dir = loader_test_dir("reload");
         fs::write(dir.join("notes/7.txt"), "leftover body").unwrap();
         assert!(Notebook::reload(&dir).is_err());
-        assert!(!dir.join("tree.tsv").exists());
-        fs::write(dir.join("tree.tsv"), "EDOT5\n").unwrap();
+        assert!(!dir.join(".edot/tree.tsv").exists());
+        fs::write(dir.join(".edot/tree.tsv"), "EDOT5\n").unwrap();
         assert!(Notebook::reload(&dir).unwrap().notes.is_empty());
         let recovered = Notebook::load(&dir).unwrap();
         assert_eq!(recovered.notes[0].id, 7);
@@ -714,10 +728,13 @@ mod tests {
             "EDOT5\nAAAAAAAAAAF\tAAAAAAAAAAA\t0\tnote\tinvalid padding bits\n",
             "EDOT5\nAAAAAAAAAAE\t___________\t0\tnote\tinvalid parent\n",
         ] {
-            fs::write(dir.join("tree.tsv"), text).unwrap();
+            fs::write(dir.join(".edot/tree.tsv"), text).unwrap();
             let error = Notebook::load(&dir).err().expect("invalid tree accepted");
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{text}");
-            assert_eq!(fs::read_to_string(dir.join("tree.tsv")).unwrap(), text);
+            assert_eq!(
+                fs::read_to_string(dir.join(".edot/tree.tsv")).unwrap(),
+                text
+            );
             assert_eq!(
                 fs::read_to_string(dir.join("notes/9.txt")).unwrap(),
                 "unchanged orphan"
@@ -749,9 +766,9 @@ mod tests {
         book.get_mut(note).unwrap().parent = folder;
         book.get_mut(folder).unwrap().kind = NoteKind::Note;
         book.save(&dir).unwrap();
-        let bytes = fs::read(dir.join("tree.tsv")).unwrap();
+        let bytes = fs::read(dir.join(".edot/tree.tsv")).unwrap();
         assert!(Notebook::load(&dir).is_err());
-        assert_eq!(fs::read(dir.join("tree.tsv")).unwrap(), bytes);
+        assert_eq!(fs::read(dir.join(".edot/tree.tsv")).unwrap(), bytes);
         assert_eq!(fs::read_to_string(book.file(&dir, note)).unwrap(), "본문");
         fs::remove_dir_all(dir).unwrap();
     }
@@ -807,13 +824,13 @@ mod tests {
             format!("text {child}")
         );
         fs::write(book.file(&dir, b), format!("text {b}")).unwrap();
-        fs::create_dir(dir.join("tree.tmp")).unwrap(); // Force index write failure.
+        fs::create_dir(dir.join(".edot/tree.tmp")).unwrap(); // Force index write failure.
         assert!(book.trash_notes(&dir, &[a, child, b]).is_err());
         assert_eq!(book.notes, previous);
         for id in [child, b] {
             assert!(book.file(&dir, id).is_file());
         }
-        fs::remove_dir(dir.join("tree.tmp")).unwrap();
+        fs::remove_dir(dir.join(".edot/tree.tmp")).unwrap();
         assert_eq!(
             book.trash_notes(&dir, &[b, child, a, a]).unwrap(),
             vec![a, child, b]
