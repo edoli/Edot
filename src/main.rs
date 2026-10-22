@@ -2,6 +2,7 @@
 
 mod desktop;
 mod image_http;
+#[cfg(target_os = "windows")]
 mod platform;
 mod startup;
 mod update;
@@ -9,7 +10,7 @@ mod widgets;
 
 use edot::{
     datetime, drag, editing, global_search, model, search, selection, session, settings, space,
-    storage, tabs, trash, watch,
+    storage, store_lock, tabs, trash, watch,
 };
 
 fn main() {

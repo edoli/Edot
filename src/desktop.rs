@@ -5,13 +5,13 @@ use crate::{
     editing::{self, CharRange},
     global_search::{self, MatchKey, ResultRow, VisibleRow},
     model::{NoteId, Notebook},
-    platform::StoreLock,
     search::{Cache, Pattern},
     selection::Selection,
     session::Session,
     settings::{Settings, ThemeMode},
     space, startup,
     storage::replace_file,
+    store_lock::StoreLock,
     tabs::CloseMode,
 };
 use gpui::{prelude::*, *};

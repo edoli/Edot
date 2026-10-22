@@ -22,6 +22,10 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globa
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_platform = { git = "https://github.com/edoli/zed.git", rev = "dd0d5e2eeb326ef1ff565a5189fe612f3f3de48d", default-features = false, features = ["wayland", "x11"] }
 
+[target.'cfg(unix)'.dependencies]
+# Reuse GPUI's libc for local timezone conversion without a date/time framework.
+libc = "0.2.190"
+
 [dev-dependencies]
 gpui = { git = "https://github.com/edoli/zed.git", rev = "dd0d5e2eeb326ef1ff565a5189fe612f3f3de48d", default-features = false, features = ["test-support"] }
 
