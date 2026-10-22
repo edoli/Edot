@@ -158,18 +158,12 @@ pub fn install_scope(exe: &Path) -> Option<InstallScope> {
     ] {
         if registered_directory(root)
             .and_then(|path| path.canonicalize().ok())
-            .is_some_and(|path| same_path(&path, &directory))
+            .is_some_and(|path| crate::space::same_path(&path, &directory))
         {
             return Some(scope);
         }
     }
     None
-}
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    left.as_os_str()
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
 }
 
 fn registered_directory(root: HKEY) -> Option<PathBuf> {
