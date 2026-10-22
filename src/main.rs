@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod desktop;
 mod image_http;
