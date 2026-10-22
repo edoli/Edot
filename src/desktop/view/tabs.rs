@@ -14,10 +14,11 @@ impl Edot {
             } else {
                 36.
             };
-        let controls_width = if window.is_fullscreen() {
-            0.
-        } else {
+        let inline_controls = component::has_inline_window_controls(window);
+        let controls_width = if inline_controls {
             component::WINDOW_CONTROLS_WIDTH + WINDOW_DRAG_WIDTH
+        } else {
+            0.
         };
         // Reserve 40px each for Settings and the trailing new-note button.
         let available =
@@ -238,7 +239,9 @@ impl Edot {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .window_control_area(WindowControlArea::Drag),
+                    .when(cfg!(target_os = "windows"), |area| {
+                        area.window_control_area(WindowControlArea::Drag)
+                    }),
             )
             .child(
                 tool("preferences", IconName::Settings, "설정 · Ctrl+,")
@@ -248,7 +251,7 @@ impl Edot {
                     .selected(self.settings_visible)
                     .on_click(cx.listener(|this, _, window, cx| this.show_settings(window, cx))),
             )
-            .when(!window.is_fullscreen(), |row| {
+            .when(inline_controls, |row| {
                 row.child(
                     div()
                         .w(px(WINDOW_DRAG_WIDTH))

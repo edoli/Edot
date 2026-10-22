@@ -46,7 +46,8 @@ mod tree;
 impl Render for Edot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.startup_failed {
-            return self.space_recovery_view(window, cx);
+            let content = self.space_recovery_view(window, cx).into_any_element();
+            return self.window_frame(content, window, cx);
         }
         let (sidebar_progress, sidebar_moving) = self.sidebar_motion.tick(
             self.session.sidebar_visible,
@@ -349,6 +350,31 @@ impl Render for Edot {
                     ),
             );
         }
-        root
+        self.window_frame(root.into_any_element(), window, cx)
+    }
+}
+
+impl Edot {
+    fn window_frame(
+        &self,
+        content: AnyElement,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        #[cfg(any(target_os = "linux", test))]
+        {
+            let view = _cx.entity().downgrade();
+            component::linux_window_frame(
+                content,
+                format!("Edot — {}", self.current_space_name()).into(),
+                _window,
+                _cx,
+                move |window, cx| {
+                    let _ = view.update(cx, |this, cx| this.close_window(window, cx));
+                },
+            )
+        }
+        #[cfg(not(any(target_os = "linux", test)))]
+        content
     }
 }

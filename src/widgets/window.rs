@@ -1,12 +1,24 @@
 use super::*;
 
+#[cfg(any(target_os = "linux", test))]
+pub(crate) mod linux;
+
+#[cfg(target_os = "windows")]
 const CAPTION_BUTTON_WIDTH: f32 = 46.;
+#[cfg(target_os = "windows")]
 pub const WINDOW_CONTROLS_WIDTH: f32 = CAPTION_BUTTON_WIDTH * 3.;
+#[cfg(not(target_os = "windows"))]
+pub const WINDOW_CONTROLS_WIDTH: f32 = 0.;
+
+pub fn has_inline_window_controls(window: &Window) -> bool {
+    cfg!(target_os = "windows") && !window.is_fullscreen()
+}
 
 #[derive(IntoElement)]
 pub struct WindowControls;
 
 impl RenderOnce for WindowControls {
+    #[cfg(target_os = "windows")]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let maximized = window.is_maximized();
         let colors = cx.theme().colors;
@@ -65,6 +77,11 @@ impl RenderOnce for WindowControls {
                 "닫기 · Alt+F4",
             ))
     }
+
+    #[cfg(not(target_os = "windows"))]
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+    }
 }
 
 pub fn open_window<V: Render + 'static>(
@@ -74,6 +91,7 @@ pub fn open_window<V: Render + 'static>(
 ) -> Result<(AnyWindowHandle, Entity<V>)> {
     let mut view = None;
     let window = cx.open_window(options, |window, cx| {
+        #[cfg(target_os = "windows")]
         if let Err(error) = crate::platform::suppress_caption_tooltips(window) {
             eprintln!("창 컨트롤 툴팁을 비활성화하지 못했습니다: {error}");
         }

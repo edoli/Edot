@@ -102,6 +102,12 @@ impl AssetSource for Assets {
             "refresh-cw" => include_bytes!("../../assets/icons/refresh-cw.svg"),
             "chevrons-up-down" => include_bytes!("../../assets/icons/chevrons-up-down.svg"),
             "arrow-right" => include_bytes!("../../assets/icons/arrow-right.svg"),
+            #[cfg(any(target_os = "linux", test))]
+            "linux-window-minimize" => include_bytes!("../../assets/icons/linux/minimize.svg"),
+            #[cfg(any(target_os = "linux", test))]
+            "linux-window-maximize" => include_bytes!("../../assets/icons/linux/maximize.svg"),
+            #[cfg(any(target_os = "linux", test))]
+            "linux-window-restore" => include_bytes!("../../assets/icons/linux/restore.svg"),
             _ => return Ok(None),
         };
         Ok(Some(std::borrow::Cow::Borrowed(bytes)))

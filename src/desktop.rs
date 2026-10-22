@@ -275,6 +275,9 @@ impl Edot {
                 if cx.global::<AppState>().settings.theme == ThemeMode::System {
                     this.apply_theme(window, cx);
                 }
+                // Wayland also reports decoration negotiation through this callback.
+                #[cfg(target_os = "linux")]
+                cx.notify();
             }));
         this.subscriptions
             .push(cx.observe_window_activation(window, |this, window, cx| {
@@ -302,23 +305,17 @@ impl Edot {
                 }
             }));
         let weak = cx.entity().downgrade();
+        #[cfg(any(target_os = "linux", test))]
+        this.subscriptions
+            .push(window.observe_button_layout_changed({
+                let weak = weak.clone();
+                move |_, cx| {
+                    let _ = weak.update(cx, |_, cx| cx.notify());
+                }
+            }));
         window.on_window_should_close(cx, move |window, cx| {
-            weak.update(cx, |this, cx| {
-                if this.startup_failed {
-                    return true;
-                }
-                if !this.finish_rename(true, false, window, cx) || !this.save_all(cx) {
-                    return false;
-                }
-                match this.save_session() {
-                    Ok(()) => true,
-                    Err(error) => {
-                        this.fail("세션을 저장하지 못했습니다", error, cx);
-                        false
-                    }
-                }
-            })
-            .unwrap_or(true)
+            weak.update(cx, |this, cx| this.prepare_window_close(window, cx))
+                .unwrap_or(true)
         });
         let active = this.session.active;
         this.session.active = None;
@@ -338,6 +335,29 @@ impl Edot {
             this.start_file_sync(window, cx);
         }
         this
+    }
+
+    fn prepare_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.startup_failed {
+            return true;
+        }
+        if !self.finish_rename(true, false, window, cx) || !self.save_all(cx) {
+            return false;
+        }
+        match self.save_session() {
+            Ok(()) => true,
+            Err(error) => {
+                self.fail("세션을 저장하지 못했습니다", error, cx);
+                false
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.prepare_window_close(window, cx) {
+            window.remove_window();
+        }
     }
 
     fn fail(&mut self, action: &str, error: impl std::fmt::Display, cx: &mut Context<Self>) {
@@ -390,9 +410,11 @@ pub fn run() {
                 window_min_size: Some(size(px(560.), px(360.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some(format!("Edot — {}", space::name(&dir)).into()),
-                    appears_transparent: true,
+                    appears_transparent: cfg!(target_os = "windows"),
                     ..Default::default()
                 }),
+                #[cfg(target_os = "linux")]
+                window_decorations: Some(WindowDecorations::Server),
                 ..Default::default()
             };
             if let Err(error) = component::open_window(options, cx, |window, cx| {

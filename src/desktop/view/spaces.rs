@@ -72,7 +72,7 @@ impl Edot {
                         div()
                             .flex_1()
                             .h_full()
-                            .when(!window.is_fullscreen(), |area| {
+                            .when(component::has_inline_window_controls(window), |area| {
                                 area.window_control_area(WindowControlArea::Drag)
                             }),
                     )
@@ -91,7 +91,7 @@ impl Edot {
                                     })),
                             ),
                     )
-                    .when(!window.is_fullscreen(), |row| {
+                    .when(component::has_inline_window_controls(window), |row| {
                         row.child(
                             div()
                                 .w(px(WINDOW_DRAG_WIDTH))

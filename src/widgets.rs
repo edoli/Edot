@@ -35,4 +35,6 @@ pub use button::{Button, Tooltip};
 pub use icon::{Assets, Icon, IconName};
 pub use switch::Switch;
 pub use theme::{ActiveTheme, Theme};
-pub use window::{WINDOW_CONTROLS_WIDTH, WindowControls, open_window};
+#[cfg(any(target_os = "linux", test))]
+pub use window::linux::frame as linux_window_frame;
+pub use window::{WINDOW_CONTROLS_WIDTH, WindowControls, has_inline_window_controls, open_window};

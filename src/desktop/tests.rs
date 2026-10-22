@@ -150,3 +150,4 @@ mod spaces;
 mod trash;
 mod tree;
 mod updates;
+mod window;
