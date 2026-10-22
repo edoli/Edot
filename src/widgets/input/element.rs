@@ -242,7 +242,7 @@ impl Render for InputState {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(|s, _: &SelectAll, w, cx| s.select_all(w, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
-            .on_scroll_wheel(cx.listener(|s, e: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(|s, e: &ScrollEvent, _, cx| {
                 if !e.modifiers.control {
                     let mut delta = e.delta.pixel_delta(s.line_height);
                     if e.modifiers.shift {

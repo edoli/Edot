@@ -45,42 +45,39 @@ impl Edot {
                     |bounds, _, _| bounds,
                     move |bounds, _, window, _| {
                         let weak = wheel_view.clone();
-                        window.on_mouse_event(
-                            move |event: &ScrollWheelEvent, phase, window, cx| {
-                                if phase != DispatchPhase::Capture
-                                    || !event.modifiers.control
-                                    || !bounds.contains(&event.position)
-                                    || window.has_active_dialog(cx)
+                        window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Capture
+                                || !event.modifiers.control
+                                || !bounds.contains(&event.position)
+                                || window.has_active_dialog(cx)
+                            {
+                                return;
+                            }
+                            let _ = weak.update(cx, |this, cx| {
+                                let panel_width = if this.settings_visible {
+                                    372.
+                                } else if this.find_visible {
+                                    452.
+                                } else {
+                                    0.
+                                };
+                                if this.error.is_some()
+                                    || panel_width > 0.
+                                        && event.position.x > bounds.right() - px(panel_width)
+                                        && event.position.y < bounds.top() + px(340.)
                                 {
                                     return;
                                 }
-                                let _ = weak.update(cx, |this, cx| {
-                                    let panel_width = if this.settings_visible {
-                                        372.
-                                    } else if this.find_visible {
-                                        452.
-                                    } else {
-                                        0.
-                                    };
-                                    if this.error.is_some()
-                                        || panel_width > 0.
-                                            && event.position.x > bounds.right() - px(panel_width)
-                                            && event.position.y < bounds.top() + px(340.)
-                                    {
-                                        return;
-                                    }
-                                    let delta = event.delta.pixel_delta(px(20.)).y;
-                                    if delta > px(0.) {
-                                        this.zoom = (this.zoom + ZOOM_STEP).min(ZOOM_MAX);
-                                    } else if delta < px(0.) {
-                                        this.zoom =
-                                            this.zoom.saturating_sub(ZOOM_STEP).max(ZOOM_MIN);
-                                    }
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                });
-                            },
-                        );
+                                let delta = event.delta.pixel_delta(px(20.)).y;
+                                if delta > px(0.) {
+                                    this.zoom = (this.zoom + ZOOM_STEP).min(ZOOM_MAX);
+                                } else if delta < px(0.) {
+                                    this.zoom = this.zoom.saturating_sub(ZOOM_STEP).max(ZOOM_MIN);
+                                }
+                                cx.stop_propagation();
+                                cx.notify();
+                            });
+                        });
                     },
                 )
                 .absolute()

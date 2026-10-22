@@ -4,26 +4,26 @@ version = "0.1.6"
 edition = "2024"
 
 [dependencies]
-gpui = { git = "https://github.com/edoli/zed.git", rev = "875c8a83520b79c27e0b097e7464ebb73c562414", default-features = false }
-gpui_platform = { git = "https://github.com/edoli/zed.git", rev = "875c8a83520b79c27e0b097e7464ebb73c562414", default-features = false }
+gpui = { git = "https://github.com/edoli/zed.git", rev = "dd0d5e2eeb326ef1ff565a5189fe612f3f3de48d", default-features = false }
+gpui_platform = { git = "https://github.com/edoli/zed.git", rev = "dd0d5e2eeb326ef1ff565a5189fe612f3f3de48d", default-features = false }
 unicode-segmentation = "1.12"
 regex-lite = "0.1.9"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 getrandom = "=0.3.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-gpui = { git = "https://github.com/edoli/zed.git", rev = "875c8a83520b79c27e0b097e7464ebb73c562414", default-features = false, features = ["windows-manifest"] }
-gpui_platform = { git = "https://github.com/edoli/zed.git", rev = "875c8a83520b79c27e0b097e7464ebb73c562414", default-features = false, features = ["deferred-fonts"] }
+gpui = { git = "https://github.com/edoli/zed.git", rev = "dd0d5e2eeb326ef1ff565a5189fe612f3f3de48d", default-features = false, features = ["windows-manifest"] }
+gpui_platform = { git = "https://github.com/edoli/zed.git", rev = "dd0d5e2eeb326ef1ff565a5189fe612f3f3de48d", default-features = false, features = ["deferred-fonts"] }
 raw-window-handle = "0.6.2"
 windows-core = "0.62.2"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Ole", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_SystemServices", "Win32_UI_Shell", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_Registry", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_Networking_WinHttp"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gpui_platform = { git = "https://github.com/edoli/zed.git", rev = "875c8a83520b79c27e0b097e7464ebb73c562414", default-features = false, features = ["wayland", "x11"] }
+gpui_platform = { git = "https://github.com/edoli/zed.git", rev = "dd0d5e2eeb326ef1ff565a5189fe612f3f3de48d", default-features = false, features = ["wayland", "x11"] }
 
 [dev-dependencies]
-gpui = { git = "https://github.com/edoli/zed.git", rev = "875c8a83520b79c27e0b097e7464ebb73c562414", default-features = false, features = ["test-support"] }
+gpui = { git = "https://github.com/edoli/zed.git", rev = "dd0d5e2eeb326ef1ff565a5189fe612f3f3de48d", default-features = false, features = ["test-support"] }
 
 [build-dependencies]
 # Runs on the build host; build.rs checks the target OS before embedding resources.
