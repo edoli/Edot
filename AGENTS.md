@@ -18,5 +18,5 @@
 
 - 사용자 변경을 보존하고 요청 범위에 맞게 수정한다. 임의 커밋·초기화나 불필요한 의존성 추가를 하지 않는다. 설명과 결과 보고는 한국어로 간결하게 한다.
 - `cargo fmt --check`로 형식을 확인한다. 변경 위험에 맞춰 기존 테스트와 Clippy를 실행한다.
-- **최종 빌드는 항상 `cargo build --release --target-dir target`**. 산출물은 `C:\Users\edoli\workspace\edot\edot-win\target\release\edot.exe`다.
+- **최종 빌드는 항상 `cargo build --release --target-dir target`**. 산출물은 `target\release\edot.exe`다.
 - 위 파일이 실행 중이라 빌드가 막히면 사용자가 허용한 대로 해당 경로의 프로세스만 종료하고 재빌드한다. 다른 경로의 실행 파일이나 무관한 프로세스는 종료하지 않는다.
