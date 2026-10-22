@@ -6,37 +6,23 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod paths;
+pub use paths::config_dir;
+
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub space: PathBuf,
     pub config: PathBuf,
 }
 
-pub fn config_dir() -> PathBuf {
-    std::env::var_os("EDOT_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            if let Some(path) = std::env::var_os("APPDATA") {
-                PathBuf::from(path).join("Edot")
-            } else if let Some(path) = std::env::var_os("LOCALAPPDATA") {
-                PathBuf::from(path).join("EdotConfig")
-            } else {
-                PathBuf::from("EdotConfig")
-            }
-        })
-}
-
 impl Paths {
     pub fn resolve() -> io::Result<Self> {
         let explicit = std::env::var_os("EDOT_SPACE_DIR").map(PathBuf::from);
-        let local = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
         Self::select(
             std::env::args_os().skip(1),
             config_dir(),
             explicit,
-            local.join("Edot/spaces/Default"),
+            paths::default_space(),
         )
     }
 
