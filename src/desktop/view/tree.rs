@@ -387,17 +387,17 @@ impl Edot {
                     cx.stop_propagation();
                 }),
             )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    if this.pressed == Some(id) {
-                        this.selection.single(id);
-                        this.pressed = None;
-                        cx.notify();
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.pressed == Some(id) {
+                    this.selection.single(id);
+                    this.pressed = None;
+                    if folder {
+                        this.set_collapsed(id, !this.collapsed.contains(&id), cx);
                     }
-                    cx.stop_propagation();
-                }),
-            )
+                    cx.notify();
+                }
+                cx.stop_propagation();
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {

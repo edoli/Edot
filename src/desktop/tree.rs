@@ -231,14 +231,14 @@ impl Edot {
             self.selection
                 .click(id, &visible, modifiers.control, modifiers.shift);
         }
-        self.pressed = preserve.then_some(id);
+        // Keep folder activation pending until a click completes. Starting a drag
+        // clears this state without changing the folder's expansion.
+        self.pressed = (preserve
+            || (!modifiers.control && !modifiers.shift && self.book.is_folder(id)))
+        .then_some(id);
         self.caret = Some(id);
-        if !modifiers.control && !modifiers.shift {
-            if self.book.is_folder(id) {
-                self.set_collapsed(id, !self.collapsed.contains(&id), cx);
-            } else {
-                self.open_tree_note(id, window, cx);
-            }
+        if !modifiers.control && !modifiers.shift && !self.book.is_folder(id) {
+            self.open_tree_note(id, window, cx);
         }
         self.tree_focus.focus(window, cx);
         cx.notify();
