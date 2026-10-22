@@ -1,6 +1,11 @@
 //! Shared light/dark palette and UI typography. Body typography belongs to Settings.
 use super::*;
+#[cfg(target_os = "windows")]
 pub const UI_FONT: &str = "Segoe UI";
+#[cfg(target_os = "macos")]
+pub const UI_FONT: &str = ".SystemUIFont";
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub const UI_FONT: &str = "DejaVu Sans";
 pub const UI_FONT_SIZE: f32 = 14.;
 pub const TAB_FONT_SIZE: f32 = 12.;
 pub const TREE_FONT_SIZE: f32 = 12.;

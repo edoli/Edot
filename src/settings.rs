@@ -6,7 +6,12 @@ use ini::Document;
 
 pub const SETTINGS_FILE: &str = "settings.ini";
 
+#[cfg(target_os = "windows")]
 pub const DEFAULT_FONT: &str = "Consolas";
+#[cfg(target_os = "macos")]
+pub const DEFAULT_FONT: &str = "Menlo";
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub const DEFAULT_FONT: &str = "DejaVu Sans Mono";
 pub const DEFAULT_FONT_SIZE: u32 = 14;
 pub const MIN_FONT_SIZE: u32 = 8;
 pub const MAX_FONT_SIZE: u32 = 72;
