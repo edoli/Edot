@@ -176,6 +176,7 @@ fn pasted_image_files_and_text_respect_editor_mode(cx: &mut TestAppContext) {
 
 // A real COM IDataObject exercises the same formats supplied by browser OLE
 // drags without sending input to a user's browser or desktop.
+#[cfg(windows)]
 mod native {
     use windows::{
         Win32::{
@@ -285,6 +286,7 @@ mod native {
 }
 
 #[gpui::test]
+#[cfg(windows)]
 fn browser_image_drops_show_positions_and_import_downloaded_images(cx: &mut TestAppContext) {
     use crate::desktop::image_drop;
     use std::{
