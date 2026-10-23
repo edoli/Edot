@@ -25,6 +25,11 @@ impl Focusable for SelectState {
     }
 }
 impl SelectState {
+    pub fn is_composing(&self, window: &Window, cx: &App) -> bool {
+        let search = self.search.read(cx);
+        search.is_composing() && search.focus_handle(cx).is_focused(window)
+    }
+
     pub fn new(
         items: Vec<SharedString>,
         initial: Option<usize>,
@@ -148,6 +153,9 @@ impl SelectState {
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         let search_focused = self.search.read(cx).focus_handle(cx).is_focused(window);
+        if event.prefer_character_input || search_focused && self.search.read(cx).is_composing() {
+            return;
+        }
         match key {
             "escape" if self.open => self.dismiss(window, cx),
             "tab" if self.open => {

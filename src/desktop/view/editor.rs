@@ -20,11 +20,9 @@ impl Edot {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child("생각을 가볍게 기록하세요"),
                 )
-                .child(
-                    div()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("노트를 선택하거나 Ctrl + N으로 새 노트를 만드세요"),
-                )
+                .child(div().text_color(cx.theme().muted_foreground).child(
+                    component::shortcuts::label("노트를 선택하거나 Ctrl+N으로 새 노트를 만드세요"),
+                ))
                 .into_any_element();
         };
         let font_size = cx.global::<AppState>().settings.font_size as f32 * self.zoom as f32
@@ -47,7 +45,7 @@ impl Edot {
                         let weak = wheel_view.clone();
                         window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
                             if phase != DispatchPhase::Capture
-                                || !event.modifiers.control
+                                || !component::shortcuts::primary(event.modifiers)
                                 || !bounds.contains(&event.position)
                                 || window.has_active_dialog(cx)
                             {
@@ -152,10 +150,10 @@ impl Edot {
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .child(
+                    .child(component::shortcuts::label(
                         self.tree_drag_description()
                             .unwrap_or_else(|| self.status.clone()),
-                    ),
+                    )),
             )
             .child(position)
             .child(

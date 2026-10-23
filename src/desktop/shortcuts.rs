@@ -12,6 +12,8 @@ const SECTIONS: &[ShortcutSection] = &[
         rows: &[
             ("F1", "단축키 열기 / 닫기"),
             ("F11", "전체화면 켜기 / 끄기"),
+            #[cfg(target_os = "macos")]
+            ("Cmd+Q / Cmd+Shift+W", "저장 후 앱 종료 / 창 닫기"),
             ("Ctrl+N", "새 노트 만들기"),
             ("Ctrl+Shift+N", "새 폴더 만들기"),
             ("Ctrl+S", "수정한 노트 저장"),
@@ -63,6 +65,8 @@ const SECTIONS: &[ShortcutSection] = &[
             ("↑ / ↓", "본문에서 위 / 아래 표시 줄로 이동"),
             ("Home / End", "현재 표시 줄의 처음 / 끝으로 이동"),
             ("Ctrl+Home / Ctrl+End", "문서 처음 / 끝으로 이동"),
+            #[cfg(target_os = "macos")]
+            ("Cmd+Backspace / Cmd+Delete", "표시 줄의 처음 / 끝까지 삭제"),
             ("PageUp / PageDown", "본문에서 한 화면 위 / 아래로 이동"),
             ("Shift+이동 키", "커서 이동 범위를 선택 (Ctrl 조합 포함)"),
             ("Backspace / Delete", "선택 영역 또는 앞 / 뒤 문자 삭제"),
@@ -251,10 +255,9 @@ impl ShortcutHelp {
             "escape" => self.close(window, cx),
             "enter" if !search_focused => self.close(window, cx),
             "f1" if !event.is_held => self.close(window, cx),
-            "f" if event.keystroke.modifiers.control
+            "f" if component::shortcuts::primary(event.keystroke.modifiers)
                 && !event.keystroke.modifiers.shift
-                && !event.keystroke.modifiers.alt
-                && !event.keystroke.modifiers.platform =>
+                && !event.keystroke.modifiers.alt =>
             {
                 self.search.update(cx, |search, cx| {
                     search.select_all(window, cx);
@@ -332,7 +335,7 @@ fn table_row(
                 } else {
                     Role::Cell
                 })
-                .child(keys),
+                .child(component::shortcuts::label(keys)),
         )
         .child(
             div()
@@ -371,7 +374,7 @@ impl Render for ShortcutHelp {
                 .enumerate()
                 .filter(|(_, (keys, description))| {
                     section_matches
-                        || search_text(keys).contains(&query)
+                        || search_text(&component::shortcuts::label(*keys)).contains(&query)
                         || search_text(description).contains(&query)
                 })
                 .collect();

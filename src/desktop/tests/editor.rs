@@ -1,6 +1,86 @@
 use super::*;
 
 #[gpui::test]
+fn macos_app_commands_preserve_system_tab_switching_and_replace_shortcuts(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let press = |key: &str, cx: &mut TestAppContext| {
+        f.update(cx, |this, window, cx| {
+            this.key_down_on(
+                &gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                true,
+                window,
+                cx,
+            )
+        });
+    };
+    press("cmd-tab", cx);
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.session.active, Some(f.ids[0]))
+    });
+    press("ctrl-tab", cx);
+    f.update(cx, |this, _, _| {
+        assert_eq!(this.session.active, Some(f.ids[1]))
+    });
+    press("cmd-\\", cx);
+    f.update(cx, |this, _, _| assert!(!this.session.sidebar_visible));
+    press("cmd-h", cx);
+    f.update(cx, |this, _, _| assert!(!this.find_visible));
+    press("cmd-alt-f", cx);
+    f.update(cx, |this, _, _| {
+        assert!(this.find_visible);
+        assert!(this.local.replace);
+    });
+}
+
+#[gpui::test]
+fn app_shortcuts_leave_altgr_and_composing_title_input_to_the_platform(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    f.update(cx, |this, window, cx| {
+        let count = this.book.notes.len();
+        let wrap = cx.global::<AppState>().settings.wrap;
+        let mut altgr = gpui::Keystroke::parse("alt-z").unwrap();
+        altgr.key_char = Some("ž".into());
+        this.key_down(
+            &gpui::KeyDownEvent {
+                keystroke: altgr,
+                is_held: false,
+                prefer_character_input: false,
+            },
+            window,
+            cx,
+        );
+        assert_eq!(cx.global::<AppState>().settings.wrap, wrap);
+        for (key, prefer_character_input) in [("ctrl-alt-n", false), ("ctrl-n", true)] {
+            let event = gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke::parse(key).unwrap(),
+                is_held: false,
+                prefer_character_input,
+            };
+            this.key_down(&event, window, cx);
+            assert_eq!(this.book.notes.len(), count);
+        }
+        this.begin_rename_note(f.ids[0], window, cx);
+        let input = this.title_input.clone();
+        let mut handler = ElementInputHandler::new(Bounds::default(), input);
+        handler.replace_and_mark_text_in_range(None, "조합", Some(2..2), window, cx);
+        let enter = gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        this.key_down(&enter, window, cx);
+        assert!(this.rename.is_some());
+        handler.replace_text_in_range(None, "완료", window, cx);
+        this.key_down(&enter, window, cx);
+        assert!(this.rename.is_none());
+    });
+}
+
+#[gpui::test]
 fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
     cx: &mut TestAppContext,
 ) {

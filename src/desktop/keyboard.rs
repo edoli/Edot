@@ -7,6 +7,16 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.key_down_on(event, cfg!(target_os = "macos"), window, cx);
+    }
+
+    pub(super) fn key_down_on(
+        &mut self,
+        event: &KeyDownEvent,
+        macos: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.startup_failed || window.has_active_dialog(cx) || self.keyboard_menu.is_some() {
             return;
         }
@@ -22,8 +32,37 @@ impl Edot {
         if self.space_ui.open {
             return; // The Space popup owns its keys, including name editing.
         }
-        let ctrl = event.keystroke.modifiers.control;
-        let shift = event.keystroke.modifiers.shift;
+        if event.prefer_character_input
+            || event.keystroke.modifiers.alt
+                && event
+                    .keystroke
+                    .key_char
+                    .as_ref()
+                    .is_some_and(|text| text != &event.keystroke.key)
+            || [
+                &self.title_input,
+                &self.local.query,
+                &self.local.replacement,
+                &self.global.query,
+                &self.global.replacement,
+            ]
+            .into_iter()
+            .chain(self.active_editor().as_ref())
+            .any(|input| {
+                let input = input.read(cx);
+                input.is_composing() && input.focus_handle(cx).is_focused(window)
+            })
+            || self.preferences.as_ref().is_some_and(|preferences| {
+                [&preferences.theme, &preferences.font, &preferences.size]
+                    .into_iter()
+                    .any(|select| select.read(cx).is_composing(window, cx))
+            })
+        {
+            return;
+        }
+        let modifiers = event.keystroke.modifiers;
+        let ctrl = component::shortcuts::primary_on(modifiers, macos);
+        let shift = modifiers.shift;
         if self.shortcut_help.is_some() || self.trash_browser.is_some() {
             return;
         }
@@ -50,10 +89,10 @@ impl Edot {
             self.show_keyboard_menu(window, cx);
         } else if title && matches!(key, "escape" | "enter" | "tab") {
             self.finish_rename(key != "escape", true, window, cx);
-        } else if event.keystroke.modifiers.alt
-            && !ctrl
+        } else if modifiers.alt
             && !shift
-            && !event.keystroke.modifiers.platform
+            && !modifiers.control
+            && modifiers.platform == macos
             && key == "z"
         {
             let mut next = cx.global::<AppState>().settings.clone();
@@ -66,27 +105,21 @@ impl Edot {
         } else if ctrl && key == "s" {
             self.finish_rename(true, false, window, cx);
             self.save_all_explicit(cx);
-        } else if ctrl && (key == "w" || key == "f4" && !shift && !event.keystroke.modifiers.alt) {
+        } else if ctrl && (key == "w" || !macos && key == "f4" && !shift) {
+            if macos && (shift || self.open.is_empty()) {
+                self.close_window(window, cx);
+                return;
+            }
             if let Some(id) = self.session.active {
                 self.close_tabs(id, crate::tabs::CloseMode::Current, window, cx);
             }
         } else if ctrl && shift && key == "t" && !event.keystroke.modifiers.alt {
             self.reopen_closed_tab(window, cx);
-        } else if ctrl
-            && !shift
-            && !event.keystroke.modifiers.alt
-            && !event.keystroke.modifiers.platform
-            && key == "\\"
-        {
+        } else if ctrl && !shift && !event.keystroke.modifiers.alt && key == "\\" {
             if !event.is_held {
                 self.session.sidebar_visible = !self.session.sidebar_visible;
             }
-        } else if ctrl
-            && shift
-            && !event.keystroke.modifiers.alt
-            && !event.keystroke.modifiers.platform
-            && key == "p"
-        {
+        } else if ctrl && shift && !event.keystroke.modifiers.alt && key == "p" {
             if !event.is_held
                 && self.active_editor().is_some()
                 && self.set_read_only(!cx.global::<AppState>().settings.read_only, window, cx)
@@ -95,9 +128,15 @@ impl Edot {
             }
         } else if ctrl && key == "," {
             self.show_settings(window, cx);
-        } else if ctrl && matches!(key, "f" | "h") {
-            self.show_find(shift, key == "h", window, cx);
-        } else if ctrl && (key == "tab" || key == "pagedown" || key == "pageup") {
+        } else if ctrl && (key == "f" || !macos && key == "h")
+            || macos && modifiers.platform && modifiers.alt && !modifiers.control && key == "f"
+        {
+            self.show_find(shift, key == "h" || modifiers.alt, window, cx);
+        } else if modifiers.control
+            && !modifiers.alt
+            && !modifiers.platform
+            && matches!(key, "tab" | "pagedown" | "pageup")
+        {
             if !self.open.is_empty() {
                 let index = self
                     .open
@@ -121,7 +160,7 @@ impl Edot {
             if let Some(tab) = self.open.get(index) {
                 self.open_note(tab.id, true, window, cx);
             }
-        } else if key == "f2" {
+        } else if key == "f2" && modifiers == Modifiers::default() {
             let id = if self.session.sidebar_visible {
                 self.caret
             } else {
@@ -130,7 +169,7 @@ impl Edot {
             if let Some(id) = id {
                 self.begin_rename(id, window, cx);
             }
-        } else if key == "f3" {
+        } else if key == "f3" && !modifiers.control && !modifiers.alt && !modifiers.platform {
             let global_focus = self
                 .global
                 .query
@@ -146,7 +185,10 @@ impl Edot {
                 || results;
             let global = self.search_mode && (!self.find_visible || global_focus);
             self.navigate(global, shift, window, cx);
-        } else if !ctrl && matches!(key, "f5" | "f6") && !self.settings_visible {
+        } else if modifiers == Modifiers::default()
+            && matches!(key, "f5" | "f6")
+            && !self.settings_visible
+        {
             let editor_focus = self
                 .active_editor()
                 .is_some_and(|editor| editor.read(cx).focus_handle(cx).is_focused(window));

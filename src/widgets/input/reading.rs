@@ -508,7 +508,21 @@ impl InputState {
                 cx.notify();
             }))
             .on_key_down(cx.listener(|s, e: &KeyDownEvent, w, cx| {
-                match e.keystroke.key.as_str() {
+                if e.prefer_character_input {
+                    return;
+                }
+                let modifiers = e.keystroke.modifiers;
+                let mut key = e.keystroke.key.as_str();
+                if cfg!(target_os = "macos")
+                    && (modifiers.platform || modifiers.control || modifiers.alt)
+                {
+                    key = match key {
+                        "up" if super::super::shortcuts::primary(modifiers) => "home",
+                        "down" if super::super::shortcuts::primary(modifiers) => "end",
+                        _ => return,
+                    };
+                }
+                match key {
                     "up" => s.reading.list.scroll_by(-px(36.)),
                     "down" => s.reading.list.scroll_by(px(36.)),
                     "pageup" => s.reading.list.scroll_by(-w.viewport_size().height * 0.8),

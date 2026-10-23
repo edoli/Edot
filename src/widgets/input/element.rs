@@ -44,10 +44,8 @@ impl Element for EditorElement {
             let modifiers = window.modifiers();
             s.link_hover = !s.selecting
                 && s.scroll_drag.is_none()
-                && modifiers.control
-                && !modifiers.alt
+                && super::super::shortcuts::primary(modifiers)
                 && !modifiers.shift
-                && !modifiers.platform
                 && s.link_at(window.mouse_position()).is_some();
         });
         let state = self.0.read(cx);
@@ -127,10 +125,8 @@ impl Element for EditorElement {
                 }
                 let link_hover = !s.selecting
                     && s.scroll_drag.is_none()
-                    && e.modifiers.control
-                    && !e.modifiers.alt
+                    && super::super::shortcuts::primary(e.modifiers)
                     && !e.modifiers.shift
-                    && !e.modifiers.platform
                     && s.link_at(e.position).is_some();
                 if s.link_hover != link_hover {
                     s.link_hover = link_hover;
@@ -243,7 +239,7 @@ impl Render for InputState {
             .on_action(cx.listener(|s, _: &SelectAll, w, cx| s.select_all(w, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_scroll(cx.listener(|s, e: &ScrollEvent, _, cx| {
-                if !e.modifiers.control {
+                if !super::super::shortcuts::primary(e.modifiers) {
                     let mut delta = e.delta.pixel_delta(s.line_height);
                     if e.modifiers.shift {
                         // Windows already maps Shift+wheel to x. Only convert

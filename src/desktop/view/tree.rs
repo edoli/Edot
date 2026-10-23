@@ -169,15 +169,20 @@ impl Edot {
                         .left_4()
                         .right_4()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Ctrl + N으로 첫 노트를 만드세요"),
+                        .child(component::shortcuts::label("Ctrl+N으로 첫 노트를 만드세요")),
                 )
             })
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.select_active_note();
-                    this.tree_focus.focus(window, cx);
-                    cx.notify();
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if component::shortcuts::context_click(event) {
+                        this.show_tree_background_menu(event.position, window, cx);
+                        cx.stop_propagation();
+                    } else {
+                        this.select_active_note();
+                        this.tree_focus.focus(window, cx);
+                        cx.notify();
+                    }
                 }),
             )
             .on_drop(cx.listener(|this, drag: &TreeDrag, window, cx| {
@@ -378,6 +383,16 @@ impl Edot {
                     )
                 },
             )
+            .when(cfg!(target_os = "macos"), |row| {
+                row.capture_any_mouse_down(cx.listener(
+                    move |this, event: &MouseDownEvent, window, cx| {
+                        if component::shortcuts::context_click(event) {
+                            this.show_tree_menu(id, event.position, window, cx);
+                            cx.stop_propagation();
+                        }
+                    },
+                ))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
