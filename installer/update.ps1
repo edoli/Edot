@@ -120,7 +120,7 @@ try {
     if ($committed) {
         # EDOT_SPACE_DIR and EDOT_CONFIG_DIR remain inherited, restoring the active Space.
         try {
-            Start-Process -FilePath $executable -WorkingDirectory $installDirectory -WindowStyle Hidden
+            Start-Process -FilePath $executable -WorkingDirectory $installDirectory -WindowStyle Normal
         } catch {
             try { Write-Result ('앱을 다시 실행하지 못했습니다: ' + $_.Exception.Message) } catch { }
         }
