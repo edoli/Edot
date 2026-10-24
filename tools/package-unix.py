@@ -11,6 +11,7 @@ import plistlib
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -145,6 +146,18 @@ def linuxdeploy() -> Path:
     return tool
 
 
+def linux_icon(stage: Path) -> Path:
+    # Reuse the existing 256px PNG frame; the original artwork is 1254px.
+    data = (ROOT / "assets/app-icon/edot.ico").read_bytes()
+    for index in range(struct.unpack_from("<H", data, 4)[0]):
+        width, height, _, _, _, _, size, offset = struct.unpack_from("<BBBBHHII", data, 6 + 16 * index)
+        if (width or 256, height or 256) == (256, 256) and data[offset:offset + 8] == b"\x89PNG\r\n\x1a\n":
+            path = stage / "edot.png"
+            path.write_bytes(data[offset:offset + size])
+            return path
+    raise ValueError("Missing 256px PNG icon frame")
+
+
 def package_deb(binary: Path, stage: Path, desktop: Path, build_version: str) -> Path:
     destination = DIST / f"{APP}-installer-deb.deb"
     if APP == "edolview":
@@ -155,9 +168,9 @@ def package_deb(binary: Path, stage: Path, desktop: Path, build_version: str) ->
     applications = root / "usr/share/applications"
     applications.mkdir(parents=True)
     shutil.copy2(desktop, applications / desktop.name)
-    icon = root / f"usr/share/icons/hicolor/512x512/apps/{APP}.png"
+    icon = root / f"usr/share/icons/hicolor/256x256/apps/{APP}.png"
     icon.parent.mkdir(parents=True)
-    shutil.copy2(ICON, icon)
+    shutil.copy2(linux_icon(stage), icon)
     debian = stage / "debian"
     debian.mkdir()
     (debian / "control").write_text(f"Source: {APP}\nSection: utils\nPriority: optional\nMaintainer: Edoli\n\nPackage: {APP}\nArchitecture: any\nDescription: {NAME}\n")
@@ -196,8 +209,7 @@ def package_linux(binary: Path, stage: Path, build_version: str) -> list[Path]:
     copy_binary(binary, appdir / f"usr/bin/{APP}")
     copy_assets(appdir / "usr/bin")
     write_executable(appdir / "AppRun", f'#!/bin/sh\nAPPDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\nexport LD_LIBRARY_PATH="$APPDIR/usr/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"\nexec "$APPDIR/usr/bin/{APP}" "$@"\n')
-    icon = stage / f"{APP}.png"
-    shutil.copy2(ICON, icon)
+    icon = linux_icon(stage)
     image = DIST / f"{APP}-installer-appimage.AppImage"
     env = dict(os.environ, APPIMAGE_EXTRACT_AND_RUN="1", VERSION=build_version, ARCH="x86_64", LDAI_OUTPUT=str(image))
     run(linuxdeploy(), "--appdir", appdir, "--executable", appdir / f"usr/bin/{APP}", "--desktop-file", desktop, "--icon-file", icon, "--output", "appimage", env=env, cwd=stage)
