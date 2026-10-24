@@ -1,4 +1,4 @@
-; Build through tools/package.ps1 so the EXE, installer and update manifest agree.
+; Build through tools/package.ps1 so the EXE and packages use the Cargo version.
 #ifndef AppVersion
   #error AppVersion is required
 #endif

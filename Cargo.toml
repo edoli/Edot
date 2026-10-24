@@ -53,6 +53,7 @@ debug = 0
 strip = "symbols"
 
 [package.metadata.deb]
+maintainer-scripts = "target/deb-maintainer-scripts"
 name = "edot"
 profile = "release-dist"
 maintainer = "Daniel Jeon <edoli.mia@gmail.com>"
@@ -61,7 +62,6 @@ section = "editors"
 priority = "optional"
 depends = "$auto, libvulkan1, libxkbcommon-x11-0, libfontconfig1, libfreetype6, libcurl4t64"
 recommends = "xdg-desktop-portal, fonts-noto-cjk"
-maintainer-scripts = "packaging/debian"
 assets = [
     ["target/release/edot", "usr/bin/edot", "755"],
     ["packaging/dev.edoli.edot.desktop", "usr/share/applications/dev.edoli.edot.desktop", "644"],
