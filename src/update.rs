@@ -159,11 +159,7 @@ pub enum State {
 
 impl State {
     pub fn is_busy(&self) -> bool {
-        match self {
-            Self::Checking => true,
-            Self::Installing => true,
-            _ => false,
-        }
+        matches!(self, Self::Checking | Self::Installing)
     }
 }
 
