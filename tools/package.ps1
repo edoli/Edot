@@ -29,6 +29,12 @@ if (-not $Compiler -or -not (Test-Path -LiteralPath $Compiler)) {
 }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    # Remove only obsolete generated artifacts left by earlier local packaging.
+    Get-ChildItem -LiteralPath $OutputDirectory -File | Where-Object {
+        $_.Name -match '^SHA256SUMS(?:-(windows|mac|linux))?\.txt$' -or
+        $_.Name -eq 'edot-update.txt' -or $_.Name -match '^Edot-Setup-[0-9]+\.[0-9]+\.[0-9]+-windows-x64\.exe$'
+    } | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+
 $previous = @{}
 foreach ($name in @('EDOT_REPOSITORY', 'EDOT_BUILD_LABEL')) {
     $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -51,16 +57,11 @@ try {
     $portable = Join-Path $OutputDirectory 'edot-windows.zip'
     # ZIP contains the EXE only; installation registration and updater helpers are not bundled.
     Compress-Archive -LiteralPath $executable -DestinationPath $portable -CompressionLevel Optimal -Force
-    $legacy = Join-Path $OutputDirectory "Edot-Setup-$Version-windows-x64.exe"
-    Copy-Item -LiteralPath $installer -Destination $legacy -Force
-    $size = (Get-Item -LiteralPath $installer).Length
-    $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-    $manifest = "EDOTUPDATE1`nversion=$Version`nsize=$size`nsha256=$hash`n"
-    [IO.File]::WriteAllText((Join-Path $OutputDirectory 'edot-update.txt'), $manifest, (New-Object Text.UTF8Encoding($false)))
-    $checksums = foreach ($path in @($installer, $portable, $legacy, (Join-Path $OutputDirectory 'edot-update.txt'))) {
-        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($path)
+    $checksums = @{}
+    foreach ($path in @($installer, $portable)) {
+        $checksums[[IO.Path]::GetFileName($path)] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
     }
-    [IO.File]::WriteAllLines((Join-Path $OutputDirectory 'SHA256SUMS-windows.txt'), [string[]]$checksums, (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText((Join-Path $OutputDirectory 'package-checksums-windows.json'), ($checksums | ConvertTo-Json), [Text.Encoding]::ASCII)
     Get-Item -LiteralPath $installer, $portable | Select-Object Name, Length, @{ Name = 'MiB'; Expression = { [Math]::Round($_.Length / 1MB, 2) } }
 } finally {
     Pop-Location

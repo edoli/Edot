@@ -86,6 +86,9 @@ jobs:
         run: python tools/configure_path_remap.py
         env:
           EDOT_REPOSITORY: ${{ github.repository }}
+      - name: Install DEB packaging tool
+        if: runner.os == 'Linux'
+        run: cargo install cargo-deb --version 3.8.0 --locked
       - name: Build optimized binary
         run: cargo build --profile release-dist --locked
       - name: Install Inno Setup
@@ -99,6 +102,12 @@ jobs:
       - name: Package macOS or Linux
         if: runner.os != 'Windows'
         run: python tools/package-unix.py --no-build
+      - name: Validate isolated update helpers
+        if: runner.os != 'macOS'
+        run: python tools/test-update-helper.py
+      - name: Validate isolated macOS bundle replacement
+        if: runner.os == 'macOS'
+        run: python tools/test-macos-update.py
       - name: Validate final packages
         run: python tools/check-packages.py
       - uses: actions/upload-artifact@v4
@@ -106,8 +115,7 @@ jobs:
           name: edot-${{ matrix.suffix }}
           path: |
             target/dist/edot*
-            target/dist/Edot-Setup-*.exe
-            target/dist/SHA256SUMS-${{ matrix.suffix }}.txt
+            target/dist/package-checksums-${{ matrix.suffix }}.json
           if-no-files-found: error
           compression-level: 0
 
@@ -135,7 +143,14 @@ jobs:
         run: python tools/release-assets.py
       - uses: softprops/action-gh-release@v3
         with:
-          files: dist/*
+          files: |
+            dist/edot-windows.zip
+            dist/edot-mac.zip
+            dist/edot-linux.zip
+            dist/edot-installer-exe.exe
+            dist/edot-installer-dmg.dmg
+            dist/edot-installer-deb.deb
+            dist/edot-installer-appimage.AppImage
           fail_on_unmatched_files: true
           generate_release_notes: true
           make_latest: ${{ steps.assets.outputs.make_latest }}
