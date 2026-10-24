@@ -83,6 +83,9 @@ impl Drop for Handoff {
 
 impl Handoff {
     pub fn commit(mut self) -> io::Result<()> {
+        if self.child.as_mut().unwrap().try_wait()?.is_some() {
+            return Err(io::Error::other("업데이트 도우미가 종료되었습니다"));
+        }
         fs::write(self.directory.join("go.pending"), b"install")?;
         fs::rename(self.directory.join("go.pending"), self.directory.join("go"))?;
         self.committed = true;
@@ -93,11 +96,11 @@ impl Handoff {
 pub fn prepare(
     release: &Release,
     exe: &Path,
-    scope: InstallScope,
+    scope: Option<InstallScope>,
     space: &Path,
     config: &Path,
 ) -> Result<Handoff> {
-    if install_scope(exe) != Some(scope) {
+    if install_scope(exe) != scope {
         return Err(anyhow!(
             "설치 경로가 변경되었습니다. 설치 프로그램을 다시 실행하세요"
         ));
@@ -115,7 +118,11 @@ pub fn prepare(
         child: None,
         committed: false,
     };
-    let installer = handoff.directory.join("setup.exe");
+    let installer = handoff.directory.join(if scope.is_some() {
+        "setup.exe"
+    } else {
+        "package.zip"
+    });
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -155,10 +162,12 @@ pub fn prepare(
         .env("EDOT_UPDATE_EXE", exe)
         .env(
             "EDOT_UPDATE_SCOPE",
-            if scope == InstallScope::Machine {
+            if scope == Some(InstallScope::Machine) {
                 "machine"
-            } else {
+            } else if scope.is_some() {
                 "user"
+            } else {
+                "portable"
             },
         )
         .env("EDOT_UPDATE_HASH", &release.sha256)

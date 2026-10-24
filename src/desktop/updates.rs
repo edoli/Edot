@@ -40,7 +40,6 @@ impl Edot {
         cx.global::<AppState>().update_worker.as_ref().unwrap()
     }
 
-    #[cfg(target_os = "windows")]
     pub(super) fn install_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let State::Available(release) = cx.global::<AppState>().update_state.clone() else {
             return;
@@ -53,10 +52,8 @@ impl Edot {
                 return;
             }
         };
-        let Some(scope) = update::install_scope(&exe) else {
-            cx.open_url(&release.page_url());
-            return;
-        };
+        #[cfg(windows)]
+        let scope = update::install_scope(&exe);
         if self.startup_failed {
             cx.global_mut::<AppState>().update_message =
                 Some("Space를 정상적으로 연 뒤 업데이트하세요.".into());
@@ -69,9 +66,16 @@ impl Edot {
         cx.global_mut::<AppState>().update_state = State::Installing;
         cx.global_mut::<AppState>().update_message = None;
         let download_release = release.clone();
-        let request = self
-            .update_worker(cx)
-            .spawn(async move { update::prepare(&download_release, &exe, scope, &space, &config) });
+        let request = self.update_worker(cx).spawn(async move {
+            #[cfg(windows)]
+            {
+                update::prepare(&download_release, &exe, scope, &space, &config)
+            }
+            #[cfg(unix)]
+            {
+                update::prepare(&download_release, &exe, &space, &config)
+            }
+        });
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -114,14 +118,6 @@ impl Edot {
         cx.notify();
     }
 
-    #[cfg(not(target_os = "windows"))]
-    pub(super) fn install_update(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if let State::Available(release) = &cx.global::<AppState>().update_state {
-            cx.open_url(&release.page_url());
-        }
-    }
-
-    #[cfg(any(target_os = "windows", test))]
     pub(super) fn prepare_update_close(
         &mut self,
         window: &mut Window,

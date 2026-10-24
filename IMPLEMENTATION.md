@@ -271,7 +271,7 @@ UI 기본 글꼴은 Segoe UI 15px, 본문 기본값은 Consolas 18px다. SVG 아
 
 ## 9. 코드 구성과 빌드
 
-`rust-toolchain.toml`은 로컬과 GitHub Actions에서 Rust 1.99.0·rustfmt·Clippy를 사용하도록 고정한다. CI에서 매번 stable을 갱신하지 않아 새 경고가 예고 없이 빌드를 실패시키는 것을 방지한다. Rust 버전 변경 시 같은 버전으로 fmt·테스트·Clippy·최종 release 빌드를 검증하고 경로 치환 설정을 재생성한다. 경로 치환 도구는 프로젝트의 활성 toolchain을 임시 폴더의 Cargo metadata 호출에도 명시한다.
+`rust-toolchain.toml`은 stable Rust·rustfmt·Clippy를 사용한다. CI도 stable toolchain으로 빌드하며 toolchain 변경 후 경로 치환 설정을 재생성한다.
 
 아래 경로는 `src/` 기준이다. 화면의 공통 수치는 `desktop/metrics.rs`, 색상·UI 글꼴은 `widgets/theme.rs`, 설정·세션 기본값은 각각 `settings.rs`, `session.rs`에 둔다.
 
@@ -314,3 +314,19 @@ python tools/check_binary_paths.py
 산출물은 **현재 GPUI 프로젝트의 `target/release/edot.exe`**다. release는 기본 최적화와 `strip="symbols"`를 사용한다. 경로 치환은 `object` 범위에 적용하여 EXE의 소스 위치를 상대 경로로 바꾸고 컴파일 진단의 실제 경로는 유지한다. 별도 `RUSTFLAGS`는 이 설정을 대체할 수 있으므로 최종 EXE를 검사한다.
 
 검증 시 사용자 저장소를 사용하지 않는다. `desktop/tests/`는 독립 임시 저장소와 headless 창에서 탭·편집 이력·IME·선택, 저장 실패, 검색 결과 갱신·치환, 트리 드래그, splitter·여백·스크롤, 설정·메뉴·포커스 동작을 다룬다. 실제 Windows IME·클립보드·DPI 변경의 화면 검증은 headless 테스트와 별도로 수행한다.
+
+## 10. 설치·배포와 앱 업데이트
+
+버전은 Cargo.toml을 기준으로 Windows VERSIONINFO·앱 상수·패키지에 반영한다. CI(ci.yml)가 숫자 세 부분(각 0~65535, 선행 0 없음)의 버전과 정확히 일치하는 v 태그를 검사한다. main push·PR·수동 실행에서 Windows x64·macOS Apple Silicon·Linux x64를 stable Rust의 release-dist 프로필로 빌드·패키징한다. 태그 실행만 모든 OS의 배포 파일·체크섬 검증 후 softprops/action-gh-release로 공개한다. 이전 버전은 더 높은 latest를 대체하지 않는다.
+
+파일명은 edot-windows.zip, edot-mac.zip, edot-linux.zip, edot-installer-exe.exe, edot-installer-dmg.dmg, edot-installer-deb.deb, edot-installer-appimage.AppImage으로 고정한다. Windows/Linux ZIP은 EXE·실행 파일만, macOS ZIP은 ad-hoc 서명한 Edot.app 전체를 포함한다. Apple 인증서 서명·공증은 수행하지 않는다. Windows CRT는 정적 링크하고 Linux는 시스템 GUI·GPU·libc 라이브러리를 사용한다. 최종 파일의 SHA256SUMS.txt를 발행한다. 구버전 Windows 클라이언트를 위해 edot-update.txt와 Edot-Setup-<버전>-windows-x64.exe도 발행한다.
+
+업데이트 확인은 시작 시 수행하지 않고 설정창을 열 때 지연 생성한 DedicatedExecutor에서 수행하며 AppState에서 5분간 결과를 재사용한다. 현재 버전·확인 상태와 업데이트 가능 버튼을 표시하고 오류 상세만 별도로 표시한다. GitHub Releases API의 releases/latest를 요청 20초·응답 1MiB 제한으로 읽는다. 404는 공개 릴리스 없음으로 처리하며 공개 정식 릴리스의 버전이 현재보다 높을 때 설치 형태에 맞는 고정 파일명 asset을 선택한다. GitHub asset의 SHA-256과 크기는 필수다. 비공개 인증 토큰을 앱에 포함하지 않는다.
+
+Windows 설치형은 실제 EXE 폴더와 레지스트리 InstallLocation이 일치하는 HKCU/HKLM 범위로 판별한다. macOS .app은 DMG, Linux /usr/bin/edot은 DEB, APPIMAGE 환경은 AppImage, 그 외 복사본은 OS별 ZIP을 사용한다. 다운로드는 256MiB·300초 제한으로 전용 임시 폴더에 스트리밍하고 크기를 확인한다. 고정 자산인 update.ps1/update.sh 도우미가 SHA-256 검증 후 ready 파일을 만든다. 사용자 경로·릴리스 데이터는 환경변수로 전달한다.
+
+앱은 준비된 도우미를 받은 뒤 현재 Space가 다운로드 시작 때와 같은지 확인하고 이름 편집·본문·세션을 저장한다. 저장 실패·Space 변경·도우미 실패 시 업데이트를 취소하고 창·편집 내용을 유지한다. 저장 성공 때만 go 파일로 인계하고 창을 닫는다. 중도 취소된 Handoff는 자신의 도우미와 임시 폴더만 정리한다.
+
+Windows 도우미는 원래 프로세스 핸들로 정상 종료를 기다리고 파일 사용 여부·해시를 재확인한다. 설치형은 기존 경로·범위로 조용히 재설치하며 전체 사용자 설치만 UAC를 요청한다. 다른 앱 창은 강제 종료하지 않는다. 포터블은 ZIP에서 edot.exe만 추출하고 버전을 확인한 뒤 백업·교체한다. Unix 도우미는 해시를 재확인하고 ZIP 실행 파일·AppImage·DEB·DMG를 적용한다. DMG는 번들 서명·버전을 검사하고 동일 위치로 교체하며 필요 시 운영체제 권한 확인을 사용한다.
+
+재시작에는 절대 경로의 EDOT_SPACE_DIR·EDOT_CONFIG_DIR를 상속해 같은 Space·설정을 복원한다. 실패는 전역 설정 폴더 update-result.txt로 전달하고 과거 성공 메시지는 숨긴다. 설치·제거·업데이트가 Space나 사용자 설정을 삭제하지 않으며 검증에는 독립 테스트 데이터만 사용한다.

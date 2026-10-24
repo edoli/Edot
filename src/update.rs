@@ -1,4 +1,4 @@
-//! Release discovery and a saved-data-first handoff to the Windows installer.
+//! GitHub release discovery and a saved-data-first updater handoff on each OS.
 use gpui::http_client::{AsyncBody, RedirectPolicy, Request, Result, anyhow};
 use std::{
     fs::File,
@@ -11,6 +11,10 @@ use std::{
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{install_scope, prepare};
+#[cfg(unix)]
+mod unix;
+#[cfg(unix)]
+pub use unix::prepare;
 
 pub const VERSION: &str = env!("EDOT_APP_VERSION");
 pub const BUILD_LABEL: &str = env!("EDOT_BUILD_LABEL");
@@ -45,25 +49,49 @@ impl Version {
 #[derive(Clone, Debug)]
 pub struct Release {
     pub version: String,
-    #[cfg(target_os = "windows")]
     pub size: u64,
-    #[cfg(target_os = "windows")]
     pub sha256: String,
+    pub asset_name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ApiRelease {
+    tag_name: String,
+    draft: bool,
+    prerelease: bool,
+    assets: Vec<ApiAsset>,
+}
+
+#[derive(serde::Deserialize)]
+struct ApiAsset {
+    name: String,
+    size: u64,
+    digest: Option<String>,
 }
 
 impl Release {
-    fn parse(text: &str) -> Result<Self> {
-        let mut lines = text.lines();
-        if lines.next() != Some("EDOTUPDATE1") {
-            return Err(anyhow!("지원하지 않는 업데이트 정보입니다"));
-        }
-        let version = field(&mut lines, "version=")?.to_owned();
+    fn from_api(response: ApiRelease, package: &str) -> Result<Self> {
+        let version = response
+            .tag_name
+            .strip_prefix('v')
+            .ok_or_else(|| anyhow!("잘못된 릴리스 태그입니다"))?
+            .to_owned();
         Version::parse(&version)?;
-        let size: u64 = field(&mut lines, "size=")?.parse()?;
-        let sha256 = field(&mut lines, "sha256=")?.to_owned();
-        if lines.next().is_some()
-            || size == 0
-            || size > MAX_INSTALLER_BYTES
+        let asset = response
+            .assets
+            .into_iter()
+            .find(|asset| asset.name == package)
+            .ok_or_else(|| anyhow!("현재 플랫폼의 업데이트 파일이 없습니다"))?;
+        let sha256 = asset
+            .digest
+            .as_deref()
+            .and_then(|digest| digest.strip_prefix("sha256:"))
+            .ok_or_else(|| anyhow!("업데이트 파일의 SHA-256 정보가 없습니다"))?
+            .to_owned();
+        if response.draft
+            || response.prerelease
+            || asset.size == 0
+            || asset.size > MAX_INSTALLER_BYTES
             || sha256.len() != 64
             || !sha256.bytes().all(|b| b.is_ascii_hexdigit())
         {
@@ -71,34 +99,50 @@ impl Release {
         }
         Ok(Self {
             version,
-            #[cfg(target_os = "windows")]
-            size,
-            #[cfg(target_os = "windows")]
-            sha256,
+            size: asset.size,
+            sha256: sha256.to_ascii_lowercase(),
+            asset_name: asset.name,
         })
     }
 
-    pub fn page_url(&self) -> String {
-        format!(
-            "https://github.com/{REPOSITORY}/releases/tag/v{}",
-            self.version
-        )
-    }
-
-    #[cfg(any(target_os = "windows", test))]
     fn installer_url(&self) -> String {
         format!(
-            "https://github.com/{REPOSITORY}/releases/download/v{0}/Edot-Setup-{0}-windows-x64.exe",
-            self.version
+            "https://github.com/{REPOSITORY}/releases/download/v{}/{}",
+            self.version, self.asset_name
         )
     }
 }
 
-fn field<'a>(lines: &mut impl Iterator<Item = &'a str>, prefix: &str) -> Result<&'a str> {
-    lines
-        .next()
-        .and_then(|line| line.strip_prefix(prefix))
-        .ok_or_else(|| anyhow!("업데이트 정보의 필드가 잘못되었습니다"))
+fn package_name(exe: &Path) -> &'static str {
+    #[cfg(windows)]
+    {
+        if install_scope(exe).is_some() {
+            "edot-installer-exe.exe"
+        } else {
+            "edot-windows.zip"
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if exe
+            .ancestors()
+            .any(|path| path.extension().is_some_and(|ext| ext == "app"))
+        {
+            "edot-installer-dmg.dmg"
+        } else {
+            "edot-mac.zip"
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("APPIMAGE").is_some() {
+            "edot-installer-appimage.AppImage"
+        } else if exe == Path::new("/usr/bin/edot") {
+            "edot-installer-deb.deb"
+        } else {
+            "edot-linux.zip"
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -109,7 +153,6 @@ pub enum State {
     Current,
     NoRelease,
     Available(Release),
-    #[cfg(target_os = "windows")]
     Installing,
     Failed(String),
 }
@@ -118,7 +161,6 @@ impl State {
     pub fn is_busy(&self) -> bool {
         match self {
             Self::Checking => true,
-            #[cfg(target_os = "windows")]
             Self::Installing => true,
             _ => false,
         }
@@ -128,8 +170,8 @@ impl State {
 pub fn check() -> Result<State> {
     let mut bytes = Vec::new();
     let status = get(
-        &format!("https://github.com/{REPOSITORY}/releases/latest/download/edot-update.txt"),
-        4096,
+        &format!("https://api.github.com/repos/{REPOSITORY}/releases/latest"),
+        1024 * 1024,
         Duration::from_secs(20),
         &mut bytes,
     )?;
@@ -139,19 +181,28 @@ pub fn check() -> Result<State> {
     if status != 200 {
         return Err(anyhow!("업데이트 서버 응답: {status}"));
     }
-    let release = Release::parse(std::str::from_utf8(&bytes)?)?;
-    Ok(
-        if Version::parse(&release.version)? > Version::parse(VERSION)? {
-            State::Available(release)
-        } else {
-            State::Current
-        },
-    )
+    let response: ApiRelease = serde_json::from_slice(&bytes)?;
+    if response.draft || response.prerelease {
+        return Err(anyhow!("정식 릴리스가 아닙니다"));
+    }
+    let version = response
+        .tag_name
+        .strip_prefix('v')
+        .ok_or_else(|| anyhow!("잘못된 릴리스 태그입니다"))?;
+    if Version::parse(version)? <= Version::parse(VERSION)? {
+        return Ok(State::Current);
+    }
+    let exe = std::env::current_exe()?;
+    Ok(State::Available(Release::from_api(
+        response,
+        package_name(&exe),
+    )?))
 }
 
 fn get(url: &str, limit: usize, time: Duration, output: &mut impl Write) -> Result<u16> {
     let mut request = Request::get(url)
         .header("User-Agent", concat!("Edot/", env!("EDOT_APP_VERSION")))
+        .header("Accept", "application/vnd.github+json")
         .body(AsyncBody::empty())?;
     request
         .extensions_mut()
@@ -234,26 +285,44 @@ mod tests {
     }
 
     #[test]
-    fn manifest_rejects_missing_checksums_oversize_and_injected_fields() {
-        let valid = format!(
-            "EDOTUPDATE1\nversion=0.0.2\nsize=123\nsha256={}\n",
-            "a".repeat(64)
-        );
-        let release = Release::parse(&valid).unwrap();
+    fn github_assets_require_valid_versions_sizes_and_sha256() {
+        let valid = serde_json::json!({"tag_name":"v0.0.2","draft":false,"prerelease":false,
+            "assets":[{"name":"edot-windows.zip","size":123,"digest":format!("sha256:{}", "a".repeat(64))}]});
+        let parse = |value: serde_json::Value| {
+            Release::from_api(serde_json::from_value(value).unwrap(), "edot-windows.zip")
+        };
+        let release = parse(valid.clone()).unwrap();
         assert!(
             release
                 .installer_url()
-                .ends_with("/v0.0.2/Edot-Setup-0.0.2-windows-x64.exe")
+                .ends_with("/v0.0.2/edot-windows.zip")
         );
-        for text in [
-            valid.replace("size=123", "size=0"),
-            valid.replace("size=123", "size=268435457"),
-            valid.replace(&"a".repeat(64), "bad"),
-            valid.replace("version=0.0.2", "version=../../evil"),
-            format!("{valid}url=https://evil.test\n"),
-            valid.replace("sha256=", "checksum="),
-        ] {
-            assert!(Release::parse(&text).is_err());
+        for field in ["draft", "prerelease"] {
+            let mut value = valid.clone();
+            value[field] = true.into();
+            assert!(parse(value).is_err());
         }
+        for tag in ["v01.0.0", "v1.0.0-beta", "v1.0.65536", "1.0.0"] {
+            let mut value = valid.clone();
+            value["tag_name"] = tag.into();
+            assert!(parse(value).is_err());
+        }
+        for size in [0, 268435457] {
+            let mut value = valid.clone();
+            value["assets"][0]["size"] = size.into();
+            assert!(parse(value).is_err());
+        }
+        for digest in [
+            serde_json::Value::Null,
+            "sha256:bad".into(),
+            "md5:abc".into(),
+        ] {
+            let mut value = valid.clone();
+            value["assets"][0]["digest"] = digest;
+            assert!(parse(value).is_err());
+        }
+        let mut missing = valid;
+        missing["assets"] = serde_json::json!([]);
+        assert!(parse(missing).is_err());
     }
 }

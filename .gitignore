@@ -1,3 +1,4 @@
 /target
 /.cargo/path-remap.toml
 /.cargo/path-remap.toml.tmp
+__pycache__/

@@ -7,7 +7,8 @@ if (-not $taskDirectory.StartsWith($temporaryRoot, [StringComparison]::OrdinalIg
     [IO.Path]::GetFileName($taskDirectory) -notmatch '^edot-update-[0-9a-f]{32}$') {
     throw 'Invalid update directory'
 }
-$installer = Join-Path $taskDirectory 'setup.exe'
+$portable = $env:EDOT_UPDATE_SCOPE -eq 'portable'
+$installer = Join-Path $taskDirectory $(if ($portable) { 'package.zip' } else { 'setup.exe' })
 $executable = [IO.Path]::GetFullPath($env:EDOT_UPDATE_EXE)
 $installDirectory = [IO.Path]::GetDirectoryName($executable)
 $resultFile = Join-Path $env:EDOT_CONFIG_DIR 'update-result.txt'
@@ -36,7 +37,7 @@ function Verify-Installer {
 }
 
 try {
-    if ($env:EDOT_UPDATE_SCOPE -notin @('user', 'machine') -or
+    if ($env:EDOT_UPDATE_SCOPE -notin @('user', 'machine', 'portable') -or
         $env:EDOT_UPDATE_VERSION -notmatch '^\d+\.\d+\.\d+$' -or
         $env:EDOT_UPDATE_HASH -notmatch '^[0-9a-fA-F]{64}$') {
         throw '잘못된 업데이트 정보입니다.'
@@ -73,6 +74,21 @@ try {
         throw '다른 Edot 창이 열려 있습니다. 모든 창을 닫고 다시 업데이트하세요.'
     }
     Verify-Installer
+    if ($portable) {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [IO.Compression.ZipFile]::OpenRead($installer)
+        try {
+            $entries = @($archive.Entries | Where-Object { $_.FullName -ceq 'edot.exe' })
+            if ($entries.Count -ne 1 -or ($entries[0].ExternalAttributes -shr 16 -band 0xF000) -eq 0xA000) { throw 'Invalid portable executable' }
+            $newExecutable = Join-Path $taskDirectory 'edot.exe'
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $newExecutable)
+        } finally { $archive.Dispose() }
+        if ((Get-Item -LiteralPath $newExecutable).VersionInfo.ProductVersion -ne $env:EDOT_UPDATE_VERSION) { throw 'Downloaded executable version does not match' }
+        $backup = Join-Path $taskDirectory 'previous.exe'
+        [IO.File]::Copy($executable, $backup)
+        try { [IO.File]::Copy($newExecutable, $executable, $true) }
+        catch { [IO.File]::Copy($backup, $executable, $true); throw }
+    } else {
     $scopeArgument = if ($env:EDOT_UPDATE_SCOPE -eq 'machine') { '/ALLUSERS' } else { '/CURRENTUSER' }
     $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-', '/NORESTART',
         '/RESTARTEXITCODE=3010', '/NOCLOSEAPPLICATIONS', '/NORESTARTAPPLICATIONS',
@@ -87,6 +103,7 @@ try {
     }
     $setup = Start-Process @options
     if ($setup.ExitCode -ne 0) { throw "설치가 완료되지 않았습니다 (코드 $($setup.ExitCode))." }
+    }
     if ((Get-Item -LiteralPath $executable).VersionInfo.ProductVersion -ne $env:EDOT_UPDATE_VERSION) {
         throw '설치한 버전이 일치하지 않습니다. Release 페이지에서 다시 설치하세요.'
     }
@@ -99,13 +116,13 @@ try {
     if ($committed) {
         # EDOT_SPACE_DIR and EDOT_CONFIG_DIR remain inherited, restoring the active Space.
         try {
-            Start-Process -FilePath $executable -WorkingDirectory $installDirectory -WindowStyle Normal
+            Start-Process -FilePath $executable -WorkingDirectory $installDirectory -WindowStyle Hidden
         } catch {
             try { Write-Result ('앱을 다시 실행하지 못했습니다: ' + $_.Exception.Message) } catch { }
         }
     }
     # Delete only files owned by this operation; never recursively delete an install/data folder.
-    foreach ($name in @('setup.exe', 'update.ps1', 'ready', 'go.pending', 'go', 'install.log')) {
+    foreach ($name in @('setup.exe', 'package.zip', 'edot.exe', 'previous.exe', 'update.ps1', 'ready', 'go.pending', 'go', 'install.log')) {
         Remove-Item -LiteralPath (Join-Path $taskDirectory $name) -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $taskDirectory -ErrorAction SilentlyContinue

@@ -122,7 +122,6 @@ impl Edot {
             State::Current => ("최신 버전".to_owned(), false),
             State::NoRelease => ("공개 릴리스 없음".to_owned(), false),
             State::Available(release) => (format!("업데이트 · v{}", release.version), true),
-            #[cfg(target_os = "windows")]
             State::Installing => ("업데이트 준비 중…".to_owned(), false),
             State::Failed(_) => ("확인 실패".to_owned(), false),
         };
