@@ -1,6 +1,6 @@
 [package]
 name = "edot"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 
 [dependencies]
@@ -51,3 +51,19 @@ incremental = false
 panic = "abort"
 debug = 0
 strip = "symbols"
+
+[package.metadata.deb]
+name = "edot"
+profile = "release-dist"
+maintainer = "Daniel Jeon <edoli.mia@gmail.com>"
+copyright = "2026, Daniel Jeon"
+section = "editors"
+priority = "optional"
+depends = "$auto, libvulkan1, libxkbcommon-x11-0, libfontconfig1, libfreetype6, libcurl4t64"
+recommends = "xdg-desktop-portal, fonts-noto-cjk"
+maintainer-scripts = "packaging/debian"
+assets = [
+    ["target/release/edot", "usr/bin/edot", "755"],
+    ["packaging/dev.edoli.edot.desktop", "usr/share/applications/dev.edoli.edot.desktop", "644"],
+    ["assets/app-icon/edot.png", "usr/share/icons/hicolor/512x512/apps/edot.png", "644"],
+]

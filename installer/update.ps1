@@ -14,6 +14,7 @@ $installDirectory = [IO.Path]::GetDirectoryName($executable)
 $resultFile = Join-Path $env:EDOT_CONFIG_DIR 'update-result.txt'
 $committed = $false
 $parent = $null
+$backup = $null
 
 function Write-Result([string]$Message) {
     # Keep the result across restart, including installer failure or a canceled UAC prompt.
@@ -67,11 +68,13 @@ try {
         throw '앱이 종료되지 않았습니다. 메모 저장 상태를 확인한 뒤 다시 시도하세요.'
     }
     # Fail before running Setup if another Space/process still has this EXE loaded.
+    if ($portable -or $env:EDOT_UPDATE_SCOPE -eq 'user') {
     try {
         $probe = [IO.File]::Open($executable, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::Read)
         $probe.Dispose()
     } catch {
         throw '다른 Edot 창이 열려 있습니다. 모든 창을 닫고 다시 업데이트하세요.'
+    }
     }
     Verify-Installer
     if ($portable) {
@@ -110,6 +113,7 @@ try {
     # A successful update clears older errors; the version row already shows the installed version.
     Write-Result ''
 } catch {
+    if ($backup -and [IO.File]::Exists($backup)) { try { [IO.File]::Copy($backup, $executable, $true) } catch { } }
     try { Write-Result ('업데이트 실패: ' + $_.Exception.Message) } catch { }
 } finally {
     if ($parent) { $parent.Dispose() }
