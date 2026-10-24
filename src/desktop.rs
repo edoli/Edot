@@ -430,7 +430,7 @@ pub fn run() {
         ))),
     }
     .map_err(|error| format!("노트 저장소를 열지 못했습니다. 파일을 덮어쓰지 않습니다.\n{error}"));
-    gpui_platform::application()
+    desktop_application()
         .with_assets(component::Assets)
         .run(move |cx| {
             cx.set_http_client(std::sync::Arc::new(
@@ -491,4 +491,16 @@ pub fn run() {
                 cx.quit();
             }
         });
+}
+
+fn desktop_application() -> Application {
+    let application = gpui_platform::application();
+    #[cfg(target_os = "linux")]
+    let application = {
+        let mut environment = GraphicalEnvironment::detect();
+        // Use X11 (XWayland in Wayland sessions) without changing the process environment.
+        environment.wayland_display = None;
+        application.with_windowing(WindowingRequest::Windowed(environment))
+    };
+    application
 }
