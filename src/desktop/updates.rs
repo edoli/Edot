@@ -8,7 +8,7 @@ impl Edot {
         let state = cx.global::<AppState>();
         // Headless tests cannot wake the scheduler from a native worker thread.
         if cfg!(test)
-            || matches!(state.update_state, State::Checking | State::Installing)
+            || state.update_state.is_busy()
             || state
                 .update_checked
                 .is_some_and(|time| time.elapsed() < Duration::from_secs(300))
@@ -40,6 +40,7 @@ impl Edot {
         cx.global::<AppState>().update_worker.as_ref().unwrap()
     }
 
+    #[cfg(target_os = "windows")]
     pub(super) fn install_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let State::Available(release) = cx.global::<AppState>().update_state.clone() else {
             return;
@@ -113,6 +114,14 @@ impl Edot {
         cx.notify();
     }
 
+    #[cfg(not(target_os = "windows"))]
+    pub(super) fn install_update(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let State::Available(release) = &cx.global::<AppState>().update_state {
+            cx.open_url(&release.page_url());
+        }
+    }
+
+    #[cfg(any(target_os = "windows", test))]
     pub(super) fn prepare_update_close(
         &mut self,
         window: &mut Window,

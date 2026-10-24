@@ -128,7 +128,7 @@ struct Transfer<'a> {
     location: Option<String>,
     status_abort: bool,
     deadline: Instant,
-    error: Option<anyhow::Error>,
+    result: Result<()>,
 }
 
 unsafe extern "C" fn write_callback(
@@ -143,16 +143,16 @@ unsafe extern "C" fn write_callback(
         return 0;
     };
     if Instant::now() >= state.deadline {
-        state.error = Some(anyhow!("Image request timed out"));
+        state.result = Err(anyhow!("Image request timed out"));
         return 0;
     }
     if length > state.max_bytes.saturating_sub(state.total) {
-        state.error = Some(anyhow!("Remote download exceeds the size limit"));
+        state.result = Err(anyhow!("Remote download exceeds the size limit"));
         return 0;
     }
     let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length) };
     if let Err(error) = state.output.write_all(bytes) {
-        state.error = Some(error.into());
+        state.result = Err(error.into());
         return 0;
     }
     state.total += length;
@@ -171,7 +171,7 @@ unsafe extern "C" fn header_callback(
         return 0;
     };
     if length > 64 * 1024 {
-        state.error = Some(anyhow!("HTTP header exceeds the size limit"));
+        state.result = Err(anyhow!("HTTP header exceeds the size limit"));
         return 0;
     }
     let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length) };
@@ -245,7 +245,7 @@ pub(crate) fn download_to(
             location: None,
             status_abort: false,
             deadline,
-            error: None,
+            result: Ok(()),
         };
         let mut handle = Handle {
             api,
@@ -298,9 +298,7 @@ pub(crate) fn download_to(
             ))?;
         }
         let result = unsafe { (api.perform)(easy) };
-        if let Some(error) = state.error.take() {
-            return Err(error);
-        }
+        state.result?;
         if !state.status_abort {
             handle.check(result)?;
         }
