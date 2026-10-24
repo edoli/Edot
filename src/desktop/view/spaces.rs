@@ -53,7 +53,7 @@ impl Edot {
             .v_flex()
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if !window.has_active_dialog(cx)
-                    && event.keystroke.modifiers.control
+                    && component::shortcuts::primary(event.keystroke.modifiers)
                     && event.keystroke.key == ","
                 {
                     if !event.is_held {

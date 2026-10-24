@@ -6,6 +6,7 @@ pub mod input;
 pub mod menu;
 pub mod scroll;
 mod select;
+pub(crate) mod shortcuts;
 pub use dialog::{DialogButtonProps, WindowExt};
 pub use input::{Input, InputEvent, InputState, TextMode, Textarea, TextareaState};
 pub use menu::{ContextMenuExt, PopupMenuItem};

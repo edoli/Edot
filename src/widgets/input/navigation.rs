@@ -120,6 +120,33 @@ impl InputState {
             _ => None,
         }
     }
+    fn deletion_range(
+        &self,
+        range: Range<usize>,
+        backward: bool,
+        word: bool,
+        line: bool,
+    ) -> Range<usize> {
+        if !range.is_empty() {
+            return range;
+        }
+        let cursor = range.start;
+        let target = if line {
+            self.visual_edge(cursor, !backward)
+        } else if word {
+            self.word(cursor, backward)
+        } else if backward {
+            self.prev(cursor)
+        } else {
+            self.next(cursor)
+        };
+        if backward {
+            target..cursor
+        } else {
+            cursor..target
+        }
+    }
+
     fn insert_newline(&mut self, below: bool, cx: &mut Context<Self>) {
         self.finish_composition();
         let mut ranges: Vec<_> = self.selected_ranges().collect();
@@ -166,7 +193,58 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let key = event.keystroke.key.as_str();
+        self.key_on(event, cfg!(target_os = "macos"), window, cx);
+    }
+
+    fn key_on(
+        &mut self,
+        event: &KeyDownEvent,
+        macos: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The platform IME owns composition and AltGr/dead-key character input.
+        if event.prefer_character_input {
+            return;
+        }
+        if self.is_composing() {
+            cx.stop_propagation(); // Keep focus traversal and parent shortcuts out of preedit.
+            return;
+        }
+        let modifiers = event.keystroke.modifiers;
+        let primary = super::super::shortcuts::primary_on(modifiers, macos);
+        let shift = modifiers.shift;
+        let mut key = event.keystroke.key.as_str();
+        let mut ctrl = if macos { modifiers.alt } else { primary };
+        if macos {
+            if modifiers.control && !modifiers.platform && !modifiers.alt {
+                key = match key {
+                    "a" => "home",
+                    "e" => "end",
+                    "b" => "left",
+                    "f" => "right",
+                    "p" => "up",
+                    "n" => "down",
+                    "h" => "backspace",
+                    "d" => "delete",
+                    _ => return,
+                };
+            } else if modifiers.control || modifiers.alt && modifiers.platform {
+                return;
+            } else if primary {
+                (key, ctrl) = match key {
+                    "left" => ("home", false),
+                    "right" => ("end", false),
+                    "up" => ("home", true),
+                    "down" => ("end", true),
+                    _ => (key, false),
+                };
+            } else if modifiers.alt && !matches!(key, "left" | "right" | "backspace" | "delete") {
+                return; // Option+letters must remain available for text input.
+            }
+        } else if modifiers.alt || modifiers.platform {
+            return;
+        }
         if self.is_read_only()
             && !matches!(
                 key,
@@ -178,17 +256,14 @@ impl InputState {
             }
             return;
         }
-        let ctrl = event.keystroke.modifiers.control;
-        let shift = event.keystroke.modifiers.shift;
-        if event.keystroke.modifiers.alt || event.keystroke.modifiers.platform {
-            return;
-        }
-        if ctrl && self.multiline && self.text_mode == TextMode::Markdown {
+        if primary && self.multiline && self.text_mode == TextMode::Markdown {
             let marker = match (key, shift) {
                 ("b", false) => Some("**"),
                 ("i", false) => Some("*"),
-                ("`", true) | ("~", false) => Some("~~"),
-                ("`", false) => Some("`"),
+                ("x", true) if macos => Some("~~"),
+                ("e", false) if macos => Some("`"),
+                ("`", true) | ("~", false) if !macos => Some("~~"),
+                ("`", false) if !macos => Some("`"),
                 _ => None,
             };
             if let Some(marker) = marker {
@@ -199,10 +274,9 @@ impl InputState {
                 return;
             }
         }
-        let cursor = self.cursor();
         let mut dest = None;
         match key {
-            "d" if ctrl && !shift && self.multiline => {
+            "d" if primary && !shift && self.multiline => {
                 self.select_next_occurrence(cx);
             }
             "left" | "right" | "home" | "end" => {
@@ -212,62 +286,32 @@ impl InputState {
                 dest = self.navigation_destination(key, ctrl, shift);
             }
             "backspace" | "delete" => {
+                let line = macos && primary;
                 if !self.extra.is_empty() {
                     self.finish_composition();
                     let ranges: Vec<_> = self
                         .selected_ranges()
-                        .map(|range| {
-                            if !range.is_empty() {
-                                range
-                            } else if key == "backspace" {
-                                (if ctrl {
-                                    self.word(range.start, true)
-                                } else {
-                                    self.prev(range.start)
-                                })..range.start
-                            } else {
-                                range.start..if ctrl {
-                                    self.word(range.start, false)
-                                } else {
-                                    self.next(range.start)
-                                }
-                            }
-                        })
+                        .map(|range| self.deletion_range(range, key == "backspace", ctrl, line))
                         .collect();
                     let texts = vec![String::new(); ranges.len()];
                     self.commit_multiple(ranges, texts, false, cx);
                     cx.stop_propagation();
                     return;
                 }
-                let range = if self.selection.is_empty() {
-                    if key == "backspace" {
-                        (if ctrl {
-                            self.word(cursor, true)
-                        } else {
-                            self.prev(cursor)
-                        })..cursor
-                    } else {
-                        cursor..if ctrl {
-                            self.word(cursor, false)
-                        } else {
-                            self.next(cursor)
-                        }
-                    }
-                } else {
-                    self.selection.clone()
-                };
+                let range =
+                    self.deletion_range(self.selection.clone(), key == "backspace", ctrl, line);
                 if !range.is_empty() {
                     self.commit(range, "", false, cx);
                 }
             }
             "enter" => {
                 if self.multiline {
-                    self.insert_newline(ctrl && !shift, cx);
+                    self.insert_newline(primary && !shift, cx);
                 } else {
                     cx.emit(InputEvent::PressEnter { shift });
                 }
             }
-            "tab" if self.multiline && !ctrl => self.replace("\t", window, cx),
+            "tab" if self.multiline && !primary => self.replace("\t", window, cx),
             _ => return,
         }
         if !matches!(key, "up" | "down" | "pageup" | "pagedown") {
@@ -456,10 +500,8 @@ impl InputState {
             cx.stop_propagation();
             return;
         }
-        if e.modifiers.control
-            && !e.modifiers.alt
+        if super::super::shortcuts::primary(e.modifiers)
             && !e.modifiers.shift
-            && !e.modifiers.platform
             && self.open_link_at(e.position, cx)
         {
             self.selecting = false;
@@ -577,5 +619,115 @@ impl InputState {
         // Timer-driven scrolling uses the pointer, rather than revealing a caret
         // that may lie several rows beyond the viewport.
         self.reveal = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InputState, TextMode, Undo};
+    use gpui::{AppContext, EntityInputHandler, KeyDownEvent, Keystroke};
+
+    fn event(key: &str) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: Keystroke::parse(key).unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    #[gpui::test]
+    fn macos_navigation_uses_option_for_words_and_cmd_for_line_and_document(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::widgets::init);
+        let original = "one two\n한글🙂";
+        let window = cx.add_window(|w, cx| {
+            InputState::new(w, cx)
+                .soft_wrap(false)
+                .default_value(original.into())
+        });
+        let editor = window.root(cx).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            w.draw(cx).clear(cx);
+            editor.update(cx, |s, cx| {
+                s.set_selected_range(7..7, cx);
+                s.key_on(&event("alt-left"), true, w, cx);
+                assert_eq!(s.selected_range(), 4..4);
+                s.key_on(&event("cmd-left"), true, w, cx);
+                assert_eq!(s.selected_range(), 0..0);
+                s.key_on(&event("cmd-shift-right"), true, w, cx);
+                assert_eq!(s.selected_value(), "one two");
+                s.key_on(&event("cmd-down"), true, w, cx);
+                assert_eq!(s.selected_range(), original.len()..original.len());
+                s.key_on(&event("cmd-shift-up"), true, w, cx);
+                assert_eq!(s.selected_value(), original);
+                s.set_selected_range(7..7, cx);
+                s.key_on(&event("alt-backspace"), true, w, cx);
+                assert_eq!(s.value(), "one \n한글🙂");
+                s.undo(&Undo, w, cx);
+                assert_eq!(s.value(), original);
+                s.key_on(&event("cmd-backspace"), true, w, cx);
+                assert_eq!(s.value(), "\n한글🙂");
+                s.undo(&Undo, w, cx);
+                s.key_on(&event("ctrl-a"), true, w, cx);
+                assert_eq!(s.selected_range(), 0..0);
+                s.key_on(&event("ctrl-e"), true, w, cx);
+                assert_eq!(s.selected_range(), 7..7);
+                s.set_text_mode(TextMode::Markdown, cx);
+                s.set_selected_range(0..3, cx);
+                s.key_on(&event("cmd-e"), true, w, cx);
+                assert_eq!(s.value(), "`one` two\n한글🙂");
+                s.undo(&Undo, w, cx);
+                s.key_on(&event("cmd-shift-x"), true, w, cx);
+                assert_eq!(s.value(), "~~one~~ two\n한글🙂");
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn composition_keeps_utf16_ranges_and_owns_editing_keys_until_commit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::widgets::init);
+        let original = "A🙂한글Z";
+        let window = cx.add_window(|w, cx| {
+            InputState::new(w, cx)
+                .soft_wrap(false)
+                .default_value(original.into())
+        });
+        let editor = window.root(cx).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                s.set_selected_range(1..5, cx);
+                let mut actual = None;
+                assert_eq!(
+                    s.text_for_range(1..3, &mut actual, w, cx).as_deref(),
+                    Some("🙂")
+                );
+                assert_eq!(actual, Some(1..3));
+                s.replace_and_mark_text_in_range(Some(1..3), "🇰🇷가", Some(4..5), w, cx);
+                assert_eq!(s.selected_text_range(false, w, cx).unwrap().range, 5..6);
+                assert_eq!(s.marked_text_range(w, cx), Some(1..6));
+                let composing = s.value();
+                for macos in [false, true] {
+                    for key in ["enter", "tab", "escape", "backspace", "left"] {
+                        s.key_on(&event(key), macos, w, cx);
+                        assert_eq!(s.value(), composing);
+                        assert!(s.is_composing());
+                    }
+                }
+                s.replace_text_in_range(None, "한", w, cx);
+                assert_eq!(s.value(), "A한한글Z");
+                assert!(!s.is_composing());
+                s.undo(&Undo, w, cx);
+                assert_eq!(s.value(), original);
+                let mut text_input = event("ctrl-alt-backspace");
+                text_input.prefer_character_input = true;
+                s.key_on(&text_input, false, w, cx);
+                assert_eq!(s.value(), original);
+            });
+        })
+        .unwrap();
     }
 }

@@ -162,8 +162,11 @@ pub(super) fn import_images(space: &Path, paths: &[PathBuf]) -> io::Result<Strin
                 .ok_or_else(|| io::Error::other("이미지 파일 이름을 읽을 수 없습니다"))?;
             fs::create_dir_all(&directory)?;
             let original = name;
-            let name = if fs::canonicalize(path)?.parent()
-                == Some(fs::canonicalize(&directory)?.as_path())
+            let source_path = fs::canonicalize(path)?;
+            let images_path = fs::canonicalize(&directory)?;
+            let name = if source_path
+                .parent()
+                .is_some_and(|parent| crate::space::same_path(parent, &images_path))
             {
                 name.to_owned()
             } else {

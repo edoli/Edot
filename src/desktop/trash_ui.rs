@@ -313,7 +313,7 @@ impl TrashBrowser {
                 self.message = None;
                 self.reload(window, cx);
             }
-            "enter" if e.keystroke.modifiers.control && !e.is_held => {
+            "enter" if component::shortcuts::primary(e.keystroke.modifiers) && !e.is_held => {
                 self.restore_selected(window, cx)
             }
             "delete"
@@ -325,10 +325,9 @@ impl TrashBrowser {
             }
             "delete"
                 if !e.is_held
-                    && e.keystroke.modifiers.control
+                    && component::shortcuts::primary(e.keystroke.modifiers)
                     && e.keystroke.modifiers.shift
-                    && !e.keystroke.modifiers.alt
-                    && !e.keystroke.modifiers.platform =>
+                    && !e.keystroke.modifiers.alt =>
             {
                 self.confirm_delete(true, window, cx)
             }

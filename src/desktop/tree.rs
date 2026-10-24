@@ -222,22 +222,21 @@ impl Edot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !modifiers.control && !modifiers.shift && !self.finish_rename(true, false, window, cx) {
+        let primary = component::shortcuts::primary(modifiers);
+        if !primary && !modifiers.shift && !self.finish_rename(true, false, window, cx) {
             return;
         }
         let visible: Vec<_> = self.visible_tree().iter().map(|(id, _)| *id).collect();
-        let preserve = !modifiers.control && !modifiers.shift && self.selection.ids.contains(&id);
+        let preserve = !primary && !modifiers.shift && self.selection.ids.contains(&id);
         if !preserve {
-            self.selection
-                .click(id, &visible, modifiers.control, modifiers.shift);
+            self.selection.click(id, &visible, primary, modifiers.shift);
         }
         // Keep folder activation pending until a click completes. Starting a drag
         // clears this state without changing the folder's expansion.
-        self.pressed = (preserve
-            || (!modifiers.control && !modifiers.shift && self.book.is_folder(id)))
-        .then_some(id);
+        self.pressed =
+            (preserve || (!primary && !modifiers.shift && self.book.is_folder(id))).then_some(id);
         self.caret = Some(id);
-        if !modifiers.control && !modifiers.shift && !self.book.is_folder(id) {
+        if !primary && !modifiers.shift && !self.book.is_folder(id) {
             self.open_tree_note(id, window, cx);
         }
         self.tree_focus.focus(window, cx);

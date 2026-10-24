@@ -3,7 +3,8 @@ param(
     [string]$Repository = 'edoli/Edot',
     [string]$BuildLabel = '',
     [string]$Compiler = $env:INNO_SETUP_COMPILER,
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\target\dist')
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\target\dist'),
+    [switch]$NoBuild
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -36,26 +37,30 @@ Push-Location $projectRoot
 try {
     $env:EDOT_REPOSITORY = $Repository
     $env:EDOT_BUILD_LABEL = $BuildLabel
-    & cargo build --profile release-dist --target-dir target
-    if ($LASTEXITCODE -ne 0) { throw 'release-dist build failed' }
+    if (-not $NoBuild) {
+        & cargo build --profile release-dist --locked --target-dir target
+        if ($LASTEXITCODE -ne 0) { throw 'release-dist build failed' }
+    }
     $executable = Join-Path $projectRoot 'target\release-dist\edot.exe'
     if ((Get-Item -LiteralPath $executable).VersionInfo.ProductVersion -ne $Version) {
         throw 'EXE version does not match the package version'
     }
     & $Compiler "/DAppVersion=$Version" "/DSourceExe=$executable" "/DOutputPath=$OutputDirectory" "/DReleaseRepository=$Repository" (Join-Path $projectRoot 'installer\edot.iss')
     if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
-    $installer = Join-Path $OutputDirectory "Edot-Setup-$Version-windows-x64.exe"
-    $portable = Join-Path $OutputDirectory "Edot-$Version-windows-x64.zip"
+    $installer = Join-Path $OutputDirectory 'edot-installer-exe.exe'
+    $portable = Join-Path $OutputDirectory 'edot-windows.zip'
     # ZIP contains the EXE only; installation registration and updater helpers are not bundled.
     Compress-Archive -LiteralPath $executable -DestinationPath $portable -CompressionLevel Optimal -Force
+    $legacy = Join-Path $OutputDirectory "Edot-Setup-$Version-windows-x64.exe"
+    Copy-Item -LiteralPath $installer -Destination $legacy -Force
     $size = (Get-Item -LiteralPath $installer).Length
     $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
     $manifest = "EDOTUPDATE1`nversion=$Version`nsize=$size`nsha256=$hash`n"
     [IO.File]::WriteAllText((Join-Path $OutputDirectory 'edot-update.txt'), $manifest, (New-Object Text.UTF8Encoding($false)))
-    $checksums = foreach ($path in @($installer, $portable, (Join-Path $OutputDirectory 'edot-update.txt'))) {
+    $checksums = foreach ($path in @($installer, $portable, $legacy, (Join-Path $OutputDirectory 'edot-update.txt'))) {
         (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($path)
     }
-    [IO.File]::WriteAllLines((Join-Path $OutputDirectory 'SHA256SUMS.txt'), [string[]]$checksums, (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllLines((Join-Path $OutputDirectory 'SHA256SUMS-windows.txt'), [string[]]$checksums, (New-Object Text.UTF8Encoding($false)))
     Get-Item -LiteralPath $installer, $portable | Select-Object Name, Length, @{ Name = 'MiB'; Expression = { [Math]::Round($_.Length / 1MB, 2) } }
 } finally {
     Pop-Location

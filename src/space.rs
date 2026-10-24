@@ -6,37 +6,25 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod path_eq;
+mod paths;
+pub use path_eq::same_path;
+pub use paths::config_dir;
+
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub space: PathBuf,
     pub config: PathBuf,
 }
 
-pub fn config_dir() -> PathBuf {
-    std::env::var_os("EDOT_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            if let Some(path) = std::env::var_os("APPDATA") {
-                PathBuf::from(path).join("Edot")
-            } else if let Some(path) = std::env::var_os("LOCALAPPDATA") {
-                PathBuf::from(path).join("EdotConfig")
-            } else {
-                PathBuf::from("EdotConfig")
-            }
-        })
-}
-
 impl Paths {
     pub fn resolve() -> io::Result<Self> {
         let explicit = std::env::var_os("EDOT_SPACE_DIR").map(PathBuf::from);
-        let local = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
         Self::select(
             std::env::args_os().skip(1),
             config_dir(),
             explicit,
-            local.join("Edot/spaces/Default"),
+            paths::default_space(),
         )
     }
 
@@ -196,13 +184,6 @@ pub struct Entry {
 #[derive(Default, Clone, Debug)]
 pub struct Registry {
     pub entries: Vec<Entry>,
-}
-
-pub fn same_path(left: &Path, right: &Path) -> bool {
-    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_owned());
-    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_owned());
-    left.as_os_str().to_string_lossy().to_lowercase()
-        == right.as_os_str().to_string_lossy().to_lowercase()
 }
 
 impl Registry {

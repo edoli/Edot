@@ -57,7 +57,7 @@ impl PopupMenuItem {
         }
     }
     pub fn shortcut(mut self, value: impl Into<SharedString>) -> Self {
-        self.shortcut = Some(value.into());
+        self.shortcut = Some(super::shortcuts::label(value));
         self
     }
     pub fn destructive(mut self) -> Self {
@@ -246,7 +246,9 @@ pub trait ContextMenuExt: InteractiveElement + Sized {
         self,
         build: impl Fn(PopupMenu, &mut Window, &mut App) -> PopupMenu + 'static,
     ) -> Self {
-        self.on_mouse_down(MouseButton::Right, move |e, w, cx| {
+        #[cfg(any(target_os = "macos", test))]
+        let build = Rc::new(build);
+        let open = move |e: &MouseDownEvent, w: &mut Window, cx: &mut App| {
             let menu = PopupMenu::build(w, cx, |m, w, cx| build(m, w, cx));
             menu.focus_handle(cx).focus(w, cx);
             overlays(cx).update(cx, |s, cx| {
@@ -254,7 +256,19 @@ pub trait ContextMenuExt: InteractiveElement + Sized {
                 cx.notify();
             });
             cx.stop_propagation();
-        })
+        };
+        #[cfg(any(target_os = "macos", test))]
+        let target = self.capture_any_mouse_down({
+            let control_click = open.clone();
+            move |e, w, cx| {
+                if super::shortcuts::context_click(e) {
+                    control_click(e, w, cx);
+                }
+            }
+        });
+        #[cfg(not(any(target_os = "macos", test)))]
+        let target = self;
+        target.on_mouse_down(MouseButton::Right, open)
     }
 }
 impl<T: InteractiveElement> ContextMenuExt for T {}

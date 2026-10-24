@@ -117,7 +117,14 @@ impl Render for Root {
             .font_family(theme::UI_FONT)
             .text_size(px(theme::UI_FONT_SIZE))
             .capture_key_down(|event, window, cx| {
-                if event.keystroke.key == "f11" && event.keystroke.modifiers == Modifiers::default()
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "f11" && modifiers == Modifiers::default()
+                    || cfg!(target_os = "macos")
+                        && event.keystroke.key == "f"
+                        && modifiers.platform
+                        && modifiers.control
+                        && !modifiers.alt
+                        && !modifiers.shift
                 {
                     if !event.is_held {
                         window.toggle_fullscreen();
@@ -126,7 +133,12 @@ impl Render for Root {
                 }
             })
             .on_key_down(|event, window, cx| {
-                if event.keystroke.key == "tab" && !event.keystroke.modifiers.control {
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "tab"
+                    && !modifiers.control
+                    && !modifiers.platform
+                    && !modifiers.alt
+                {
                     if event.keystroke.modifiers.shift {
                         window.focus_prev(cx);
                     } else {

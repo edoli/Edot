@@ -40,7 +40,7 @@ impl Button {
         self
     }
     pub fn tooltip(mut self, tip: impl Into<SharedString>) -> Self {
-        self.tip = Some(tip.into());
+        self.tip = Some(super::shortcuts::label(tip));
         self
     }
     pub fn on_click(

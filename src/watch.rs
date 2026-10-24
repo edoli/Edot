@@ -1,10 +1,11 @@
 //! Space directory notifications. Only .edot/tree.tsv and numeric note files are relevant.
 use crate::model::NoteId;
+#[cfg(windows)]
+use std::path::Path;
 use std::{
     collections::HashSet,
     future::poll_fn,
     io,
-    path::Path,
     sync::{Arc, Mutex},
     task::{Poll, Waker},
 };
@@ -39,11 +40,19 @@ impl Changes {
             self.notes.clear();
         }
     }
+    #[cfg(windows)]
     fn path(&mut self, name: &str) {
         if self.rescan {
             return;
         }
         let name = name.replace('\\', "/").to_ascii_lowercase();
+        self.relative_path(&name);
+    }
+    // Unix names are case-sensitive; only the Windows adapter normalizes separators/case.
+    fn relative_path(&mut self, name: &str) {
+        if self.rescan {
+            return;
+        }
         if name == ".edot/tree.tsv" {
             self.tree = true;
         } else if name == "notes" || name == ".edot" {
@@ -131,6 +140,15 @@ impl Events {
         .await
     }
 }
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::Watcher;
+#[cfg(any(target_os = "macos", test))]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::Watcher;
 
 #[cfg(windows)]
 pub use native::Watcher;
@@ -458,3 +476,6 @@ mod tests {
         assert!(events.take().is_none());
     }
 }
+
+#[cfg(test)]
+mod native_tests;

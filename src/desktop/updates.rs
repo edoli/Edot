@@ -8,7 +8,7 @@ impl Edot {
         let state = cx.global::<AppState>();
         // Headless tests cannot wake the scheduler from a native worker thread.
         if cfg!(test)
-            || matches!(state.update_state, State::Checking | State::Installing)
+            || state.update_state.is_busy()
             || state
                 .update_checked
                 .is_some_and(|time| time.elapsed() < Duration::from_secs(300))
@@ -52,10 +52,8 @@ impl Edot {
                 return;
             }
         };
-        let Some(scope) = update::install_scope(&exe) else {
-            cx.open_url(&release.page_url());
-            return;
-        };
+        #[cfg(windows)]
+        let scope = update::install_scope(&exe);
         if self.startup_failed {
             cx.global_mut::<AppState>().update_message =
                 Some("Space를 정상적으로 연 뒤 업데이트하세요.".into());
@@ -68,9 +66,16 @@ impl Edot {
         cx.global_mut::<AppState>().update_state = State::Installing;
         cx.global_mut::<AppState>().update_message = None;
         let download_release = release.clone();
-        let request = self
-            .update_worker(cx)
-            .spawn(async move { update::prepare(&download_release, &exe, scope, &space, &config) });
+        let request = self.update_worker(cx).spawn(async move {
+            #[cfg(windows)]
+            {
+                update::prepare(&download_release, &exe, scope, &space, &config)
+            }
+            #[cfg(unix)]
+            {
+                update::prepare(&download_release, &exe, &space, &config)
+            }
+        });
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
             let _ = this.update_in(cx, |this, window, cx| {

@@ -5,13 +5,13 @@ use crate::{
     editing::{self, CharRange},
     global_search::{self, MatchKey, ResultRow, VisibleRow},
     model::{NoteId, Notebook},
-    platform::StoreLock,
     search::{Cache, Pattern},
     selection::Selection,
     session::Session,
     settings::{Settings, ThemeMode},
     space, startup,
     storage::replace_file,
+    store_lock::StoreLock,
     tabs::CloseMode,
 };
 use gpui::{prelude::*, *};
@@ -49,6 +49,51 @@ mod view;
 mod menus;
 mod metrics;
 use metrics::*;
+
+#[cfg(any(target_os = "macos", test))]
+actions!(edot_app, [QuitEdot]);
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_menu(window: AnyWindowHandle, view: &Entity<Edot>, cx: &mut App) {
+    let quitting_view = view.downgrade();
+    cx.on_app_quit(move |cx| {
+        // The OS may quit without closing a window (for example from the Dock).
+        // GPUI cannot veto at this stage, but we can still flush pending edits.
+        let _ = window.update(cx, |_, window, cx| {
+            let _ = quitting_view.update(cx, |this, cx| this.prepare_window_close(window, cx));
+        });
+        std::future::ready(())
+    })
+    .detach();
+    let view = view.downgrade();
+    cx.on_action(move |_: &QuitEdot, cx| {
+        let _ = window.update(cx, |_, window, cx| {
+            let _ = view.update(cx, |this, cx| this.close_window(window, cx));
+        });
+    });
+    cx.bind_keys([KeyBinding::new("cmd-q", QuitEdot, None)]);
+    let edit_items = component::input::EDIT_COMMANDS
+        .iter()
+        .zip([
+            OsAction::Undo,
+            OsAction::Redo,
+            OsAction::Cut,
+            OsAction::Copy,
+            OsAction::Paste,
+            OsAction::SelectAll,
+        ])
+        .map(|(command, os_action)| MenuItem::Action {
+            name: command.label.into(),
+            action: (command.action)(),
+            os_action: Some(os_action),
+            checked: false,
+            disabled: false,
+        });
+    cx.set_menus([
+        Menu::new("Edot").items([MenuItem::action("Edot 종료", QuitEdot)]),
+        Menu::new("편집").items(edit_items),
+    ]);
+}
 
 pub struct Edot {
     dir: PathBuf,
@@ -353,7 +398,6 @@ impl Edot {
         }
     }
 
-    #[cfg(any(target_os = "linux", test))]
     fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.prepare_window_close(window, cx) {
             window.remove_window();
@@ -386,7 +430,7 @@ pub fn run() {
         ))),
     }
     .map_err(|error| format!("노트 저장소를 열지 못했습니다. 파일을 덮어쓰지 않습니다.\n{error}"));
-    gpui_platform::application()
+    desktop_application()
         .with_assets(component::Assets)
         .run(move |cx| {
             cx.set_http_client(std::sync::Arc::new(
@@ -419,6 +463,8 @@ pub fn run() {
             };
             if let Err(error) = component::open_window(options, cx, |window, cx| {
                 let view = cx.new(|cx| Edot::new(dir, loaded, window, cx));
+                #[cfg(target_os = "macos")]
+                macos_menu(window.window_handle(), &view, cx);
                 let weak = view.downgrade();
                 // Next-frame callbacks run before presentation; the second turn starts
                 // background work only after the first frame has been presented.
@@ -445,4 +491,16 @@ pub fn run() {
                 cx.quit();
             }
         });
+}
+
+fn desktop_application() -> Application {
+    let application = gpui_platform::application();
+    #[cfg(target_os = "linux")]
+    let application = {
+        let mut environment = GraphicalEnvironment::detect();
+        // Use X11 (XWayland in Wayland sessions) without changing the process environment.
+        environment.wayland_display = None;
+        application.with_windowing(WindowingRequest::Windowed(environment))
+    };
+    application
 }
