@@ -918,6 +918,12 @@ fn empty_ime_preedit_allows_held_backspace_and_app_shortcuts(cx: &mut TestAppCon
         assert!(handler.marked_text_range(window, cx).is_none());
     })
     .unwrap();
+    f.press(cx, "secondary-z");
+    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), original));
+    f.press(cx, "secondary-shift-z");
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).value(), "a".repeat(55))
+    });
     f.press(cx, "secondary-f");
     f.update(cx, |this, _, _| assert!(this.find_visible));
 }

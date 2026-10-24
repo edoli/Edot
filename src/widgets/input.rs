@@ -93,6 +93,7 @@ pub struct InputState {
     undo: Vec<Edit>,
     redo: Vec<Edit>,
     last_edit: Option<std::time::Instant>,
+    last_deletion: Option<Keystroke>,
     pending_insertions: Vec<std::rc::Weak<std::cell::Cell<Option<usize>>>>,
     drop_hitbox: Option<Hitbox>,
     drop_position: Option<Point<Pixels>>,
@@ -136,6 +137,7 @@ impl InputState {
         let focus = cx.focus_handle().tab_stop(true);
         let blur = cx.on_blur(&focus, window, |s, _, cx| {
             s.stop_pointer_drag();
+            s.last_edit = None;
             s.focused = false;
             cx.emit(InputEvent::Blur);
             cx.notify();
@@ -149,6 +151,7 @@ impl InputState {
         cx.observe_window_activation(window, |s, window, cx| {
             if !window.is_window_active() {
                 s.stop_pointer_drag();
+                s.last_edit = None;
                 cx.notify();
             }
         })
@@ -186,6 +189,7 @@ impl InputState {
             undo: vec![],
             redo: vec![],
             last_edit: None,
+            last_deletion: None,
             pending_insertions: vec![],
             drop_hitbox: None,
             drop_position: None,

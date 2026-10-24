@@ -22,6 +22,7 @@ impl InputState {
         merge: bool,
         cx: &mut Context<Self>,
     ) {
+        self.last_deletion = None;
         if self.content[range.clone()] == *text {
             self.clear_extra_selections();
             self.selection = range.start + text.len()..range.start + text.len();
@@ -68,6 +69,7 @@ impl InputState {
             extra,
         }) = self.composition.take()
         {
+            self.last_deletion = None;
             self.undo.push(Edit {
                 task_toggle: false,
                 start: 0,
@@ -83,6 +85,54 @@ impl InputState {
         }
         self.marked = None;
         self.extra_marked.clear();
+    }
+
+    /// A physical key hold is one transaction, regardless of repeat delay.
+    pub(super) fn commit_deletion(
+        &mut self,
+        ranges: Vec<Range<usize>>,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if ranges.iter().all(Range::is_empty) {
+            return;
+        }
+        let coalesce = event.is_held
+            && self.last_edit.is_some()
+            && self.last_deletion.as_ref() == Some(&event.keystroke);
+        if self.extra.is_empty() {
+            self.commit(ranges.into_iter().next().unwrap(), "", false, cx);
+        } else {
+            let texts = vec![String::new(); ranges.len()];
+            self.commit_multiple(ranges, texts, false, cx);
+        }
+        if coalesce {
+            let next = self.undo.pop().unwrap();
+            let previous = self.undo.last_mut().unwrap();
+            // Keep a single caret's held deletion compact, including CRLF and
+            // multibyte graphemes. Multi-caret batches retain sequential offsets.
+            if previous.others.is_empty()
+                && next.others.is_empty()
+                && next.start + next.before.len() == previous.start
+            {
+                previous.start = next.start;
+                previous.before.insert_str(0, &next.before);
+            } else if previous.others.is_empty()
+                && next.others.is_empty()
+                && next.start == previous.start
+            {
+                previous.before.push_str(&next.before);
+            } else {
+                previous.others.push(Replacement {
+                    start: next.start,
+                    before: next.before,
+                    after: next.after,
+                });
+                previous.others.extend(next.others);
+            }
+        }
+        self.last_edit = Some(std::time::Instant::now());
+        self.last_deletion = Some(event.keystroke.clone());
     }
     pub(super) fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
         if self.is_read_only()

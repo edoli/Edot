@@ -266,6 +266,7 @@ impl InputState {
         merge: bool,
         cx: &mut Context<Self>,
     ) {
+        self.last_deletion = None;
         let selection = self.selection.clone();
         let reversed = self.reversed;
         let after_wrap = self.caret_after_wrap;

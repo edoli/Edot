@@ -287,22 +287,12 @@ impl InputState {
             }
             "backspace" | "delete" => {
                 let line = macos && primary;
-                if !self.extra.is_empty() {
-                    self.finish_composition();
-                    let ranges: Vec<_> = self
-                        .selected_ranges()
-                        .map(|range| self.deletion_range(range, key == "backspace", ctrl, line))
-                        .collect();
-                    let texts = vec![String::new(); ranges.len()];
-                    self.commit_multiple(ranges, texts, false, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                let range =
-                    self.deletion_range(self.selection.clone(), key == "backspace", ctrl, line);
-                if !range.is_empty() {
-                    self.commit(range, "", false, cx);
-                }
+                self.finish_composition();
+                let ranges = self
+                    .selected_ranges()
+                    .map(|range| self.deletion_range(range, key == "backspace", ctrl, line))
+                    .collect();
+                self.commit_deletion(ranges, event, cx);
             }
             "enter" => {
                 if self.multiline {
@@ -633,6 +623,160 @@ mod tests {
             is_held: false,
             prefer_character_input: false,
         }
+    }
+
+    #[gpui::test]
+    fn held_deletion_restores_graphemes_and_selection_in_one_transaction(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::widgets::init);
+        let window = cx.add_window(InputState::new);
+        let editor = window.root(cx).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                let original = "A👨‍👩‍👧‍👦e\u{301}\r\n한글Z";
+                for key in ["backspace", "delete"] {
+                    s.set_value(original, w, cx);
+                    let at = if key == "backspace" {
+                        original.len()
+                    } else {
+                        0
+                    };
+                    s.set_selected_range(at..at, cx);
+                    for repeat in 0..9 {
+                        let mut deletion = event(key);
+                        deletion.is_held = repeat > 0;
+                        s.key_on(&deletion, false, w, cx);
+                        // Holding a key must also bridge a long OS repeat delay.
+                        s.last_edit =
+                            Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+                    }
+                    assert_eq!(s.value(), "");
+                    assert_eq!(s.undo.len(), 1);
+                    assert!(s.undo[0].others.is_empty());
+                    s.undo(&Undo, w, cx);
+                    assert_eq!(s.value(), original);
+                    assert_eq!(s.selected_range(), at..at);
+                    s.redo(&super::Redo, w, cx);
+                    assert_eq!(s.value(), "");
+                    assert_eq!(s.selected_range(), 0..0);
+                }
+                for (key, expected) in [("backspace", "e"), ("delete", "a")] {
+                    s.set_value("abcde", w, cx);
+                    s.set_selected_range(1..4, cx);
+                    s.key_on(&event(key), false, w, cx);
+                    let mut deletion = event(key);
+                    deletion.is_held = true;
+                    s.key_on(&deletion, false, w, cx);
+                    assert_eq!(s.value(), expected);
+                    s.undo(&Undo, w, cx);
+                    assert_eq!(s.value(), "abcde");
+                    assert_eq!(s.selected_range(), 1..4);
+                    s.redo(&super::Redo, w, cx);
+                    assert_eq!(s.value(), expected);
+                }
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn deletion_groups_end_on_new_press_direction_navigation_and_typing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::widgets::init);
+        let window = cx.add_window(InputState::new);
+        let editor = window.root(cx).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                s.set_value("abcdef", w, cx);
+                s.set_selected_range(3..3, cx);
+                for (key, held) in [
+                    ("backspace", false),
+                    ("backspace", true),
+                    ("delete", true),
+                    ("delete", false),
+                    ("delete", true),
+                ] {
+                    let mut deletion = event(key);
+                    deletion.is_held = held;
+                    s.key_on(&deletion, false, w, cx);
+                }
+                assert_eq!(s.value(), "a");
+                for expected in ["aef", "adef", "abcdef"] {
+                    s.undo(&Undo, w, cx);
+                    assert_eq!(s.value(), expected);
+                }
+
+                s.set_value("abcdef", w, cx);
+                s.set_selected_range(6..6, cx);
+                s.key_on(&event("backspace"), false, w, cx);
+                s.key_on(&event("left"), false, w, cx);
+                s.key_on(&event("right"), false, w, cx);
+                let mut held = event("backspace");
+                held.is_held = true;
+                s.key_on(&held, false, w, cx);
+                s.undo(&Undo, w, cx);
+                assert_eq!(s.value(), "abcde");
+                s.redo(&super::Redo, w, cx);
+                s.replace("X", w, cx);
+                s.key_on(&held, false, w, cx);
+                s.undo(&Undo, w, cx);
+                assert_eq!(s.value(), "abcdX");
+                s.undo(&Undo, w, cx);
+                assert_eq!(s.value(), "abcd");
+                s.undo(&Undo, w, cx);
+                assert_eq!(s.value(), "abcde");
+
+                s.set_value("aa bb cc dd", w, cx);
+                s.set_selected_range(11..11, cx);
+                s.key_on(&event("backspace"), false, w, cx);
+                let mut word_deletion = event("ctrl-backspace");
+                word_deletion.is_held = true;
+                s.key_on(&word_deletion, false, w, cx);
+                s.key_on(&word_deletion, false, w, cx);
+                assert_eq!(s.value(), "aa bb ");
+                s.undo(&Undo, w, cx);
+                assert_eq!(s.value(), "aa bb cc d");
+                s.undo(&Undo, w, cx);
+                assert_eq!(s.value(), "aa bb cc dd");
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn held_multicaret_deletion_undo_survives_overlapping_and_collapsing_carets(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::widgets::init);
+        let window = cx.add_window(|w, cx| InputState::new(w, cx).soft_wrap(false));
+        let editor = window.root(cx).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            editor.update(cx, |s, cx| {
+                let original = "ab🙂 ab🙂";
+                s.set_value(original, w, cx);
+                s.set_selected_range(0.."ab🙂".len(), cx);
+                s.select_next_occurrence(cx);
+                s.key_on(&event("right"), false, w, cx);
+                let selections: Vec<_> = s.selected_ranges().collect();
+                assert_eq!(selections.len(), 2);
+                for repeat in 0..5 {
+                    let mut deletion = event("backspace");
+                    deletion.is_held = repeat > 0;
+                    s.key_on(&deletion, false, w, cx);
+                }
+                assert_eq!(s.value(), "");
+                assert_eq!(s.undo.len(), 1);
+                s.undo(&Undo, w, cx);
+                assert_eq!(s.value(), original);
+                assert_eq!(s.selected_ranges().collect::<Vec<_>>(), selections);
+                s.redo(&super::Redo, w, cx);
+                assert_eq!(s.value(), "");
+                assert_eq!(s.selected_ranges().collect::<Vec<_>>(), vec![0..0]);
+            });
+        })
+        .unwrap();
     }
 
     #[gpui::test]
