@@ -115,10 +115,16 @@ impl EntityInputHandler for InputState {
         r: Option<Range<usize>>,
         text: &str,
         selection: Option<Range<usize>>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.is_read_only() {
+            return;
+        }
+        if text.is_empty() {
+            // An empty preedit must release composition ownership so
+            // held Backspace can continue deleting the surrounding text.
+            self.replace_text_in_range(r, text, window, cx);
             return;
         }
         if self.composition.is_none() {

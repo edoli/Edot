@@ -7,7 +7,11 @@ use std::collections::HashSet;
 fn startup_font_refresh_keeps_the_open_picker_selection(cx: &mut TestAppContext) {
     let fixture = Fixture::new(cx);
     fixture.update(cx, |this, window, cx| {
-        this.apply_startup_font_names(vec!["Consolas".into(), "Segoe UI".into()], window, cx);
+        this.apply_startup_font_names(
+            vec![crate::settings::DEFAULT_FONT.into(), "Segoe UI".into()],
+            window,
+            cx,
+        );
         this.show_settings(window, cx);
         this.preferences
             .as_ref()
@@ -19,11 +23,18 @@ fn startup_font_refresh_keeps_the_open_picker_selection(cx: &mut TestAppContext)
     fixture.press(cx, "down");
     fixture.update(cx, |this, window, cx| {
         this.apply_startup_font_names(
-            vec!["Arial".into(), "Consolas".into(), "Segoe UI".into()],
+            vec![
+                "Arial".into(),
+                crate::settings::DEFAULT_FONT.into(),
+                "Segoe UI".into(),
+            ],
             window,
             cx,
         );
-        assert_eq!(cx.global::<AppState>().settings.font, "Consolas");
+        assert_eq!(
+            cx.global::<AppState>().settings.font,
+            crate::settings::DEFAULT_FONT
+        );
     });
     fixture.press(cx, "enter");
     fixture.update(cx, |_, _, cx| {

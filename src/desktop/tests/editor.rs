@@ -879,6 +879,95 @@ fn korean_ime_protocol_and_emoji_selection_are_atomic(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn empty_ime_preedit_allows_held_backspace_and_app_shortcuts(cx: &mut TestAppContext) {
+    use gpui::InputEvent as _;
+
+    let f = Fixture::new(cx);
+    let original = "a".repeat(80);
+    let editor = f.update(cx, |this, window, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| {
+            s.set_value(original.as_str(), window, cx);
+            s.set_selected_range(original.len()..original.len(), cx);
+        });
+        this.focus_editor(window, cx);
+        editor
+    });
+    cx.update_window(f.window, |_, window, cx| {
+        window.render_frame(cx);
+        let mut handler = ElementInputHandler::new(Bounds::default(), editor.clone());
+        handler.replace_and_mark_text_in_range(None, "ㄱ", Some(1..1), window, cx);
+        handler.replace_and_mark_text_in_range(None, "가", Some(1..1), window, cx);
+        assert_eq!(editor.read(cx).value(), format!("{original}가"));
+        // Empty preedit must release editing keys without a separate unmark callback.
+        handler.replace_and_mark_text_in_range(None, "", None, window, cx);
+        window.render_frame(cx);
+        for repeat in 0..25 {
+            window.dispatch_event(
+                gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse("backspace").unwrap(),
+                    is_held: repeat > 0,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        }
+        assert_eq!(editor.read(cx).value(), "a".repeat(55));
+        assert!(!editor.read(cx).is_composing());
+        assert!(handler.marked_text_range(window, cx).is_none());
+    })
+    .unwrap();
+    f.press(cx, "secondary-f");
+    f.update(cx, |this, _, _| assert!(this.find_visible));
+}
+
+#[gpui::test]
+fn empty_ime_preedit_preserves_multicaret_undo_and_redo(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx);
+    let original = "A🙂Z A🙂Z";
+    let editor = f.update(cx, |this, window, cx| {
+        let editor = this.active_editor().unwrap();
+        editor.update(cx, |s, cx| {
+            s.set_value(original, window, cx);
+            s.set_selected_range(1..5, cx);
+        });
+        this.focus_editor(window, cx);
+        editor
+    });
+    f.press(cx, "secondary-d");
+    let selections = f.update(cx, |_, _, cx| {
+        let selections = editor.read(cx).selected_ranges().collect::<Vec<_>>();
+        assert_eq!(selections.len(), 2);
+        selections
+    });
+    cx.update_window(f.window, |_, window, cx| {
+        let mut handler = ElementInputHandler::new(Bounds::default(), editor.clone());
+        handler.replace_and_mark_text_in_range(None, "한", Some(1..1), window, cx);
+        assert_eq!(editor.read(cx).value(), "A한Z A한Z");
+        handler.replace_and_mark_text_in_range(None, "", Some(0..0), window, cx);
+        assert_eq!(editor.read(cx).value(), "AZ AZ");
+        assert!(!editor.read(cx).is_composing());
+        assert!(handler.marked_text_range(window, cx).is_none());
+        // A later macOS unmarkText callback must not add another undo transaction.
+        handler.unmark_text(window, cx);
+    })
+    .unwrap();
+    f.press(cx, "secondary-z");
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).value(), original);
+        assert_eq!(
+            editor.read(cx).selected_ranges().collect::<Vec<_>>(),
+            selections
+        );
+    });
+    f.press(cx, "secondary-shift-z");
+    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), "AZ AZ"));
+    f.press(cx, "backspace");
+    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), "Z Z"));
+}
+
+#[gpui::test]
 fn editor_graphemes_crlf_clipboard_and_redo(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let editor = f.update(cx, |this, window, cx| {
