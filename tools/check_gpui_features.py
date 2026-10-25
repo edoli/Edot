@@ -21,6 +21,13 @@ for section, name in [
     assert entry["git"] == git_url and entry["rev"] == revision, (section, name)
     assert entry.get("default-features") is False, (section, name)
     assert "path" not in entry and "package" not in entry, (section, name)
+for target, dependencies in manifest["target"].items():
+    for name, entry in dependencies.get("dependencies", {}).items():
+        if name not in {"gpui", "gpui_platform"}:
+            continue
+        assert entry["git"] == git_url and entry["rev"] == revision, (target, name)
+        assert entry.get("default-features") is False, (target, name)
+        assert "path" not in entry and "package" not in entry, (target, name)
 lock = tomllib.loads((root / "Cargo.lock").read_text(encoding="utf-8"))
 locked = {(entry["name"], entry["version"]): entry for entry in lock["package"]}
 # Cargo metadata can report features unified across other platforms even with
