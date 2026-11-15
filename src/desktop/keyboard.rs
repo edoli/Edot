@@ -119,7 +119,7 @@ impl Edot {
             if !event.is_held {
                 self.session.sidebar_visible = !self.session.sidebar_visible;
             }
-        } else if ctrl && shift && !event.keystroke.modifiers.alt && key == "p" {
+        } else if ctrl && shift && key == "v" {
             if !event.is_held
                 && self.active_editor().is_some()
                 && self.set_read_only(!cx.global::<AppState>().settings.read_only, window, cx)

@@ -261,9 +261,8 @@ impl InputState {
                 ("b", false) => Some("**"),
                 ("i", false) => Some("*"),
                 ("x", true) if macos => Some("~~"),
-                ("e", false) if macos => Some("`"),
+                ("e", false) => Some("`"),
                 ("`", true) | ("~", false) if !macos => Some("~~"),
-                ("`", false) if !macos => Some("`"),
                 _ => None,
             };
             if let Some(marker) = marker {

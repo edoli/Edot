@@ -46,8 +46,8 @@ fn mac_label(value: &str) -> String {
         ("Ctrl+PageUp", "Ctrl+PageUp"),
         ("Ctrl+Home", "Cmd+↑"),
         ("Ctrl+End", "Cmd+↓"),
+        ("Ctrl+Enter", "Cmd+Enter"),
         ("Ctrl+Shift+`", "Cmd+Shift+X"),
-        ("Ctrl+`", "Cmd+E"),
         ("Ctrl+Shift+H", "Cmd+Option+Shift+F"),
         ("Ctrl+H", "Cmd+Option+F"),
         ("Ctrl+Y", "Cmd+Shift+Z"),
@@ -111,6 +111,10 @@ mod tests {
             ));
         }
         assert_eq!(mac_label("Ctrl+W / Ctrl+F4"), "Cmd+W");
+        assert_eq!(mac_label("Ctrl+E"), "Cmd+E");
+        assert_eq!(mac_label("Ctrl+Shift+V"), "Cmd+Shift+V");
+        assert_eq!(mac_label("Ctrl+Shift+` / Ctrl+E"), "Cmd+Shift+X / Cmd+E");
+        assert_eq!(mac_label("Ctrl+Enter"), "Cmd+Enter");
         assert_eq!(
             mac_label("Ctrl+Tab / Ctrl+PageDown"),
             "Ctrl+Tab / Ctrl+PageDown"

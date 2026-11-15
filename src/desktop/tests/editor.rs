@@ -34,6 +34,20 @@ fn macos_app_commands_preserve_system_tab_switching_and_replace_shortcuts(cx: &m
         assert!(this.find_visible);
         assert!(this.local.replace);
     });
+    for key in ["cmd-e", "cmd-shift-p"] {
+        press(key, cx);
+        f.update(cx, |_, _, cx| {
+            assert!(!cx.global::<AppState>().settings.read_only);
+        });
+    }
+    press("cmd-shift-v", cx);
+    f.update(cx, |_, _, cx| {
+        assert!(cx.global::<AppState>().settings.read_only);
+    });
+    press("cmd-shift-v", cx);
+    f.update(cx, |_, _, cx| {
+        assert!(!cx.global::<AppState>().settings.read_only);
+    });
 }
 
 #[gpui::test]
@@ -98,7 +112,7 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
             ("ctrl-i", "*"),
             ("ctrl-shift-`", "~~"),
             ("ctrl-~", "~~"), // Windows normalizes Shift+backtick to '~'.
-            ("ctrl-`", "`"),
+            ("ctrl-e", "`"),
         ] {
             let original = "앞 한글🙂 뒤";
             let start = "앞 ".len();
@@ -135,7 +149,7 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
             ("**한글**", "ctrl-i", "***한글***"),
             ("***한글***", "ctrl-b", "*한글*"),
             ("~~한글~~", "ctrl-shift-`", "한글"),
-            ("`한글`", "ctrl-`", "한글"),
+            ("`한글`", "ctrl-e", "한글"),
         ] {
             editor.update(cx, |s, cx| {
                 s.set_value(source, window, cx);
@@ -151,9 +165,9 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
                 s.set_value(source, window, cx);
                 s.select_all(window, cx);
             });
-            window.press("ctrl-`", cx);
+            window.press("ctrl-e", cx);
             assert_eq!(editor.read(cx).selected_value(), source);
-            window.press("ctrl-`", cx);
+            window.press("ctrl-e", cx);
             assert_eq!(editor.read(cx).value(), source);
         }
         // All selected occurrences are formatted in one undo transaction.
@@ -180,7 +194,7 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
             s.select_all(window, cx);
             s.set_text_mode(TextMode::PlainText, cx);
         });
-        for key in ["ctrl-b", "ctrl-i", "ctrl-shift-`", "ctrl-~", "ctrl-`"] {
+        for key in ["ctrl-b", "ctrl-i", "ctrl-shift-`", "ctrl-~", "ctrl-e"] {
             window.press(key, cx);
         }
         assert_eq!(editor.read(cx).value(), "plain");
@@ -196,6 +210,10 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
         assert_eq!(this.session.sidebar_visible, sidebar)
     });
     f.press(cx, "ctrl-shift-p");
+    f.update(cx, |_, _, cx| {
+        assert!(!cx.global::<AppState>().settings.read_only);
+    });
+    f.press(cx, "ctrl-shift-v");
     f.update(cx, |this, _, cx| {
         assert!(cx.global::<AppState>().settings.read_only);
         assert!(
@@ -213,11 +231,11 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
     f.update(cx, |_, _, cx| {
         editor.update(cx, |s, cx| s.set_text_mode(TextMode::Markdown, cx))
     });
-    for key in ["ctrl-b", "ctrl-i", "ctrl-shift-`", "ctrl-~", "ctrl-`"] {
+    for key in ["ctrl-b", "ctrl-i", "ctrl-shift-`", "ctrl-~", "ctrl-e"] {
         f.press(cx, key);
     }
     f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), "plain"));
-    f.press(cx, "ctrl-shift-p");
+    f.press(cx, "ctrl-shift-v");
     f.update(cx, |_, _, cx| {
         assert!(!cx.global::<AppState>().settings.read_only);
         assert!(!editor.read(cx).is_read_only());
@@ -277,7 +295,7 @@ fn shortcut_search_filters_rows_and_preserves_input_and_editor_focus(cx: &mut Te
     draw(&mut visual);
     assert!(visual.debug_bounds("shortcut-row-2").is_some());
     f.press(cx, "ctrl-f");
-    cx.simulate_input(f.window, "cTrL + ShIfT + p");
+    cx.simulate_input(f.window, "cTrL + ShIfT + v");
     draw(&mut visual);
     assert!(visual.debug_bounds("shortcut-row-12").is_some());
     assert!(visual.debug_bounds("shortcut-row-2").is_none());
