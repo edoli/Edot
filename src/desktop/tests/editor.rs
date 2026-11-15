@@ -871,6 +871,128 @@ fn newline_keeps_indentation_and_ctrl_enter_inserts_below(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn markdown_url_paste_links_single_line_selections_and_preserves_paste_history(
+    cx: &mut TestAppContext,
+) {
+    use crate::widgets::TextMode;
+    use gpui::ClipboardItem;
+    let f = Fixture::new(cx);
+    let editor = f.update(cx, |this, window, cx| {
+        this.focus_editor(window, cx);
+        this.active_editor().unwrap()
+    });
+    cx.update_window(f.window, |_, window, cx| {
+        window.render_frame(cx);
+        let url = "https://example.com/docs?q=1&lang=ko#part";
+        for (source, selection, clipboard, mode, expected) in [
+            (
+                "앞 공식 문서🙂 뒤",
+                "앞 ".len().."앞 공식 문서🙂".len(),
+                url,
+                TextMode::Markdown,
+                "앞 [공식 문서🙂](https://example.com/docs?q=1&lang=ko#part) 뒤",
+            ),
+            (
+                "문서",
+                0..6,
+                "HTTP://localhost:3000",
+                TextMode::Markdown,
+                "[문서](HTTP://localhost:3000)",
+            ),
+            (
+                "문서",
+                0..0,
+                url,
+                TextMode::Markdown,
+                "https://example.com/docs?q=1&lang=ko#part문서",
+            ),
+            ("a\nb", 0..3, url, TextMode::Markdown, url),
+            ("a\rb", 0..3, url, TextMode::Markdown, url),
+            ("문서", 0..6, url, TextMode::PlainText, url),
+            (
+                "문서",
+                0..6,
+                "www.example.com",
+                TextMode::Markdown,
+                "www.example.com",
+            ),
+            ("문서", 0..6, "https://", TextMode::Markdown, "https://"),
+            (
+                "문서",
+                0..6,
+                "javascript:alert(1)",
+                TextMode::Markdown,
+                "javascript:alert(1)",
+            ),
+            (
+                "문서",
+                0..6,
+                "https://a.test https://b.test",
+                TextMode::Markdown,
+                "https://a.test https://b.test",
+            ),
+            (
+                "문서",
+                0..6,
+                "https://a.test\n",
+                TextMode::Markdown,
+                "https://a.test\n",
+            ),
+            (
+                "문서",
+                0..6,
+                "https://a.test/\tpath",
+                TextMode::Markdown,
+                "https://a.test/\tpath",
+            ),
+            (
+                "문서",
+                0..6,
+                "일반 텍스트",
+                TextMode::Markdown,
+                "일반 텍스트",
+            ),
+        ] {
+            editor.update(cx, |s, cx| {
+                s.set_value(source, window, cx);
+                s.set_text_mode(mode, cx);
+                s.set_selected_range(selection.clone(), cx);
+            });
+            cx.write_to_clipboard(ClipboardItem::new_string(clipboard.to_owned()));
+            window.press("secondary-v", cx);
+            assert_eq!(editor.read(cx).value(), expected);
+            assert!(!editor.read(cx).is_read_only());
+            window.press("secondary-z", cx);
+            assert_eq!(editor.read(cx).value(), source);
+            assert_eq!(editor.read(cx).selected_range(), selection);
+            window.press("secondary-shift-z", cx);
+            assert_eq!(editor.read(cx).value(), expected);
+        }
+        editor.update(cx, |s, cx| {
+            s.set_value("문서 문서", window, cx);
+            s.set_text_mode(TextMode::Markdown, cx);
+            s.set_selected_range(0..6, cx);
+        });
+        window.press("secondary-d", cx);
+        assert_eq!(editor.read(cx).selected_ranges().count(), 2);
+        cx.write_to_clipboard(ClipboardItem::new_string(url.to_owned()));
+        window.press("secondary-v", cx);
+        assert_eq!(editor.read(cx).value(), format!("{url} {url}"));
+        window.press("secondary-z", cx);
+        assert_eq!(editor.read(cx).value(), "문서 문서");
+        assert_eq!(editor.read(cx).selected_ranges().count(), 2);
+        editor.update(cx, |s, cx| {
+            s.set_value("문서", window, cx);
+            s.set_selected_range(0..6, cx);
+            s.set_read_only(true, cx);
+        });
+        window.press("secondary-v", cx);
+        assert_eq!(editor.read(cx).value(), "문서");
+    })
+    .unwrap();
+}
+
+#[gpui::test]
 fn korean_ime_protocol_and_emoji_selection_are_atomic(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let editor = f.update(cx, |this, window, cx| {

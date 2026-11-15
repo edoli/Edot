@@ -1,6 +1,40 @@
 //! Web URL detection, decorations and exact glyph hit testing.
 use super::*;
 
+pub(super) fn pasted_markdown_link(label: &str, url: &str) -> Option<String> {
+    if label.is_empty()
+        || label.contains(['\r', '\n'])
+        || url.chars().any(|c| c.is_whitespace() || c.is_control())
+        || !url
+            .get(..7)
+            .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
+            && !url
+                .get(..8)
+                .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+    {
+        return None;
+    }
+    let parsed = gpui::http_client::Url::parse(url).ok()?;
+    parsed.host_str()?;
+    let mut link = String::with_capacity(label.len() + url.len() + 4);
+    link.push('[');
+    for c in label.chars() {
+        if matches!(c, '\\' | '[' | ']') {
+            link.push('\\');
+        }
+        link.push(c);
+    }
+    link.push_str("](");
+    for c in url.chars() {
+        if matches!(c, '\\' | '(' | ')' | '<' | '>') {
+            link.push('\\');
+        }
+        link.push(c);
+    }
+    link.push(')');
+    Some(link)
+}
+
 pub(super) fn ranges(text: &str) -> Vec<Range<usize>> {
     static PREFIX: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
         regex_lite::Regex::new(r"(?i)https?://|www\.").expect("valid URL prefix pattern")
@@ -186,6 +220,36 @@ impl InputState {
 #[cfg(test)]
 mod tests {
     use super::{TextRun, layout, ranges, text_runs};
+
+    #[test]
+    fn pasted_link_escapes_label_brackets_and_url_delimiters_for_markdown() {
+        let label = "문서 [v1] \\ 경로🙂";
+        let url = "https://example.com/a_(b)?end=)#부분";
+        let markdown = super::pasted_markdown_link(label, url).unwrap();
+        assert_eq!(
+            markdown,
+            "[문서 \\[v1\\] \\\\ 경로🙂](https://example.com/a_\\(b\\)?end=\\)#부분)"
+        );
+        let events: Vec<_> = pulldown_cmark::Parser::new(&markdown).collect();
+        let destinations: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) => {
+                    Some(dest_url.as_ref())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(destinations, [url]);
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::Text(text) => Some(text.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, label);
+    }
 
     #[test]
     fn web_urls_keep_balanced_paths_unicode_and_queries_but_exclude_surrounding_punctuation() {

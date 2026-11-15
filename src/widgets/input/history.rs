@@ -346,6 +346,12 @@ impl InputState {
                 self.commit_multiple(ranges, texts, false, cx);
                 return;
             }
+            let text =
+                if self.multiline && self.text_mode == TextMode::Markdown && !self.is_composing() {
+                    links::pasted_markdown_link(self.selected_value(), &text).unwrap_or(text)
+                } else {
+                    text
+                };
             self.last_edit = None;
             self.replace(text, window, cx);
             self.last_edit = None;
