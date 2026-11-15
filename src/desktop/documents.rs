@@ -134,7 +134,7 @@ impl Edot {
                     .content_padding(Edges {
                         left: px(16.),
                         top: px(6.),
-                        right: px(4.),
+                        right: px(16.),
                         bottom: px(0.),
                     })
                     .soft_wrap(cx.global::<AppState>().settings.wrap)
