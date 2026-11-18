@@ -146,6 +146,7 @@ mod editor;
 mod file_sync;
 mod images;
 mod search;
+mod shortcuts;
 mod spaces;
 mod trash;
 mod tree;

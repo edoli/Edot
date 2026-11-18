@@ -32,7 +32,7 @@ impl Render for DragLabel {
             .child(self.0.clone())
     }
 }
-fn tool(id: &'static str, icon: IconName, tip: &'static str) -> Button {
+fn tool(id: &'static str, icon: IconName, tip: impl Into<SharedString>) -> Button {
     Button::new(id).small().icon(icon).tooltip(tip)
 }
 
@@ -84,9 +84,6 @@ impl Render for Edot {
             .child(self.body_view(cx));
         if self.find_visible {
             body = body.child(self.local_view(cx));
-        }
-        if self.settings_visible {
-            body = body.child(self.settings_view(cx));
         }
         let main = div()
             .v_flex()
@@ -288,6 +285,9 @@ impl Render for Edot {
                         }),
                     ),
             );
+        }
+        if self.settings_visible {
+            root = root.child(self.settings_view(cx));
         }
         if let Some(menu) = &self.keyboard_menu {
             root = root.child(

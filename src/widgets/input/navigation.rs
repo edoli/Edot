@@ -211,6 +211,50 @@ impl InputState {
             cx.stop_propagation(); // Keep focus traversal and parent shortcuts out of preedit.
             return;
         }
+        use crate::shortcuts::{ActiveShortcuts, Command};
+        let command = cx
+            .global::<ActiveShortcuts>()
+            .command(&event.keystroke, macos);
+        match command {
+            Some(Command::Undo) => self.undo(&Undo, window, cx),
+            Some(Command::Redo) => self.redo(&Redo, window, cx),
+            Some(Command::Cut) => self.cut(&Cut, window, cx),
+            Some(Command::Copy) => self.copy(&Copy, window, cx),
+            Some(Command::Paste) => self.paste(&Paste, window, cx),
+            Some(Command::SelectAll) => self.select_all(window, cx),
+            Some(Command::NextOccurrence) if self.multiline && !self.is_read_only() => {
+                self.select_next_occurrence(cx)
+            }
+            Some(Command::Bold | Command::Italic | Command::Strike | Command::Code)
+                if self.multiline
+                    && self.text_mode == TextMode::Markdown
+                    && !self.is_read_only() =>
+            {
+                if !event.is_held {
+                    let marker = match command.unwrap() {
+                        Command::Bold => "**",
+                        Command::Italic => "*",
+                        Command::Strike => "~~",
+                        _ => "`",
+                    };
+                    self.toggle_inline_format(marker, cx);
+                }
+            }
+            _ => {
+                self.navigation_key(event, macos, window, cx);
+                return;
+            }
+        }
+        cx.stop_propagation();
+    }
+
+    fn navigation_key(
+        &mut self,
+        event: &KeyDownEvent,
+        macos: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let modifiers = event.keystroke.modifiers;
         let primary = super::super::shortcuts::primary_on(modifiers, macos);
         let shift = modifiers.shift;
@@ -256,28 +300,8 @@ impl InputState {
             }
             return;
         }
-        if primary && self.multiline && self.text_mode == TextMode::Markdown {
-            let marker = match (key, shift) {
-                ("b", false) => Some("**"),
-                ("i", false) => Some("*"),
-                ("x", true) if macos => Some("~~"),
-                ("e", false) => Some("`"),
-                ("`", true) | ("~", false) if !macos => Some("~~"),
-                _ => None,
-            };
-            if let Some(marker) = marker {
-                if !event.is_held {
-                    self.toggle_inline_format(marker, cx);
-                }
-                cx.stop_propagation();
-                return;
-            }
-        }
         let mut dest = None;
         match key {
-            "d" if primary && !shift && self.multiline => {
-                self.select_next_occurrence(cx);
-            }
             "left" | "right" | "home" | "end" => {
                 dest = self.navigation_destination(key, ctrl, shift);
             }

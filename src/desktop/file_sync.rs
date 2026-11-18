@@ -317,9 +317,11 @@ impl Edot {
                 Err(failure) => {
                     if failure.kind() == io::ErrorKind::NotFound {
                         self.file_sync.missing.insert(id);
-                        error = Some(
-                            "본문 파일이 삭제되었습니다 · 현재 내용 유지 · Ctrl+S로 복원".into(),
-                        );
+                        error = Some(crate::shortcuts::tip(
+                            crate::shortcuts::Command::Save,
+                            "본문 파일이 삭제되었습니다 · 현재 내용 유지 · 명시적으로 저장하면 복원",
+                            cx,
+                        ));
                     } else {
                         error = Some(format!(
                             "본문 변경을 읽지 못했습니다 · 현재 내용 유지 · {failure}"

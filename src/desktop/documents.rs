@@ -258,8 +258,11 @@ impl Edot {
             let text = editor.read(cx).value().to_string();
             let path = self.book.file(&self.dir, tab.id);
             if !restore_missing && !path.exists() {
-                self.status =
-                    "본문 파일이 삭제되었습니다 · Ctrl+S로 앱 내용을 복원할 수 있습니다".into();
+                self.status = crate::shortcuts::tip(
+                    crate::shortcuts::Command::Save,
+                    "본문 파일이 삭제되었습니다 · 명시적으로 저장하면 앱 내용을 복원합니다",
+                    cx,
+                );
                 cx.notify();
                 return false;
             }

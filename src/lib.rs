@@ -8,6 +8,7 @@ pub mod search;
 pub mod selection;
 pub mod session;
 pub mod settings;
+pub mod shortcuts;
 pub mod space;
 pub mod storage;
 pub mod store_lock;

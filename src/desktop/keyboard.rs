@@ -1,4 +1,5 @@
 use super::*;
+use crate::shortcuts::{ActiveShortcuts, Command};
 
 impl Edot {
     pub(super) fn key_down(
@@ -60,13 +61,39 @@ impl Edot {
         {
             return;
         }
+        let command = cx
+            .global::<ActiveShortcuts>()
+            .command(&event.keystroke, macos);
         let modifiers = event.keystroke.modifiers;
         let ctrl = component::shortcuts::primary_on(modifiers, macos);
         let shift = modifiers.shift;
         if self.shortcut_help.is_some() || self.trash_browser.is_some() {
             return;
         }
-        if key == "f1" && event.keystroke.modifiers == Modifiers::default() {
+        if event.is_held
+            && command.is_some_and(|command| {
+                !matches!(
+                    command,
+                    Command::ZoomIn
+                        | Command::ZoomOut
+                        | Command::NextTab
+                        | Command::PreviousTab
+                        | Command::NextMatch
+                        | Command::PreviousMatch
+                        | Command::Undo
+                        | Command::Redo
+                        | Command::Cut
+                        | Command::Copy
+                        | Command::Paste
+                        | Command::SelectAll
+                        | Command::NextOccurrence
+                )
+            })
+        {
+            cx.stop_propagation();
+            return;
+        }
+        if command == Some(Command::Help) {
             if !event.is_held {
                 self.show_shortcuts(window, cx);
             }
@@ -82,68 +109,71 @@ impl Edot {
                 .focus_handle(cx)
                 .is_focused(window);
         let mut handled = true;
-        if (key == "f10" && shift || key == "menu" || key == "apps")
+        if (key == "f10"
+            && modifiers
+                == Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                }
+            || matches!(key, "menu" | "apps") && modifiers == Modifiers::default())
             && !title
             && !self.settings_visible
         {
             self.show_keyboard_menu(window, cx);
         } else if title && matches!(key, "escape" | "enter" | "tab") {
             self.finish_rename(key != "escape", true, window, cx);
-        } else if modifiers.alt
-            && !shift
-            && !modifiers.control
-            && modifiers.platform == macos
-            && key == "z"
-        {
+        } else if command == Some(Command::Wrap) {
             let mut next = cx.global::<AppState>().settings.clone();
             next.wrap = !next.wrap;
             self.change_settings(next, window, cx);
-        } else if ctrl && shift && key == "n" {
+        } else if command == Some(Command::NewFolder) {
             self.create_folder(None, window, cx);
-        } else if ctrl && key == "n" {
+        } else if command == Some(Command::NewNote) {
             self.create_note(None, window, cx);
-        } else if ctrl && key == "s" {
+        } else if command == Some(Command::Save) {
             self.finish_rename(true, false, window, cx);
             self.save_all_explicit(cx);
-        } else if ctrl && (key == "w" || !macos && key == "f4" && !shift) {
-            if macos && (shift || self.open.is_empty()) {
+        } else if command == Some(Command::CloseTab) || macos && ctrl && shift && key == "w" {
+            if macos && (ctrl && shift && key == "w" || self.open.is_empty()) {
                 self.close_window(window, cx);
                 return;
             }
             if let Some(id) = self.session.active {
                 self.close_tabs(id, crate::tabs::CloseMode::Current, window, cx);
             }
-        } else if ctrl && shift && key == "t" && !event.keystroke.modifiers.alt {
+        } else if command == Some(Command::ReopenTab) {
             self.reopen_closed_tab(window, cx);
-        } else if ctrl && !shift && !event.keystroke.modifiers.alt && key == "\\" {
+        } else if command == Some(Command::Sidebar) {
             if !event.is_held {
                 self.session.sidebar_visible = !self.session.sidebar_visible;
             }
-        } else if ctrl && shift && key == "v" {
+        } else if command == Some(Command::ReadOnly) {
             if !event.is_held
                 && self.active_editor().is_some()
                 && self.set_read_only(!cx.global::<AppState>().settings.read_only, window, cx)
             {
                 self.focus_editor(window, cx);
             }
-        } else if ctrl && key == "," {
+        } else if command == Some(Command::Settings) {
             self.show_settings(window, cx);
-        } else if ctrl && (key == "f" || !macos && key == "h")
-            || macos && modifiers.platform && modifiers.alt && !modifiers.control && key == "f"
-        {
-            self.show_find(shift, key == "h" || modifiers.alt, window, cx);
-        } else if modifiers.control
-            && !modifiers.alt
-            && !modifiers.platform
-            && matches!(key, "tab" | "pagedown" | "pageup")
-        {
+        } else if matches!(
+            command,
+            Some(Command::Find | Command::Replace | Command::GlobalFind | Command::GlobalReplace)
+        ) {
+            self.show_find(
+                matches!(command, Some(Command::GlobalFind | Command::GlobalReplace)),
+                matches!(command, Some(Command::Replace | Command::GlobalReplace)),
+                window,
+                cx,
+            );
+        } else if matches!(command, Some(Command::NextTab | Command::PreviousTab)) {
             if !self.open.is_empty() {
                 let index = self
                     .open
                     .iter()
                     .position(|tab| Some(tab.id) == self.session.active)
                     .unwrap_or(0);
-                let previous = key == "pageup" || key == "tab" && shift;
+                let previous = command == Some(Command::PreviousTab);
                 let index = if previous {
                     (index + self.open.len() - 1) % self.open.len()
                 } else {
@@ -151,16 +181,35 @@ impl Edot {
                 };
                 self.open_note(self.open[index].id, true, window, cx);
             }
-        } else if ctrl && matches!(key, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9") {
-            let index = if key == "9" {
-                self.open.len().saturating_sub(1)
-            } else {
-                key.parse::<usize>().unwrap() - 1
+        } else if matches!(
+            command,
+            Some(
+                Command::Tab1
+                    | Command::Tab2
+                    | Command::Tab3
+                    | Command::Tab4
+                    | Command::Tab5
+                    | Command::Tab6
+                    | Command::Tab7
+                    | Command::Tab8
+                    | Command::LastTab
+            )
+        ) {
+            let index = match command.unwrap() {
+                Command::Tab1 => 0,
+                Command::Tab2 => 1,
+                Command::Tab3 => 2,
+                Command::Tab4 => 3,
+                Command::Tab5 => 4,
+                Command::Tab6 => 5,
+                Command::Tab7 => 6,
+                Command::Tab8 => 7,
+                _ => self.open.len().saturating_sub(1),
             };
             if let Some(tab) = self.open.get(index) {
                 self.open_note(tab.id, true, window, cx);
             }
-        } else if key == "f2" && modifiers == Modifiers::default() {
+        } else if command == Some(Command::Rename) {
             let id = if self.session.sidebar_visible {
                 self.caret
             } else {
@@ -169,7 +218,7 @@ impl Edot {
             if let Some(id) = id {
                 self.begin_rename(id, window, cx);
             }
-        } else if key == "f3" && !modifiers.control && !modifiers.alt && !modifiers.platform {
+        } else if matches!(command, Some(Command::NextMatch | Command::PreviousMatch)) {
             let global_focus = self
                 .global
                 .query
@@ -184,16 +233,15 @@ impl Edot {
                     .is_focused(window)
                 || results;
             let global = self.search_mode && (!self.find_visible || global_focus);
-            self.navigate(global, shift, window, cx);
-        } else if modifiers == Modifiers::default()
-            && matches!(key, "f5" | "f6")
+            self.navigate(global, command == Some(Command::PreviousMatch), window, cx);
+        } else if matches!(command, Some(Command::DateTime | Command::Date))
             && !self.settings_visible
         {
             let editor_focus = self
                 .active_editor()
                 .is_some_and(|editor| editor.read(cx).focus_handle(cx).is_focused(window));
             if title || tree || editor_focus || self.focus.is_focused(window) {
-                match datetime::current(key == "f5") {
+                match datetime::current(command == Some(Command::DateTime)) {
                     Ok(text) if title => self
                         .title_input
                         .update(cx, |state, cx| state.replace(text, window, cx)),
@@ -215,13 +263,15 @@ impl Edot {
             } else {
                 handled = false;
             }
-        } else if ctrl
-            && !self.settings_visible
-            && matches!(key, "+" | "=" | "-" | "0" | "add" | "subtract")
+        } else if !self.settings_visible
+            && matches!(
+                command,
+                Some(Command::ZoomIn | Command::ZoomOut | Command::ZoomReset)
+            )
         {
-            self.zoom = match key {
-                "+" | "=" | "add" => (self.zoom + ZOOM_STEP).min(ZOOM_MAX),
-                "-" | "subtract" => self.zoom.saturating_sub(ZOOM_STEP).max(ZOOM_MIN),
+            self.zoom = match command.unwrap() {
+                Command::ZoomIn => (self.zoom + ZOOM_STEP).min(ZOOM_MAX),
+                Command::ZoomOut => self.zoom.saturating_sub(ZOOM_STEP).max(ZOOM_MIN),
                 _ => ZOOM_DEFAULT,
             };
         } else if key == "escape" {
@@ -251,6 +301,14 @@ impl Edot {
             }
             self.stop_drag();
             self.resizing = None;
+        } else if tree && command == Some(Command::SelectAll) {
+            self.selection.all(
+                &self
+                    .visible_tree()
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>(),
+            );
         } else if tree {
             handled = self.tree_key(key, ctrl, shift, window, cx);
         } else if results {
@@ -273,10 +331,6 @@ impl Edot {
         cx: &mut Context<Self>,
     ) -> bool {
         let visible: Vec<_> = self.visible_tree().iter().map(|(id, _)| *id).collect();
-        if ctrl && key == "a" {
-            self.selection.all(&visible);
-            return true;
-        }
         if ctrl && key == "space" {
             if let Some(id) = self.caret {
                 self.selection.click(id, &visible, true, false);

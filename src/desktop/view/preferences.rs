@@ -4,35 +4,8 @@ use super::*;
 impl Edot {
     pub(in crate::desktop) fn settings_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let prefs = self.preferences.as_ref().unwrap();
-        div()
-            .id("settings-panel")
-            .debug_selector(|| "settings-panel".into())
-            .track_focus(&prefs.focus)
-            .occlude()
-            .absolute()
-            .top_2()
-            .right_3()
-            .w(px(360.))
-            .max_w_full()
-            .max_h(relative(0.9))
+        self.settings_frame(cx)
             .overflow_y_scroll()
-            .v_flex()
-            .gap_5()
-            .p_5()
-            .text_left()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .shadow_lg()
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
-                    this.settings_visible = false;
-                    this.focus_editor(window, cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
             .child(
                 div()
                     .h_flex()
@@ -45,7 +18,7 @@ impl Edot {
                     .child(
                         tool("settings-close", IconName::Close, "설정 닫기").on_click(cx.listener(
                             |this, _, window, cx| {
-                                this.settings_visible = false;
+                                this.dismiss_settings(cx);
                                 this.focus_editor(window, cx);
                                 cx.notify();
                             },
@@ -104,8 +77,58 @@ impl Edot {
                         this.change_settings(next, window, cx);
                     })),
             )
+            .child(
+                div()
+                    .debug_selector(|| "settings-shortcuts-button".into())
+                    .child(
+                        Button::new("settings-shortcuts")
+                            .label("단축키 설정")
+                            .primary()
+                            .w_full()
+                            .tooltip(crate::shortcuts::tip(
+                                crate::shortcuts::Command::Help,
+                                "단축키 설정",
+                                cx,
+                            ))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.show_shortcuts(window, cx)),
+                            ),
+                    ),
+            )
             .child(self.update_view(cx))
             .into_any_element()
+    }
+
+    fn settings_frame(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let prefs = self.preferences.as_ref().unwrap();
+        div()
+            .id("settings-panel")
+            .debug_selector(|| "settings-panel".into())
+            .track_focus(&prefs.focus)
+            .occlude()
+            .absolute()
+            .top(px(if self.startup_failed { 8. } else { 44. }))
+            .right_3()
+            .w(px(360.))
+            .max_w_full()
+            .max_h(relative(0.85))
+            .v_flex()
+            .gap_5()
+            .p_5()
+            .text_left()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_lg()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.dismiss_settings(cx);
+                    this.focus_editor(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
     }
 
     fn update_view(&self, cx: &mut Context<Self>) -> AnyElement {

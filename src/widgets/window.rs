@@ -117,14 +117,11 @@ impl Render for Root {
             .font_family(theme::UI_FONT)
             .text_size(px(theme::UI_FONT_SIZE))
             .capture_key_down(|event, window, cx| {
-                let modifiers = event.keystroke.modifiers;
-                if event.keystroke.key == "f11" && modifiers == Modifiers::default()
-                    || cfg!(target_os = "macos")
-                        && event.keystroke.key == "f"
-                        && modifiers.platform
-                        && modifiers.control
-                        && !modifiers.alt
-                        && !modifiers.shift
+                let shortcuts = cx.global::<crate::shortcuts::ActiveShortcuts>();
+                if !shortcuts.recording
+                    && !event.prefer_character_input
+                    && shortcuts.command(&event.keystroke, cfg!(target_os = "macos"))
+                        == Some(crate::shortcuts::Command::Fullscreen)
                 {
                     if !event.is_held {
                         window.toggle_fullscreen();

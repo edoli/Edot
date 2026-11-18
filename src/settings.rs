@@ -32,6 +32,7 @@ pub struct Settings {
     pub wrap: bool,
     pub read_only: bool,
     pub confirm_delete: bool,
+    pub shortcuts: crate::shortcuts::Bindings,
 }
 
 impl Default for Settings {
@@ -43,12 +44,23 @@ impl Default for Settings {
             wrap: true,
             read_only: false,
             confirm_delete: true,
+            shortcuts: Default::default(),
         }
     }
 }
 
 impl Settings {
     pub(crate) fn apply_stored(&mut self, key: &str, value: &str) {
+        if let Some(id) = key.strip_prefix("shortcut_") {
+            if let Some(&command) = crate::shortcuts::COMMANDS
+                .iter()
+                .find(|command| command.id() == id)
+                && value != "default"
+            {
+                self.shortcuts.0.insert(command, value.into());
+            }
+            return;
+        }
         match (key, value) {
             ("theme", "light") => self.theme = ThemeMode::Light,
             ("theme", "dark") => self.theme = ThemeMode::Dark,
@@ -121,6 +133,9 @@ impl Settings {
             ));
         }
         let _lock = Self::lock(dir)?;
+        self.shortcuts
+            .validate()
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
         let path = dir.join(SETTINGS_FILE);
         let document = Self::read_document(dir)?;
         document.settings()?;

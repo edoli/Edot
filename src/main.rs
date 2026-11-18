@@ -9,8 +9,8 @@ mod update;
 mod widgets;
 
 use edot::{
-    datetime, drag, editing, global_search, model, search, selection, session, settings, space,
-    storage, store_lock, tabs, trash, watch,
+    datetime, drag, editing, global_search, model, search, selection, session, settings, shortcuts,
+    space, storage, store_lock, tabs, trash, watch,
 };
 
 fn main() {

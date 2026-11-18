@@ -1,5 +1,6 @@
 //! Sidebar Space switcher and management popup.
 use super::*;
+use crate::shortcuts::{Command, tip};
 
 impl Edot {
     pub(in crate::desktop) fn space_recovery_view(
@@ -47,19 +48,32 @@ impl Edot {
             .when(self.settings_visible, |body| {
                 body.child(self.settings_view(cx))
             });
+        let mut body = body;
+        if let Some(help) = &self.shortcut_help {
+            body = body.child(help.clone());
+        }
         div()
             .id("space-recovery-window")
             .size_full()
             .v_flex()
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if !window.has_active_dialog(cx)
-                    && component::shortcuts::primary(event.keystroke.modifiers)
-                    && event.keystroke.key == ","
-                {
-                    if !event.is_held {
-                        this.show_settings(window, cx);
+                if this.shortcut_help.is_some() {
+                    return;
+                }
+                if !window.has_active_dialog(cx) && !event.prefer_character_input {
+                    let command = cx
+                        .global::<crate::shortcuts::ActiveShortcuts>()
+                        .command(&event.keystroke, cfg!(target_os = "macos"));
+                    if matches!(command, Some(Command::Settings | Command::Help)) {
+                        if !event.is_held {
+                            if command == Some(Command::Help) {
+                                this.show_shortcuts(window, cx);
+                            } else {
+                                this.show_settings(window, cx);
+                            }
+                        }
+                        cx.stop_propagation();
                     }
-                    cx.stop_propagation();
                 }
             }))
             .child(
@@ -83,12 +97,18 @@ impl Edot {
                             .h(px(34.))
                             .flex_shrink_0()
                             .child(
-                                tool("preferences", IconName::Settings, "설정 · Ctrl+,")
-                                    .size_full()
-                                    .selected(self.settings_visible)
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                tool(
+                                    "preferences",
+                                    IconName::Settings,
+                                    tip(Command::Settings, "설정", cx),
+                                )
+                                .size_full()
+                                .selected(self.settings_visible)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
                                         this.show_settings(window, cx)
-                                    })),
+                                    }),
+                                ),
                             ),
                     )
                     .when(component::has_inline_window_controls(window), |row| {

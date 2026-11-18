@@ -91,6 +91,10 @@ impl Document {
                 key => settings.apply_stored(key, &field.value),
             }
         }
+        settings
+            .shortcuts
+            .validate()
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
         Ok(settings)
     }
 
@@ -110,6 +114,21 @@ impl Document {
             ("read_only", settings.read_only.to_string()),
             ("confirm_delete", settings.confirm_delete.to_string()),
         ];
+        let keys: Vec<_> = crate::shortcuts::COMMANDS
+            .iter()
+            .map(|command| format!("shortcut_{}", command.id()))
+            .collect();
+        let mut values = values.to_vec();
+        for (command, key) in crate::shortcuts::COMMANDS.iter().zip(&keys) {
+            if let Some(value) = settings.shortcuts.0.get(command) {
+                values.push((
+                    key,
+                    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")),
+                ));
+            } else if self.value(key).is_some() {
+                values.push((key, "default".into()));
+            }
+        }
         self.updated_values(&values)
     }
 

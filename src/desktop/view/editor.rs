@@ -1,5 +1,6 @@
 //! Editor presentation.
 use super::*;
+use crate::shortcuts::{Command, tip};
 
 impl Edot {
     pub(in crate::desktop) fn body_view(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -20,9 +21,11 @@ impl Edot {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child("생각을 가볍게 기록하세요"),
                 )
-                .child(div().text_color(cx.theme().muted_foreground).child(
-                    component::shortcuts::label("노트를 선택하거나 Ctrl+N으로 새 노트를 만드세요"),
-                ))
+                .child(div().text_color(cx.theme().muted_foreground).child(tip(
+                    Command::NewNote,
+                    "노트를 선택하거나 새 노트를 만드세요",
+                    cx,
+                )))
                 .into_any_element();
         };
         let font_size = cx.global::<AppState>().settings.font_size as f32 * self.zoom as f32
@@ -160,7 +163,7 @@ impl Edot {
                 Button::new("reset-zoom")
                     .small()
                     .label(format!("{}%", self.zoom))
-                    .tooltip("확대율 초기화 · Ctrl+0")
+                    .tooltip(tip(Command::ZoomReset, "확대율 초기화", cx))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.zoom = ZOOM_DEFAULT;
                         cx.notify();
@@ -218,11 +221,15 @@ impl Edot {
                     } else {
                         IconName::BookOpen
                     })
-                    .tooltip(if read_only {
-                        "편집 모드로 전환 · Ctrl+Shift+V"
-                    } else {
-                        "읽기 모드로 전환 · Ctrl+Shift+V"
-                    })
+                    .tooltip(tip(
+                        Command::ReadOnly,
+                        if read_only {
+                            "편집 모드로 전환"
+                        } else {
+                            "읽기 모드로 전환"
+                        },
+                        cx,
+                    ))
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.set_read_only(
                             !cx.global::<AppState>().settings.read_only,

@@ -511,6 +511,9 @@ impl InputState {
                 if e.prefer_character_input {
                     return;
                 }
+                if super::commands::dispatch_key(e, w, cx) {
+                    return;
+                }
                 let modifiers = e.keystroke.modifiers;
                 let mut key = e.keystroke.key.as_str();
                 if cfg!(target_os = "macos")

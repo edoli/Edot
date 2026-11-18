@@ -1,5 +1,6 @@
 //! App menu composition shared by right-click and keyboard invocation.
 use super::*;
+use crate::shortcuts::{Command, label};
 use component::menu::PopupMenu;
 
 impl Edot {
@@ -11,7 +12,13 @@ impl Edot {
         }
     }
 
-    fn note_menu(&self, mut menu: PopupMenu, view: WeakEntity<Edot>, id: NoteId) -> PopupMenu {
+    fn note_menu(
+        &self,
+        mut menu: PopupMenu,
+        view: WeakEntity<Edot>,
+        id: NoteId,
+        cx: &App,
+    ) -> PopupMenu {
         let targets = self.note_menu_targets(id);
         let multiple = targets.len() > 1;
         let nested = self.book.get(id).is_some_and(|note| note.parent != 0);
@@ -32,11 +39,13 @@ impl Edot {
                 );
             }
             let weak = view.clone();
-            menu = menu.item(PopupMenuItem::new("이름 바꾸기").shortcut("F2").on_click(
-                move |_, window, cx| {
-                    let _ = weak.update(cx, |this, cx| this.begin_rename_note(id, window, cx));
-                },
-            ));
+            menu = menu.item(
+                PopupMenuItem::new("이름 바꾸기")
+                    .shortcut(label(Command::Rename, cx))
+                    .on_click(move |_, window, cx| {
+                        let _ = weak.update(cx, |this, cx| this.begin_rename_note(id, window, cx));
+                    }),
+            );
             let weak = view.clone();
             menu = menu.item(
                 PopupMenuItem::new("한 단계 위로")
@@ -98,7 +107,12 @@ pub(super) fn tab_menu(
     let count = view.read(cx).open.len();
     let mut menu = menu;
     for (mode, label, shortcut, disabled) in [
-        (CloseMode::Current, "탭 닫기", Some("Ctrl+W"), false),
+        (
+            CloseMode::Current,
+            "탭 닫기",
+            Some(label(Command::CloseTab, cx)),
+            false,
+        ),
         (CloseMode::Others, "다른 탭 닫기", None, count <= 1),
         (
             CloseMode::ToRight,
@@ -119,13 +133,22 @@ pub(super) fn tab_menu(
     menu
 }
 
-fn editing_menu(mut menu: PopupMenu, focus: FocusHandle, separate_history: bool) -> PopupMenu {
+fn editing_menu(
+    mut menu: PopupMenu,
+    focus: FocusHandle,
+    separate_history: bool,
+    cx: &App,
+) -> PopupMenu {
     menu = menu.action_context(focus);
     for (index, command) in component::input::EDIT_COMMANDS.iter().enumerate() {
         if index == 2 && separate_history {
             menu = menu.separator();
         }
-        menu = menu.menu(command.label, command.shortcut, (command.action)());
+        menu = menu.menu(
+            command.label,
+            label(command.command, cx),
+            (command.action)(),
+        );
     }
     menu
 }
@@ -138,29 +161,42 @@ pub(super) fn editor_menu(
 ) -> PopupMenu {
     let read_only = editor.read(cx).is_read_only();
     let mut menu = if read_only {
-        reading_menu(menu, editor.read(cx).focus_handle(cx))
+        reading_menu(menu, editor.read(cx).focus_handle(cx), cx)
     } else {
-        editing_menu(menu, editor.read(cx).focus_handle(cx), false)
+        editing_menu(menu, editor.read(cx).focus_handle(cx), false, cx)
     }
     .separator();
-    for (label, shortcut, replace) in [("찾기", "Ctrl+F", false), ("바꾸기", "Ctrl+H", true)] {
+    for (label, shortcut, replace) in [
+        ("찾기", Command::Find, false),
+        ("바꾸기", Command::Replace, true),
+    ] {
         if read_only && replace {
             continue;
         }
         let weak = weak.clone();
-        menu = menu.item(PopupMenuItem::new(label).shortcut(shortcut).on_click(
-            move |_, window, cx| {
-                let _ = weak.update(cx, |this, cx| this.show_find(false, replace, window, cx));
-            },
-        ));
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .shortcut(crate::shortcuts::label(shortcut, cx))
+                .on_click(move |_, window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.show_find(false, replace, window, cx));
+                }),
+        );
     }
     menu
 }
 
-fn reading_menu(menu: PopupMenu, focus: FocusHandle) -> PopupMenu {
+fn reading_menu(menu: PopupMenu, focus: FocusHandle, cx: &App) -> PopupMenu {
     menu.action_context(focus)
-        .menu("복사", "Ctrl+C", Box::new(component::input::Copy))
-        .menu("전체 선택", "Ctrl+A", Box::new(component::input::SelectAll))
+        .menu(
+            "복사",
+            label(Command::Copy, cx),
+            Box::new(component::input::Copy),
+        )
+        .menu(
+            "전체 선택",
+            label(Command::SelectAll, cx),
+            Box::new(component::input::SelectAll),
+        )
 }
 
 impl Edot {
@@ -258,8 +294,8 @@ impl Edot {
         self.pressed = None;
         self.tree_focus.focus(window, cx);
         let weak = cx.entity().downgrade();
-        let menu = PopupMenu::build(window, cx, |menu, _, _| {
-            self.note_menu(menu.action_context(self.tree_focus.clone()), weak, id)
+        let menu = PopupMenu::build(window, cx, |menu, _, cx| {
+            self.note_menu(menu.action_context(self.tree_focus.clone()), weak, id, cx)
         });
         self.install_menu(menu, Some(id), position, window, cx);
     }
@@ -307,13 +343,13 @@ impl Edot {
         let Some(id) = id else {
             return;
         };
-        let menu = PopupMenu::build(window, cx, |menu, _, _| {
+        let menu = PopupMenu::build(window, cx, |menu, _, cx| {
             if tree {
-                self.note_menu(menu.action_context(focus), weak, id)
+                self.note_menu(menu.action_context(focus), weak, id, cx)
             } else if read_only {
-                reading_menu(menu, focus)
+                reading_menu(menu, focus, cx)
             } else {
-                editing_menu(menu, focus, true)
+                editing_menu(menu, focus, true, cx)
             }
         });
         let position = if tree {

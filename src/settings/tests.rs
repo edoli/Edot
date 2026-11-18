@@ -25,6 +25,7 @@ fn ini_preserves_comments_unknown_fields_and_escaped_font_names() {
         wrap: false,
         read_only: true,
         confirm_delete: false,
+        shortcuts: Default::default(),
     };
     settings.save(&dir).unwrap();
     assert_eq!(Settings::load(&dir).unwrap(), settings);
@@ -55,5 +56,53 @@ fn ini_preserves_comments_unknown_fields_and_escaped_font_names() {
         assert!(Settings::load(&dir).is_err());
         assert!(settings.save(&dir).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+}
+
+#[test]
+fn shortcut_overrides_round_trip_disable_restore_and_preserve_unknown_fields() {
+    use crate::shortcuts::Command;
+    let dir = fixture();
+    let path = dir.join(SETTINGS_FILE);
+    std::fs::write(
+        &path,
+        "# shortcuts\nshortcut_future = 'keep'\n[extension]\nvalue=1\n",
+    )
+    .unwrap();
+    let mut settings = Settings::load(&dir).unwrap();
+    settings
+        .shortcuts
+        .set(
+            Command::NewNote,
+            Some(&gpui::Keystroke::parse("ctrl-shift-\\").unwrap()),
+        )
+        .unwrap();
+    settings.shortcuts.set(Command::Copy, None).unwrap();
+    settings
+        .shortcuts
+        .edit(
+            Command::NewNote,
+            None,
+            &gpui::Keystroke::parse("ctrl-k").unwrap(),
+        )
+        .unwrap();
+    settings.save(&dir).unwrap();
+    assert_eq!(Settings::load(&dir).unwrap(), settings);
+    settings.shortcuts.0.clear();
+    settings.save(&dir).unwrap();
+    assert_eq!(Settings::load(&dir).unwrap(), Settings::default());
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("shortcut_new_note = default"));
+    assert!(text.contains("shortcut_future = 'keep'"));
+    assert!(text.contains("[extension]\nvalue=1"));
+    for invalid in [
+        "shortcut_new_note = 'ctrl-s'",
+        "shortcut_save = 'escape'",
+        "shortcut_save = 'ctrl-missing-key'",
+        "shortcut_save = 'ctrl-k|'",
+        "shortcut_save = 'ctrl-k|ctrl-k'",
+        "shortcut_save = 'ctrl-k|ctrl-shift-~|ctrl-shift-`'",
+    ] {
+        assert!(Settings::parse_ini(invalid).is_err(), "{invalid}");
     }
 }

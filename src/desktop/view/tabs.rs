@@ -1,5 +1,6 @@
 //! Tabs presentation.
 use super::*;
+use crate::shortcuts::{Command, tip};
 
 impl Edot {
     pub(in crate::desktop) fn tabs_view(
@@ -202,7 +203,7 @@ impl Edot {
                     tool(
                         "show-sidebar",
                         IconName::ChevronsRight,
-                        "사이드바 표시 · Ctrl+\\",
+                        tip(Command::Sidebar, "사이드바 표시", cx),
                     )
                     .w(px(36.))
                     .h(px(34.))
@@ -226,13 +227,15 @@ impl Edot {
                     .child(Scrollbar::horizontal(&self.tab_scroll)),
             )
             .child(
-                tool("new-note", IconName::Plus, "새 노트 · Ctrl+N")
-                    .w(px(40.))
-                    .h(px(34.))
-                    .flex_shrink_0()
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.create_note(None, window, cx)),
-                    ),
+                tool(
+                    "new-note",
+                    IconName::Plus,
+                    tip(Command::NewNote, "새 노트", cx),
+                )
+                .w(px(40.))
+                .h(px(34.))
+                .flex_shrink_0()
+                .on_click(cx.listener(|this, _, window, cx| this.create_note(None, window, cx))),
             )
             .child(
                 div()
@@ -244,12 +247,16 @@ impl Edot {
                     }),
             )
             .child(
-                tool("preferences", IconName::Settings, "설정 · Ctrl+,")
-                    .w(px(40.))
-                    .h(px(34.))
-                    .flex_shrink_0()
-                    .selected(self.settings_visible)
-                    .on_click(cx.listener(|this, _, window, cx| this.show_settings(window, cx))),
+                tool(
+                    "preferences",
+                    IconName::Settings,
+                    tip(Command::Settings, "설정", cx),
+                )
+                .w(px(40.))
+                .h(px(34.))
+                .flex_shrink_0()
+                .selected(self.settings_visible)
+                .on_click(cx.listener(|this, _, window, cx| this.show_settings(window, cx))),
             )
             .when(inline_controls, |row| {
                 row.child(

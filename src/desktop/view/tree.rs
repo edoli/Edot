@@ -1,5 +1,6 @@
 //! Tree presentation.
 use super::*;
+use crate::shortcuts::{Command, tip};
 
 impl Edot {
     pub(in crate::desktop) fn sidebar(
@@ -84,7 +85,7 @@ impl Edot {
                         tool(
                             "hide-sidebar",
                             IconName::ChevronsLeft,
-                            "사이드바 숨기기 · Ctrl+\\",
+                            tip(Command::Sidebar, "사이드바 숨기기", cx),
                         )
                         .w(px(36.))
                         .h(px(36.))
@@ -169,7 +170,7 @@ impl Edot {
                         .left_4()
                         .right_4()
                         .text_color(cx.theme().muted_foreground)
-                        .child(component::shortcuts::label("Ctrl+N으로 첫 노트를 만드세요")),
+                        .child(tip(Command::NewNote, "첫 노트를 만드세요", cx)),
                 )
             })
             .on_mouse_down(

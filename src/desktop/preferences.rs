@@ -1,5 +1,6 @@
 //! Settings persistence, font choices and theme application.
 use super::*;
+use crate::shortcuts::ActiveShortcuts;
 
 pub(super) struct Preferences {
     pub(super) focus: FocusHandle,
@@ -132,7 +133,15 @@ impl Edot {
         self.change_settings(next, window, cx)
     }
 
-    fn apply_settings(&mut self, next: Settings, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn apply_settings(
+        &mut self,
+        next: Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut shortcuts = ActiveShortcuts::new(next.shortcuts.clone());
+        shortcuts.recording = cx.global::<ActiveShortcuts>().recording;
+        cx.set_global(shortcuts);
         cx.global_mut::<AppState>().settings = next;
         self.apply_theme(window, cx);
         for tab in &self.open {
@@ -280,11 +289,8 @@ impl Edot {
             }
         }
         self.sync_preferences(window, cx);
-        self.preferences
-            .as_ref()
-            .unwrap()
-            .theme
-            .update(cx, |s, cx| s.focus(window, cx));
+        let prefs = self.preferences.as_ref().unwrap();
+        prefs.theme.update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
     }
 }

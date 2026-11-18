@@ -161,6 +161,9 @@ impl Edot {
             }) => (Some(lock), book, session, None),
             Err(error) => (None, Notebook::default(), Session::default(), Some(error)),
         };
+        cx.set_global(crate::shortcuts::ActiveShortcuts::new(
+            cx.global::<AppState>().settings.shortcuts.clone(),
+        ));
         let collapsed = session.collapsed(&book);
         let local = SearchPanel::new(window, cx);
         let global = SearchPanel::new(window, cx);
