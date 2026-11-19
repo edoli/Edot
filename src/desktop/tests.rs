@@ -1,4 +1,4 @@
-//! Headless GPUI event tests. They never send input to the user's desktop.
+//! Headless GPUI event tests. The interactive Windows probe is explicitly ignored.
 use super::{AppState, Edot, LoadedSpace, NoteId, Settings, StoreLock};
 use crate::{model::Notebook, session::Session, settings::ThemeMode};
 use gpui::{
@@ -145,6 +145,8 @@ mod documents;
 mod editor;
 mod file_sync;
 mod images;
+#[cfg(target_os = "windows")]
+mod ime_native;
 mod search;
 mod shortcuts;
 mod spaces;
