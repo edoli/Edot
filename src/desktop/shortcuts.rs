@@ -816,7 +816,7 @@ impl Render for ShortcutHelp {
                     .aria_label("단축키")
                     .v_flex()
                     .w(px(
-                        (f32::from(window.viewport_size().width) - 32.).clamp(0., 860.)
+                        (f32::from(window.viewport_size().width) - 32.).clamp(0., 1080.)
                     ))
                     .h(px(
                         (f32::from(window.viewport_size().height) - 32.).clamp(0., 680.)
