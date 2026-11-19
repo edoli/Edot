@@ -1,9 +1,10 @@
 //! Bounded HTTP downloads on dedicated workers, with OS-specific transports.
+use anyhow::{Result, anyhow};
 use gpui::{
     BackgroundExecutor, DedicatedExecutor,
     http_client::{
-        AsyncBody, HttpClient, Method, RedirectPolicy, Request, RequestTimeout, Response, Result,
-        Url, anyhow, http::HeaderValue,
+        AsyncBody, HttpClient, Method, RedirectPolicy, Request, RequestTimeout, Response, Url,
+        http::HeaderValue,
     },
 };
 use std::{

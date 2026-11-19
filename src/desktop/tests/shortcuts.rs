@@ -1,5 +1,6 @@
 use super::*;
 use crate::shortcuts::{ActiveShortcuts, Command};
+use crate::widgets::theme::ActiveTheme;
 use gpui::{Focusable, Keystroke};
 
 fn with_help<R>(
@@ -16,6 +17,44 @@ fn with_help<R>(
         help.update(cx, |help, cx| update(help, window, cx))
     })
     .unwrap()
+}
+
+#[gpui::test]
+fn fractional_scrolling_does_not_paint_hidden_shortcut_chips_outside_the_list(
+    cx: &mut TestAppContext,
+) {
+    let f = Fixture::new(cx);
+    cx.simulate_window_scale_factor_change(f.window, 1.5);
+    f.update(cx, |this, window, cx| this.show_shortcuts(window, cx));
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    for offset in [0.25, 0.5, 0.75, 1.25, 80.25, 240.5, 360.25] {
+        with_help(&f, cx, |help, _, _| {
+            help.scroll.set_offset(point(px(0.), px(-offset)))
+        });
+        visual.update(|window, cx| window.render_frame(cx));
+        let viewport = visual.debug_bounds("shortcut-rows").unwrap();
+        let keys = visual.debug_bounds("shortcut-record-new_note").unwrap();
+        visual.update(|window, cx| {
+            let key_bounds = keys.scale(window.scale_factor());
+            let bottom = viewport.bottom().scale(window.scale_factor());
+            let leaked: Vec<_> = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| {
+                    quad.border_color == cx.theme().border
+                        && quad.bounds.left() >= key_bounds.left()
+                        && quad.bounds.left() < key_bounds.right()
+                        && quad.corner_radii.top_left > gpui::ScaledPixels(0.)
+                        && quad.bounds.top() >= bottom
+                        && !quad.bounds.intersect(&quad.content_mask.bounds).is_empty()
+                })
+                .collect();
+            assert!(
+                leaked.is_empty(),
+                "offset={offset}: offscreen chip masks={leaked:?}"
+            );
+        });
+    }
 }
 
 #[gpui::test]
@@ -113,7 +152,10 @@ fn custom_editing_formatting_help_and_fullscreen_use_current_bindings(cx: &mut T
             (Command::Fullscreen, "ctrl-f11"),
         ] {
             next.shortcuts
-                .set(command, Some(&Keystroke::parse(key).unwrap()))
+                .set(
+                    command,
+                    Some(&Keystroke::parse_with_os(key, crate::shortcuts::KEYBOARD_OS).unwrap()),
+                )
                 .unwrap();
         }
         assert!(this.change_settings(next, window, cx));
@@ -306,8 +348,10 @@ fn shortcut_list_adds_without_replacing_and_removes_one_key(cx: &mut TestAppCont
         );
         for key in ["ctrl-n", "ctrl-k"] {
             assert_eq!(
-                cx.global::<ActiveShortcuts>()
-                    .command(&Keystroke::parse(key).unwrap(), false),
+                cx.global::<ActiveShortcuts>().command(
+                    &Keystroke::parse_with_os(key, crate::shortcuts::KEYBOARD_OS).unwrap(),
+                    false
+                ),
                 Some(Command::NewNote)
             );
         }

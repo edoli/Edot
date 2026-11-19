@@ -1,6 +1,15 @@
 //! Command catalog and configurable, single-stroke shortcuts shared by the UI.
-use gpui::{App, Global, Keystroke};
+use gpui::{App, Global, Keystroke, OperatingSystem};
 use std::collections::BTreeMap;
+
+/// Native modifier spelling used for saved shortcut bindings.
+pub const KEYBOARD_OS: OperatingSystem = if cfg!(target_os = "macos") {
+    OperatingSystem::Mac
+} else if cfg!(target_os = "windows") {
+    OperatingSystem::Windows
+} else {
+    OperatingSystem::Linux
+};
 
 macro_rules! commands {
     ($( $name:ident, $id:literal, $group:literal, $label:literal, $keys:literal, $mac:literal; )*) => {
@@ -80,7 +89,7 @@ impl Bindings {
         value
             .split('|')
             .filter(|s| !s.is_empty())
-            .filter_map(|s| Keystroke::parse(s).ok())
+            .filter_map(|s| Keystroke::parse_with_os(s, KEYBOARD_OS).ok())
             .collect()
     }
     pub fn label(&self, command: Command) -> String {
@@ -105,7 +114,7 @@ impl Bindings {
         }
         self.0.insert(
             command,
-            key.map_or_else(String::new, |key| normalized(key).unparse()),
+            key.map_or_else(String::new, |key| normalized(key).unparse(KEYBOARD_OS)),
         );
         Ok(())
     }
@@ -152,7 +161,7 @@ impl Bindings {
         self.0.insert(
             command,
             keys.iter()
-                .map(Keystroke::unparse)
+                .map(|key| key.unparse(KEYBOARD_OS))
                 .collect::<Vec<_>>()
                 .join("|"),
         );
@@ -165,7 +174,7 @@ impl Bindings {
                 && !value.is_empty()
             {
                 for item in value.split('|') {
-                    let key = Keystroke::parse(item)
+                    let key = Keystroke::parse_with_os(item, KEYBOARD_OS)
                         .map_err(|_| "단축키 형식이 잘못되었습니다.".to_owned())?;
                     validate_key(&key)?;
                 }

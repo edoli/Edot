@@ -1,7 +1,7 @@
 use super::*;
 
 fn key(value: &str) -> Keystroke {
-    Keystroke::parse(value).unwrap()
+    Keystroke::parse_with_os(value, crate::shortcuts::KEYBOARD_OS).unwrap()
 }
 
 #[test]

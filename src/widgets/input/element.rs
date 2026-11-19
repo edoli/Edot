@@ -2,12 +2,6 @@
 use super::*;
 
 struct EditorElement(Entity<InputState>);
-impl IntoElement for EditorElement {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
 impl Element for EditorElement {
     type RequestLayoutState = ();
     type PrepaintState = (Vec<(bool, Hitbox)>, Option<Hitbox>);

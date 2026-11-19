@@ -642,7 +642,7 @@ mod tests {
 
     fn event(key: &str) -> KeyDownEvent {
         KeyDownEvent {
-            keystroke: Keystroke::parse(key).unwrap(),
+            keystroke: Keystroke::parse_with_os(key, crate::shortcuts::KEYBOARD_OS).unwrap(),
             is_held: false,
             prefer_character_input: false,
         }

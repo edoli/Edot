@@ -1,5 +1,6 @@
 //! GitHub release discovery and a saved-data-first updater handoff on each OS.
-use gpui::http_client::{AsyncBody, RedirectPolicy, Request, Result, anyhow};
+use anyhow::{Result, anyhow};
+use gpui::http_client::{AsyncBody, RedirectPolicy, Request};
 use std::{
     fs::File,
     io::{Read, Write},

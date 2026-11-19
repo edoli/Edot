@@ -7,7 +7,8 @@ fn macos_app_commands_preserve_system_tab_switching_and_replace_shortcuts(cx: &m
         f.update(cx, |this, window, cx| {
             this.key_down_on(
                 &gpui::KeyDownEvent {
-                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    keystroke: gpui::Keystroke::parse_with_os(key, crate::shortcuts::KEYBOARD_OS)
+                        .unwrap(),
                     is_held: false,
                     prefer_character_input: false,
                 },
@@ -70,7 +71,8 @@ fn app_shortcuts_leave_altgr_and_composing_title_input_to_the_platform(cx: &mut 
         assert_eq!(cx.global::<AppState>().settings.wrap, wrap);
         for (key, prefer_character_input) in [("ctrl-alt-n", false), ("ctrl-n", true)] {
             let event = gpui::KeyDownEvent {
-                keystroke: gpui::Keystroke::parse(key).unwrap(),
+                keystroke: gpui::Keystroke::parse_with_os(key, crate::shortcuts::KEYBOARD_OS)
+                    .unwrap(),
                 is_held: false,
                 prefer_character_input,
             };

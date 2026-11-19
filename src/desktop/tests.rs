@@ -18,7 +18,7 @@ impl TestWindowExt for Window {
     }
     fn press(&mut self, key: &str, cx: &mut gpui::App) {
         use gpui::InputEvent;
-        let stroke = gpui::Keystroke::parse(key).unwrap();
+        let stroke = gpui::Keystroke::parse_with_os(key, crate::shortcuts::KEYBOARD_OS).unwrap();
         if matches!(stroke.key.as_str(), "enter" | "tab" | "space") {
             self.dispatch_event(
                 gpui::KeyDownEvent {
