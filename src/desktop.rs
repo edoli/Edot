@@ -32,6 +32,7 @@ use documents::{ClosedTab, OpenTab};
 use preferences::Preferences;
 use search_ui::SearchPanel;
 mod interaction;
+use interaction::{TabDragState, TabMotion};
 mod keyboard;
 mod preferences;
 mod search_ui;
@@ -129,16 +130,18 @@ pub struct Edot {
     subscriptions: Vec<Subscription>,
     tree_scroll: UniformListScrollHandle,
     tree_bounds: Rc<std::cell::Cell<Bounds<Pixels>>>,
-    tab_scroll: ScrollHandle,
     pressed: Option<NoteId>,
     drop_target: Option<DropTarget>,
-    tab_drop: Option<usize>,
     resizing: Option<(Pixels, i32)>,
     sidebar_motion: sidebar::SidebarMotion,
     tree_auto: component::scroll::AutoScroll,
-    tab_auto: component::scroll::AutoScroll,
     dragging_notes: Vec<NoteId>,
-    tab_width: i32,
+    tab_scroll: ScrollHandle,
+    tab_width: Pixels,
+    tab_grab: Pixels,
+    tab_drag: Option<TabDragState>,
+    tab_auto: component::scroll::AutoScroll,
+    tab_motions: HashMap<NoteId, TabMotion>,
     keyboard_menu: Option<Entity<component::menu::PopupMenu>>,
     context_note: Option<NoteId>,
     menu_subscription: Option<Subscription>,
@@ -218,16 +221,18 @@ impl Edot {
             subscriptions: vec![],
             tree_scroll: UniformListScrollHandle::new(),
             tree_bounds: Default::default(),
-            tab_scroll: ScrollHandle::new(),
             pressed: None,
             drop_target: None,
-            tab_drop: None,
             resizing: None,
             sidebar_motion,
             tree_auto: Default::default(),
-            tab_auto: Default::default(),
             dragging_notes: vec![],
-            tab_width: TAB_PREFERRED_WIDTH,
+            tab_scroll: ScrollHandle::new(),
+            tab_width: px(TAB_PREFERRED_WIDTH as f32),
+            tab_grab: px(0.),
+            tab_drag: None,
+            tab_auto: Default::default(),
+            tab_motions: HashMap::new(),
             keyboard_menu: None,
             context_note: None,
             menu_subscription: None,
@@ -346,7 +351,9 @@ impl Edot {
                     this.menu_subscription = None;
                     cx.notify();
                 }
-                if !window.is_window_active() && !this.dragging_notes.is_empty() {
+                if !window.is_window_active()
+                    && (!this.dragging_notes.is_empty() || this.tab_drag.is_some())
+                {
                     cx.stop_active_drag(window);
                     this.stop_drag();
                     cx.notify();

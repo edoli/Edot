@@ -1,6 +1,101 @@
 use super::*;
 
 #[gpui::test]
+fn tab_drag_previews_the_new_order_and_only_saves_on_drop(cx: &mut TestAppContext) {
+    use crate::widgets::theme::ActiveTheme;
+    use gpui::MouseButton;
+    use std::time::Duration;
+
+    let f = Fixture::new(cx);
+    let first = f.ids[0];
+    let second = f.ids[1];
+    let session_path = f.dir.join(crate::session::FILE_PATH);
+    let original_session = fs::read(&session_path).unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let left = visual.debug_bounds("active-tab").unwrap();
+    let second_selector = format!("tab-{second}").leak();
+    let right = visual.debug_bounds(second_selector).unwrap();
+    let start = left.center();
+    let target = right.center();
+    let short_of_target = point(target.x - px(30.), target.y);
+    let assert_inactive_border = |visual: &mut gpui::VisualTestContext, bounds: Bounds<_>| {
+        visual.update(|window, cx| {
+            let point = point(bounds.left() + px(16.), bounds.bottom() - px(0.5))
+                .scale(window.scale_factor());
+            let theme = cx.theme();
+            let topmost = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| {
+                    quad.bounds.contains(&point)
+                        && quad.content_mask.bounds.contains(&point)
+                        && [theme.bar, theme.border, theme.accent, theme.background]
+                            .into_iter()
+                            .any(|color| quad.background == color.into())
+                })
+                .max_by_key(|quad| quad.order);
+            assert_eq!(topmost.unwrap().background, theme.border.into());
+        });
+    };
+    assert_inactive_border(&mut visual, right);
+
+    visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+    visual.simulate_mouse_move(short_of_target, Some(MouseButton::Left), Default::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    let floating = visual.debug_bounds("active-tab").unwrap();
+    assert_eq!(floating.left(), right.left() - px(30.));
+    assert_eq!(visual.debug_bounds(second_selector).unwrap(), right);
+    cx.executor().advance_clock(Duration::from_millis(45));
+    visual.update(|w, cx| w.render_frame(cx));
+    let neighbor = visual.debug_bounds(second_selector).unwrap();
+    assert!(left.left() < neighbor.left() && neighbor.left() < right.left());
+    assert_inactive_border(&mut visual, neighbor);
+
+    visual.simulate_mouse_move(start, Some(MouseButton::Left), Default::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    assert_eq!(visual.debug_bounds(second_selector).unwrap(), neighbor);
+    visual.simulate_mouse_move(short_of_target, Some(MouseButton::Left), Default::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    assert_eq!(visual.debug_bounds(second_selector).unwrap(), neighbor);
+    assert_eq!(fs::read(&session_path).unwrap(), original_session);
+    visual.simulate_mouse_up(short_of_target, MouseButton::Left, Default::default());
+    visual.update(|w, cx| w.render_frame(cx));
+    assert_eq!(visual.debug_bounds("active-tab").unwrap(), floating);
+    f.update(cx, |this, _, _| {
+        assert_eq!(Session::load(&this.dir, &this.book).tabs, [second, first]);
+        assert_eq!(this.session.active, Some(first));
+    });
+    cx.executor().advance_clock(Duration::from_millis(45));
+    visual.update(|w, cx| w.render_frame(cx));
+    let settling = visual.debug_bounds("active-tab").unwrap();
+    assert!(floating.left() < settling.left() && settling.left() < right.left());
+    cx.executor().advance_clock(Duration::from_millis(100));
+    visual.update(|w, cx| w.render_frame(cx));
+    assert_eq!(visual.debug_bounds("active-tab").unwrap(), right);
+    assert_eq!(visual.debug_bounds(second_selector).unwrap(), left);
+    assert_inactive_border(&mut visual, left);
+    let moved_session = fs::read(&session_path).unwrap();
+
+    for escape in [true, false] {
+        visual.simulate_mouse_down(target, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(start, Some(MouseButton::Left), Default::default());
+        visual.update(|w, cx| w.render_frame(cx));
+        assert_eq!(visual.debug_bounds("active-tab").unwrap(), left);
+        if escape {
+            visual.update(|w, cx| w.press("escape", cx));
+            visual.simulate_mouse_up(start, MouseButton::Left, Default::default());
+        } else {
+            let outside = point(start.x, left.bottom() + px(20.));
+            visual.simulate_mouse_up(outside, MouseButton::Left, Default::default());
+        }
+        visual.update(|w, cx| w.render_frame(cx));
+        assert_eq!(visual.debug_bounds("active-tab").unwrap(), right);
+        assert_eq!(fs::read(&session_path).unwrap(), moved_session);
+    }
+}
+
+#[gpui::test]
 fn reading_task_clicks_autosave_and_undo_without_changing_reading_mode(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let source = "- [ ] 저장할 한글🙂 항목\r\n";

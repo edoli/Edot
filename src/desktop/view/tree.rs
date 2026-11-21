@@ -426,7 +426,7 @@ impl Edot {
                     let _ = drag_view.update(cx, |this, cx| {
                         this.tree_drag_at(window.mouse_position(), &drag.ids, cx)
                     });
-                    cx.new(|_| TreeDragPreview)
+                    cx.new(|_| EmptyDragPreview)
                 })
             })
             .on_drop(cx.listener(move |this, drag: &TreeDrag, window, cx| {

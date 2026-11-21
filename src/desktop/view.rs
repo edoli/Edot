@@ -5,33 +5,13 @@ use component::scroll::Scrollbar;
 struct TreeDrag {
     ids: Vec<NoteId>,
 }
-struct TreeDragPreview;
-impl Render for TreeDragPreview {
+struct EmptyDragPreview;
+impl Render for EmptyDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div().size(px(0.))
     }
 }
-#[derive(Clone)]
-struct TabDrag {
-    id: NoteId,
-    title: String,
-}
-struct DragLabel(String);
-impl Render for DragLabel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_3()
-            .py_1()
-            .rounded_md()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .font_family(component::theme::UI_FONT)
-            .text_size(px(component::theme::TAB_FONT_SIZE))
-            .child(self.0.clone())
-    }
-}
+struct TabDrag;
 fn tool(id: &'static str, icon: IconName, tip: impl Into<SharedString>) -> Button {
     Button::new(id).small().icon(icon).tooltip(tip)
 }
@@ -104,19 +84,28 @@ impl Render for Edot {
             .text_color(cx.theme().foreground)
             .font_family(component::theme::UI_FONT)
             .capture_key_down(cx.listener(Self::key_down))
+            .on_drag_move::<TabDrag>(cx.listener(|this, event: &DragMoveEvent<TabDrag>, _, cx| {
+                this.tab_drag_at(event.event.position, cx);
+            }))
             .on_drag_move::<TreeDrag>(cx.listener(
                 |this, event: &DragMoveEvent<TreeDrag>, _, cx| {
                     let ids = event.drag(cx).ids.clone();
                     this.tree_drag_at(event.event.position, &ids, cx);
                 },
             ))
+            // A tab can block the root hitbox, so handle release in both capture paths.
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.stop_drag();
-                    cx.notify();
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if !this.finish_tab_drag(event, window, cx) {
+                        this.stop_drag();
+                        cx.notify();
+                    }
                 }),
             )
+            .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                this.finish_tab_drag(event, window, cx);
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {

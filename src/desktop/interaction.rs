@@ -1,5 +1,56 @@
 use super::*;
 use component::scroll::AutoScroll;
+use std::time::{Duration, Instant};
+
+const TAB_SLIDE_DURATION: Duration = Duration::from_millis(140);
+
+pub(super) struct TabDragState {
+    id: NoteId,
+    original_scroll: Point<Pixels>,
+    preview: Option<TabMove>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct TabMove {
+    from: usize,
+    pub to: usize,
+}
+
+impl TabMove {
+    fn slot(self, index: usize) -> usize {
+        if index == self.from {
+            self.to
+        } else if self.from < index && index <= self.to {
+            index - 1
+        } else if self.to <= index && index < self.from {
+            index + 1
+        } else {
+            index
+        }
+    }
+
+    pub(super) fn index_at(self, slot: usize) -> usize {
+        Self {
+            from: self.to,
+            to: self.from,
+        }
+        .slot(slot)
+    }
+}
+
+pub(super) struct TabMotion {
+    offset: Pixels,
+    started: Instant,
+}
+
+impl TabMotion {
+    fn offset(&self, now: Instant) -> Pixels {
+        let progress = (now.saturating_duration_since(self.started).as_secs_f32()
+            / TAB_SLIDE_DURATION.as_secs_f32())
+        .min(1.);
+        self.offset * (1. - progress).powi(3)
+    }
+}
 
 impl Edot {
     pub(super) fn tree_drag_at(
@@ -128,40 +179,159 @@ impl Edot {
         }
         px(TREE_ICON_LEFT + depth as f32 * TREE_INDENT)
     }
+    pub(super) fn begin_tab_drag(
+        &mut self,
+        id: NoteId,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.tab_drag = Some(TabDragState {
+            id,
+            original_scroll: self.tab_scroll.offset(),
+            preview: None,
+        });
+        self.tab_motions.remove(&id);
+        self.tab_drag_at(position, cx);
+    }
+
     pub(super) fn tab_drag_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.tab_drag.is_none() {
+            return;
+        }
         self.tab_auto.last_drag_position = Some(position);
-        self.resolve_tab_drag();
         let bounds = self.tab_scroll.bounds();
         let rotated = Bounds::new(
             point(bounds.top(), bounds.left()),
             size(bounds.size.height, bounds.size.width),
         );
-        let delta = if position.y >= bounds.top() && position.y <= bounds.bottom() {
+        let delta = if bounds.contains(&position) && self.tab_scroll.max_offset().x > px(0.) {
             AutoScroll::compute_delta(position.x, rotated)
         } else {
             None
         };
         self.tab_auto.set(delta, cx, |delta, this, cx| {
             if !cx.has_active_drag() {
-                this.tab_auto.stop();
+                this.stop_drag();
+                cx.notify();
                 return;
             }
             let offset = this.tab_scroll.offset();
-            this.tab_scroll
-                .set_offset(point(offset.x - delta, offset.y));
-            this.resolve_tab_drag();
-            cx.notify();
+            let x = (offset.x - delta).clamp(-this.tab_scroll.max_offset().x, px(0.));
+            if x != offset.x {
+                this.tab_scroll.set_offset(point(x, offset.y));
+                cx.notify();
+            }
         });
         cx.notify();
     }
-    fn resolve_tab_drag(&mut self) {
-        let Some(position) = self.tab_auto.last_drag_position else {
+
+    fn tab_drag_layout(&self, position: Point<Pixels>) -> Option<(TabMove, Pixels)> {
+        let id = self.tab_drag.as_ref()?.id;
+        let from = self.open.iter().position(|tab| tab.id == id)?;
+        let bounds = self.tab_scroll.bounds();
+        let width = self.tab_width;
+        let left = (position.x - bounds.left() - self.tab_grab)
+            .clamp(px(0.), (bounds.size.width - width).max(px(0.)));
+        let content_left = left - self.tab_scroll.offset().x;
+        let to = ((f32::from(content_left) / f32::from(width)).round() as usize)
+            .min(self.open.len() - 1);
+        Some((TabMove { from, to }, left))
+    }
+
+    pub(super) fn preview_tab_drag(
+        &mut self,
+        now: Instant,
+        reduced: bool,
+    ) -> Option<(TabMove, Pixels)> {
+        let (movement, left) = self.tab_drag_layout(self.tab_auto.last_drag_position?)?;
+        self.slide_tab_neighbors(movement, now, reduced);
+        Some((movement, left))
+    }
+
+    fn slide_tab_neighbors(&mut self, movement: TabMove, now: Instant, reduced: bool) {
+        let Some(drag) = self.tab_drag.as_mut() else {
             return;
         };
-        let x =
-            f32::from(position.x - self.tab_scroll.bounds().left() - self.tab_scroll.offset().x);
-        self.tab_drop =
-            Some(((x / self.tab_width as f32 + 0.5).floor().max(0.) as usize).min(self.open.len()));
+        let previous = drag.preview.replace(movement);
+        if reduced || previous == Some(movement) {
+            return;
+        }
+        // Resume from each tab's visible position when the pointer reverses mid-slide.
+        let previous = previous.filter(|preview| preview.from == movement.from);
+        for (index, tab) in self.open.iter().enumerate() {
+            if index == movement.from {
+                continue;
+            }
+            let old_slot = previous.map_or(index, |preview| preview.slot(index));
+            let new_slot = movement.slot(index);
+            if old_slot != new_slot {
+                let offset = self.tab_slide_offset(tab.id, now)
+                    + self.tab_width * (old_slot as f32 - new_slot as f32);
+                self.tab_motions.insert(
+                    tab.id,
+                    TabMotion {
+                        offset,
+                        started: now,
+                    },
+                );
+            }
+        }
+    }
+
+    pub(super) fn tick_tab_slides(&mut self, now: Instant, reduced: bool, window: &mut Window) {
+        if reduced {
+            self.tab_motions.clear();
+        }
+        self.tab_motions
+            .retain(|_, motion| now.saturating_duration_since(motion.started) < TAB_SLIDE_DURATION);
+        if !self.tab_motions.is_empty() {
+            window.request_animation_frame();
+        }
+    }
+
+    pub(super) fn tab_slide_offset(&self, id: NoteId, now: Instant) -> Pixels {
+        self.tab_motions
+            .get(&id)
+            .map_or(px(0.), |motion| motion.offset(now))
+    }
+
+    pub(super) fn finish_tab_drag(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.button != MouseButton::Left || self.tab_drag.is_none() {
+            return false;
+        }
+        if self.tab_scroll.bounds().contains(&event.position)
+            && let Some((movement, left)) = self.tab_drag_layout(event.position)
+        {
+            let now = cx.background_executor().now();
+            let reduced = cx.reduce_motion();
+            let id = self.open[movement.from].id;
+            let offset = left - self.tab_scroll.offset().x - self.tab_width * movement.to as f32;
+            self.slide_tab_neighbors(movement, now, reduced);
+            self.tab_drag = None;
+            if self.reorder_tab(movement.from, movement.to, cx) {
+                if !reduced && f32::from(offset).abs() > 0.5 {
+                    self.tab_motions.insert(
+                        id,
+                        TabMotion {
+                            offset,
+                            started: now,
+                        },
+                    );
+                }
+            } else {
+                self.tab_motions.clear();
+            }
+        }
+        cx.stop_active_drag(window);
+        self.stop_drag();
+        cx.stop_propagation();
+        cx.notify();
+        true
     }
     pub(super) fn stop_drag(&mut self) {
         self.tree_auto.stop();
@@ -169,6 +339,9 @@ impl Edot {
         self.dragging_notes.clear();
         self.pressed = None;
         self.drop_target = None;
-        self.tab_drop = None;
+        if let Some(drag) = self.tab_drag.take() {
+            self.tab_scroll.set_offset(drag.original_scroll);
+            self.tab_motions.clear();
+        }
     }
 }

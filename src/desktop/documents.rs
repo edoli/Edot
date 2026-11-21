@@ -364,21 +364,19 @@ impl Edot {
             return;
         }
     }
-    pub(super) fn reorder_tab(&mut self, id: NoteId, gap: usize, cx: &mut Context<Self>) {
-        let Some(index) = self.open.iter().position(|tab| tab.id == id) else {
-            return;
-        };
-        let item = self.open.remove(index);
-        let target = gap
-            .saturating_sub(usize::from(gap > index))
-            .min(self.open.len());
-        self.open.insert(target, item);
-        if let Err(error) = self.save_session() {
-            let item = self.open.remove(target);
-            self.open.insert(index, item);
-            self.fail("탭 순서를 저장하지 못했습니다", error, cx);
+    pub(super) fn reorder_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) -> bool {
+        if from == to {
+            return true;
         }
-        self.tab_drop = None;
-        cx.notify();
+        let item = self.open.remove(from);
+        self.open.insert(to, item);
+        if let Err(error) = self.save_session() {
+            let item = self.open.remove(to);
+            self.open.insert(from, item);
+            self.session.tabs = self.open.iter().map(|tab| tab.id).collect();
+            self.fail("탭 순서를 저장하지 못했습니다", error, cx);
+            return false;
+        }
+        true
     }
 }
