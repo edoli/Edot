@@ -47,19 +47,3 @@ pub const EDIT_COMMANDS: [EditCommand; 6] = [
 pub fn init(cx: &mut App) {
     cx.set_global(crate::shortcuts::ActiveShortcuts::default());
 }
-
-pub(super) fn dispatch_key(event: &KeyDownEvent, window: &mut Window, cx: &mut App) -> bool {
-    let command = cx
-        .global::<crate::shortcuts::ActiveShortcuts>()
-        .command(&event.keystroke, cfg!(target_os = "macos"));
-    if let Some(edit) = EDIT_COMMANDS
-        .iter()
-        .find(|edit| Some(edit.command) == command)
-    {
-        window.dispatch_action((edit.action)(), cx);
-        cx.stop_propagation();
-        true
-    } else {
-        false
-    }
-}

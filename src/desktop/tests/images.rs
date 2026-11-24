@@ -143,7 +143,10 @@ fn pasted_images_are_blocked_in_reading_and_files_and_text_work_in_editing(
     fs::write(&first, &png).unwrap();
     fs::write(&second, &png).unwrap();
     f.update(cx, |_, _, cx| {
-        editor.update(cx, |state, cx| state.set_read_only(false, cx));
+        editor.update(cx, |state, cx| {
+            state.set_read_only(false, cx);
+            state.set_editor_mode(EditorMode::Visual, cx);
+        });
         cx.write_to_clipboard(
             ClipboardEntry::ExternalPaths(ExternalPaths(
                 vec![first.clone(), second.clone()].into(),
@@ -672,10 +675,13 @@ fn image_drops_use_space_paths_preserve_files_and_follow_edits(cx: &mut TestAppC
     f.press(cx, "ctrl-y");
     f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), expected));
 
-    // The reading screen must request the actual Space/images path, preserving
+    // The visual editor must request the actual Space/images path, preserving
     // spaces, brackets, Unicode and parentheses from the Markdown destination.
     f.update(cx, |_, _, cx| {
-        editor.update(cx, |state, cx| state.set_read_only(true, cx));
+        editor.update(cx, |state, cx| {
+            state.set_selected_range(expected.len()..expected.len(), cx);
+            state.set_editor_mode(EditorMode::Visual, cx);
+        });
     });
     cx.update_window(f.window, |_, window, cx| window.render_frame(cx))
         .unwrap();
@@ -691,6 +697,29 @@ fn image_drops_use_space_paths_preserve_files_and_follow_edits(cx: &mut TestAppC
                 .is_ok()
         );
     });
+    let image_start = expected.find("![").unwrap();
+    let selector = format!("visual-image-edit-{image_start}").leak();
+    let area_selector = format!("visual-image-area-{image_start}").leak();
+    let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
+    let area = visual.debug_bounds(area_selector).unwrap();
+    let button = visual.debug_bounds(selector).unwrap();
+    let editor_bounds = visual.debug_bounds("body-editor").unwrap();
+    assert!(area.right() < editor_bounds.right() - px(32.));
+    assert!((area.right() - button.right() - px(6.)).abs() < px(0.1));
+    assert!((button.top() - area.top() - px(6.)).abs() < px(0.1));
+    let button = button.center();
+    visual.simulate_mouse_move(button, None, Default::default());
+    visual.update(|window, cx| window.render_frame(cx));
+    visual.simulate_click(button, Default::default());
+    visual.update(|window, cx| window.render_frame(cx));
+    assert!(visual.debug_bounds(selector).is_none());
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).cursor(), image_start);
+        assert_eq!(editor.read(cx).value(), expected);
+    });
+    f.press(cx, "escape");
+    visual.update(|window, cx| window.render_frame(cx));
+    assert_eq!(visual.debug_bounds(area_selector), Some(area));
 
     // Reusing an image already in this Space does not duplicate it. A failed
     // batch cleans up only its new copies and keeps all pre-existing files.
@@ -716,7 +745,7 @@ fn image_drops_use_space_paths_preserve_files_and_follow_edits(cx: &mut TestAppC
     // An IME composition started during copying finishes before tag insertion.
     f.update(cx, |_, window, cx| {
         editor.update(cx, |state, cx| {
-            state.set_read_only(false, cx);
+            state.set_editor_mode(EditorMode::Source, cx);
             state.set_value("AB", window, cx);
         })
     });
@@ -770,7 +799,7 @@ fn image_drops_use_space_paths_preserve_files_and_follow_edits(cx: &mut TestAppC
     let composed = "A한![second](<images/second-2.png>)B";
     f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), composed));
 
-    // Switching to reading while copying must not insert a Markdown tag.
+    // A read-only preview must not accept a pending image insertion.
     drop_files(&f, cx, std::slice::from_ref(&second), position);
     f.update(cx, |_, _, cx| {
         editor.update(cx, |state, cx| state.set_read_only(true, cx))

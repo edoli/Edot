@@ -147,10 +147,14 @@ impl Edot {
             if !event.is_held {
                 self.session.sidebar_visible = !self.session.sidebar_visible;
             }
-        } else if command == Some(Command::ReadOnly) {
+        } else if command == Some(Command::ToggleEditorMode) {
             if !event.is_held
                 && self.active_editor().is_some()
-                && self.set_read_only(!cx.global::<AppState>().settings.read_only, window, cx)
+                && self.set_editor_mode(
+                    cx.global::<AppState>().settings.editor_mode.toggled(),
+                    window,
+                    cx,
+                )
             {
                 self.focus_editor(window, cx);
             }
@@ -247,10 +251,6 @@ impl Edot {
                         .update(cx, |state, cx| state.replace(text, window, cx)),
                     Ok(text) => {
                         if let Some(editor) = self.active_editor() {
-                            if editor.read(cx).is_read_only() {
-                                cx.stop_propagation();
-                                return;
-                            }
                             editor.update(cx, |state, cx| {
                                 state.replace(text, window, cx);
                                 state.focus(window, cx);
@@ -298,6 +298,13 @@ impl Edot {
                 self.focus_editor(window, cx);
             } else if self.search_mode {
                 self.focus_editor(window, cx);
+            } else if self
+                .active_editor()
+                .is_some_and(|editor| editor.read(cx).focus_handle(cx).is_focused(window))
+            {
+                // The focused editor can close an open Markdown source block.
+                handled = false;
+                cx.notify();
             }
             self.stop_drag();
             self.resizing = None;

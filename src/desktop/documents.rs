@@ -140,7 +140,7 @@ impl Edot {
                     .soft_wrap(cx.global::<AppState>().settings.wrap)
                     .source_directory(self.dir.clone())
                     .default_value(text.clone());
-                state.set_read_only(cx.global::<AppState>().settings.read_only, cx);
+                state.set_editor_mode(cx.global::<AppState>().settings.editor_mode, cx);
                 state
             });
             let subscription =

@@ -23,7 +23,7 @@ fn ini_preserves_comments_unknown_fields_and_escaped_font_names() {
         font: "Font \\\"한글".into(),
         font_size: 25,
         wrap: false,
-        read_only: true,
+        editor_mode: EditorMode::Visual,
         confirm_delete: false,
         shortcuts: Default::default(),
     };
@@ -57,6 +57,31 @@ fn ini_preserves_comments_unknown_fields_and_escaped_font_names() {
         assert!(settings.save(&dir).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     }
+}
+
+#[test]
+fn editor_mode_migrates_legacy_read_only_and_keeps_explicit_preference() {
+    let dir = fixture();
+    let path = dir.join(SETTINGS_FILE);
+    std::fs::write(
+        &path,
+        "version=1\nread_only = true # previous view\nshortcut_read_only = 'ctrl-k'\n",
+    )
+    .unwrap();
+    let mut settings = Settings::load(&dir).unwrap();
+    assert_eq!(settings.editor_mode, EditorMode::Visual);
+    assert_eq!(
+        settings.shortcuts.0[&crate::shortcuts::Command::ToggleEditorMode],
+        "ctrl-k"
+    );
+    settings.editor_mode = EditorMode::Source;
+    settings.save(&dir).unwrap();
+    assert_eq!(Settings::load(&dir).unwrap(), settings);
+    assert!(
+        std::fs::read_to_string(path)
+            .unwrap()
+            .contains("# previous view")
+    );
 }
 
 #[test]

@@ -108,7 +108,9 @@ impl InputState {
         let Some(end) = anchor.end.take() else {
             return false;
         };
-        self.commit(start..end, text, false, cx);
+        let range = start..end;
+        let text = self.visual_cell_input(&range, text);
+        self.commit(range, &text, false, cx);
         true
     }
 

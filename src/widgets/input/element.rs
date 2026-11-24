@@ -4,7 +4,7 @@ use super::*;
 struct EditorElement(Entity<InputState>);
 impl Element for EditorElement {
     type RequestLayoutState = ();
-    type PrepaintState = (Vec<(bool, Hitbox)>, Option<Hitbox>);
+    type PrepaintState = (Vec<(bool, Hitbox)>, Option<Hitbox>, Vec<AnyElement>);
     fn id(&self) -> Option<ElementId> {
         None
     }
@@ -32,15 +32,17 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        self.0.update(cx, |s, cx| {
+        let blocks = self.0.update(cx, |s, cx| {
             s.layout(bounds, window, cx);
             s.drop_hitbox = Some(window.insert_hitbox(bounds, HitboxBehavior::Normal));
+            let blocks = s.prepaint_visual_blocks(window, cx);
             let modifiers = window.modifiers();
             s.link_hover = !s.selecting
                 && s.scroll_drag.is_none()
                 && super::super::shortcuts::primary(modifiers)
                 && !modifiers.shift
-                && s.link_at(window.mouse_position()).is_some();
+                && s.link_target_at(window.mouse_position()).is_some();
+            blocks
         });
         let state = self.0.read(cx);
         let bars = [true, false]
@@ -57,7 +59,7 @@ impl Element for EditorElement {
         let link = state
             .link_hover
             .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal));
-        (bars, link)
+        (bars, link, blocks)
     }
     fn paint(
         &mut self,
@@ -121,7 +123,7 @@ impl Element for EditorElement {
                     && s.scroll_drag.is_none()
                     && super::super::shortcuts::primary(e.modifiers)
                     && !e.modifiers.shift
-                    && s.link_at(e.position).is_some();
+                    && s.link_target_at(e.position).is_some();
                 if s.link_hover != link_hover {
                     s.link_hover = link_hover;
                     cx.notify();
@@ -169,15 +171,15 @@ impl Element for EditorElement {
             window.handle_input(&focus, ElementInputHandler::new(bounds, self.0.clone()), cx);
         }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for block in &mut bars.2 {
+                block.paint(window, cx);
+            }
             self.0.update(cx, |s, cx| s.paint(window, cx))
         });
     }
 }
 impl Render for InputState {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.is_markdown_reading() {
-            return self.reading_view(window, cx);
-        }
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let drop_entity = cx.entity();
         div()
             .id("text-input")
@@ -266,7 +268,7 @@ impl InputState {
     /// above the rest of the window. Stopping propagation alone cannot suppress
     /// GPUI's hover styles, cursor changes and tooltips.
     pub(super) fn pointer_drag_capture(&self) -> Option<impl IntoElement> {
-        (self.selecting || self.scroll_drag.is_some() || self.is_reading_dragging()).then(|| {
+        (self.selecting || self.scroll_drag.is_some()).then(|| {
             let cursor = if self.scroll_drag.is_some() {
                 CursorStyle::Arrow
             } else {

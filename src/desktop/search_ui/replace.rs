@@ -22,7 +22,6 @@ impl Edot {
             return;
         };
         if self.open_note(key.id, false, window, cx)
-            && self.set_read_only(false, window, cx)
             && let Some(editor) = self.active_editor()
         {
             editor.update(cx, |state, cx| {

@@ -1,6 +1,7 @@
 //! Edot's text inputs and Markdown editor. Byte offsets internally, UTF-16 only at IME boundaries.
 use super::scroll::AutoScroll;
 use super::*;
+use crate::settings::EditorMode;
 use std::{ops::Range, time::Duration};
 
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
@@ -24,15 +25,8 @@ pub enum InputEvent {
         insertion: DropInsertion,
     },
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Access {
-    Edit,
-    Read,
-    SourcePreview,
-}
 #[derive(Clone)]
 struct Edit {
-    task_toggle: bool,
     start: usize,
     before: String,
     after: String,
@@ -65,8 +59,11 @@ struct Paragraph {
     end: usize,
     top: Pixels,
     line: WrappedLine,
-    tabs: Vec<(usize, usize, usize)>,
+    display: visual::DisplayMap,
     links: Vec<Range<usize>>,
+    compact: bool,
+    line_height: Pixels,
+    rich: Option<visual::RichRow>,
 }
 pub struct InputState {
     focus: FocusHandle,
@@ -95,15 +92,17 @@ pub struct InputState {
     link_hover: bool,
     wheel_gesture: OngoingScroll,
     multiline: bool,
-    access: Access,
+    read_only: bool,
     wrap: bool,
     scroll: Point<Pixels>,
     bounds: Bounds<Pixels>,
     content_padding: Edges<Pixels>,
     lines: Vec<Paragraph>,
     highlighting: highlighting::Highlighting,
-    reading: reading::Reading,
+    source_directory: std::path::PathBuf,
+    visual: Option<Box<visual::VisualState>>,
     layout_key: Option<(u64, Pixels, Pixels, Font, Hsla, Hsla)>,
+    projection_anchor: Option<(usize, Pixels)>,
     line_height: Pixels,
     content_size: Size<Pixels>,
     selecting: bool,
@@ -190,15 +189,17 @@ impl InputState {
             link_hover: false,
             wheel_gesture: OngoingScroll::default(),
             multiline: false,
-            access: Access::Edit,
+            read_only: false,
             wrap: false,
             scroll: point(px(0.), px(0.)),
             bounds: Bounds::default(),
             content_padding: Edges::default(),
             lines: vec![],
             highlighting: highlighting::Highlighting::default(),
-            reading: reading::Reading::default(),
+            source_directory: std::path::PathBuf::new(),
+            visual: None,
             layout_key: None,
+            projection_anchor: None,
             line_height: px(24.),
             content_size: Size::default(),
             selecting: false,
@@ -222,7 +223,27 @@ impl InputState {
     }
 
     pub fn read_only_source(mut self) -> Self {
-        self.access = Access::SourcePreview;
+        self.read_only = true;
+        self
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    #[cfg(test)]
+    pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
+        if read_only {
+            self.finish_composition();
+        }
+        self.read_only = read_only;
+        self.layout_key = None;
+        self.ensure_highlighting(cx);
+        cx.notify();
+    }
+
+    pub fn source_directory(mut self, directory: std::path::PathBuf) -> Self {
+        self.source_directory = directory;
         self
     }
 
@@ -267,6 +288,9 @@ impl InputState {
         cx.notify();
     }
     pub fn set_soft_wrap(&mut self, wrap: bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.wrap == wrap {
+            return;
+        }
         self.wrap = wrap;
         self.layout_key = None;
         cx.notify();
@@ -356,6 +380,7 @@ impl InputState {
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.stop_pointer_drag();
+        self.projection_anchor = None;
         self.revision = self.revision.wrapping_add(1);
         self.layout_key = None;
         self.ensure_highlighting(cx);
@@ -365,7 +390,6 @@ impl InputState {
     fn moved(&mut self, cx: &mut Context<Self>) {
         self.blink = true;
         self.reveal = true;
-        self.reveal_reading();
         cx.notify();
     }
 }
@@ -386,5 +410,7 @@ mod mermaid_view;
 mod navigation;
 mod reading;
 mod reading_document;
+mod reading_geometry;
 mod selection;
+mod visual;
 pub use element::{Input, Textarea};

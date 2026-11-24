@@ -50,7 +50,7 @@ commands! {
     LastTab, "last_tab", "노트 · 탭", "마지막 탭", "ctrl-9", "";
     Sidebar, "sidebar", "노트 · 탭", "사이드바 표시 / 숨기기", "ctrl-\\", "";
     Rename, "rename", "노트 · 탭", "이름 바꾸기", "f2", "";
-    ReadOnly, "read_only", "본문", "읽기 / 편집 모드 전환", "ctrl-shift-v", "";
+    ToggleEditorMode, "read_only", "본문", "원문 편집 / 서식 편집 전환", "ctrl-shift-v", "";
     Wrap, "wrap", "본문", "자동 줄 바꿈 전환", "alt-z", "cmd-alt-z";
     DateTime, "date_time", "본문", "시간과 날짜 삽입", "f5", "";
     Date, "date", "본문", "날짜 삽입", "f6", "";

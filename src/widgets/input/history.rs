@@ -44,7 +44,6 @@ impl InputState {
             self.undo.last_mut().unwrap().after.push_str(text);
         } else {
             self.undo.push(Edit {
-                task_toggle: false,
                 start: range.start,
                 before: self.content[range.clone()].into(),
                 after: text.into(),
@@ -71,7 +70,6 @@ impl InputState {
         {
             self.last_deletion = None;
             self.undo.push(Edit {
-                task_toggle: false,
                 start: 0,
                 before: before.to_string(),
                 after: self.content.to_string(),
@@ -135,17 +133,12 @@ impl InputState {
         self.last_deletion = Some(event.keystroke.clone());
     }
     pub(super) fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_read_only()
-            && !(self.is_markdown_reading()
-                && self.undo.last().is_some_and(|edit| edit.task_toggle))
-        {
+        if self.is_read_only() {
             return;
         }
         self.finish_composition();
         self.last_edit = None;
         if let Some(edit) = self.undo.pop() {
-            let reading_scroll = (self.is_markdown_reading() && edit.task_toggle)
-                .then(|| self.reading.list.logical_scroll_top());
             let redo = Edit {
                 selection: self.selection.clone(),
                 reversed: self.reversed,
@@ -167,23 +160,14 @@ impl InputState {
             self.occurrence_word = false;
             self.redo.push(redo);
             self.changed(cx);
-            if let Some(offset) = reading_scroll {
-                self.reading.list.scroll_to(offset);
-                self.reveal = false;
-            }
         }
     }
     pub(super) fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_read_only()
-            && !(self.is_markdown_reading()
-                && self.redo.last().is_some_and(|edit| edit.task_toggle))
-        {
+        if self.is_read_only() {
             return;
         }
         self.last_edit = None;
         if let Some(edit) = self.redo.pop() {
-            let reading_scroll = (self.is_markdown_reading() && edit.task_toggle)
-                .then(|| self.reading.list.logical_scroll_top());
             let undo = Edit {
                 selection: self.selection.clone(),
                 reversed: self.reversed,
@@ -205,10 +189,6 @@ impl InputState {
             self.occurrence_word = false;
             self.undo.push(undo);
             self.changed(cx);
-            if let Some(offset) = reading_scroll {
-                self.reading.list.scroll_to(offset);
-                self.reveal = false;
-            }
         }
     }
     pub(super) fn clipboard_range(&self) -> Range<usize> {
@@ -217,6 +197,9 @@ impl InputState {
     pub(super) fn clipboard_range_at(&self, selection: Range<usize>) -> Range<usize> {
         if !selection.is_empty() || !self.multiline {
             return selection;
+        }
+        if let Some(cell) = self.visual_cell(selection.start) {
+            return cell;
         }
         // Logical line, including its original terminator (CRLF, CR or LF).
         let cursor = selection.start;
@@ -250,7 +233,10 @@ impl InputState {
     }
     fn write_clipboard_range(&self, range: Range<usize>, cx: &mut Context<Self>) {
         let text = self.content[range].to_string();
-        let item = if self.multiline && self.selection.is_empty() {
+        let item = if self.multiline
+            && self.selection.is_empty()
+            && self.visual_cell(self.cursor()).is_none()
+        {
             ClipboardItem::new_string_with_metadata(text, LINE_COPY_METADATA.into())
         } else {
             ClipboardItem::new_string(text)
@@ -261,13 +247,14 @@ impl InputState {
         if self.is_read_only() {
             return;
         }
+        self.ensure_visual(cx);
         if !self.extra.is_empty() {
             self.finish_composition();
             let text = self.multiple_clipboard_text();
             if !text.is_empty() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 let linewise = self.selected_ranges().all(|r| r.is_empty());
-                let ranges: Vec<_> = self
+                let ranges: Option<Vec<_>> = self
                     .selected_ranges()
                     .map(|r| {
                         if linewise {
@@ -276,7 +263,11 @@ impl InputState {
                             r
                         }
                     })
+                    .map(|range| self.visual_table_input_range(range))
                     .collect();
+                let Some(ranges) = ranges else {
+                    return;
+                };
                 let texts = vec![String::new(); ranges.len()];
                 self.commit_multiple(ranges, texts, false, cx);
             }
@@ -285,6 +276,9 @@ impl InputState {
         let range = self.clipboard_range();
         if !range.is_empty() {
             self.write_clipboard_range(range.clone(), cx);
+            let Some(range) = self.visual_table_input_range(range) else {
+                return;
+            };
             self.finish_composition();
             self.commit(range, "", false, cx);
         }
@@ -293,6 +287,7 @@ impl InputState {
         if self.is_read_only() {
             return;
         }
+        self.ensure_visual(cx);
         if let Some(item) = cx.read_from_clipboard() {
             if self.can_insert_images()
                 && item.entries().iter().any(|entry| match entry {
@@ -321,13 +316,20 @@ impl InputState {
             if self.multiline
                 && item.metadata().is_some_and(|m| m == LINE_COPY_METADATA)
                 && self.selected_ranges().all(|r| r.is_empty())
+                && self.visual_cell(self.cursor()).is_none()
             {
                 self.paste_line(text, cx);
                 return;
             }
             if !self.extra.is_empty() {
                 self.finish_composition();
-                let ranges: Vec<_> = self.selected_ranges().collect();
+                let Some(ranges) = self
+                    .selected_ranges()
+                    .map(|range| self.visual_table_input_range(range))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return;
+                };
                 let lines: Vec<_> = text
                     .split('\n')
                     .map(|s| s.strip_suffix('\r').unwrap_or(s).to_owned())
@@ -343,6 +345,11 @@ impl InputState {
                 } else {
                     vec![text; ranges.len()]
                 };
+                let texts = ranges
+                    .iter()
+                    .zip(&texts)
+                    .map(|(range, text)| self.visual_cell_input(range, text).into_owned())
+                    .collect();
                 self.commit_multiple(ranges, texts, false, cx);
                 return;
             }

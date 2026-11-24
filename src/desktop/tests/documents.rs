@@ -96,7 +96,7 @@ fn tab_drag_previews_the_new_order_and_only_saves_on_drop(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn reading_task_clicks_autosave_and_undo_without_changing_reading_mode(cx: &mut TestAppContext) {
+fn visual_task_clicks_autosave_and_undo_without_changing_editor_mode(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
     let source = "- [ ] 저장할 한글🙂 항목\r\n";
     f.update(cx, |this, window, cx| {
@@ -104,18 +104,21 @@ fn reading_task_clicks_autosave_and_undo_without_changing_reading_mode(cx: &mut 
         editor.update(cx, |s, cx| s.replace_all(source, window, cx));
         this.changed(f.ids[0], window, cx);
         assert!(this.save_all(cx));
-        assert!(this.set_read_only(true, window, cx));
+        assert!(this.set_editor_mode(EditorMode::Visual, window, cx));
         this.focus_editor(window, cx);
     });
     let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
     visual.update(|w, cx| w.render_frame(cx));
-    let checkbox = visual.debug_bounds("reading-task-0").unwrap().center();
+    let checkbox = visual.debug_bounds("visual-task-3").unwrap().center();
     visual.simulate_click(checkbox, Default::default());
     let checked = source.replace("[ ]", "[x]");
     f.update(cx, |this, _, cx| {
         assert_eq!(this.active_editor().unwrap().read(cx).value(), checked);
         assert!(this.open[0].dirty);
-        assert!(cx.global::<AppState>().settings.read_only);
+        assert_eq!(
+            cx.global::<AppState>().settings.editor_mode,
+            EditorMode::Visual
+        );
     });
     cx.run_until_parked();
     cx.executor()
@@ -135,7 +138,10 @@ fn reading_task_clicks_autosave_and_undo_without_changing_reading_mode(cx: &mut 
         source
     );
     f.update(cx, |this, _, cx| {
-        assert!(cx.global::<AppState>().settings.read_only);
+        assert_eq!(
+            cx.global::<AppState>().settings.editor_mode,
+            EditorMode::Visual
+        );
         assert!(!this.open[0].dirty);
         assert_eq!(
             fs::read_to_string(this.book.file(&this.dir, f.ids[1])).unwrap(),
@@ -235,10 +241,10 @@ fn focusing_preview_body_with_mouse_enter_or_reading_keeps_the_tab(cx: &mut Test
         this.tree_click(reading_note, Default::default(), window, cx);
         assert!(this.open.iter().any(|tab| tab.id == keyboard_note));
         assert!(this.open.last().unwrap().preview);
-        assert!(this.set_read_only(true, window, cx));
+        assert!(this.set_editor_mode(EditorMode::Visual, window, cx));
     });
     visual.update(|w, cx| w.render_frame(cx));
-    let reading = visual.debug_bounds("markdown-reading").unwrap().center();
+    let reading = visual.debug_bounds("body-editor").unwrap().center();
     visual.simulate_mouse_down(reading, MouseButton::Left, Default::default());
     visual.simulate_mouse_up(reading, MouseButton::Left, Default::default());
     visual.update(|w, cx| w.render_frame(cx));

@@ -1,5 +1,6 @@
 //! Grapheme/visual navigation and mouse selection.
 use super::*;
+use std::borrow::Cow;
 
 impl InputState {
     pub(super) fn stop_pointer_drag(&mut self) {
@@ -8,7 +9,6 @@ impl InputState {
         self.column_anchor = None;
         self.scroll_drag = None;
         self.selection_auto_scroll.stop();
-        self.stop_reading_drag();
     }
     /// Plain-text word boundaries, including VS Code's decimal-number rule.
     pub(super) fn word_at_cursor(&self) -> Option<Range<usize>> {
@@ -59,7 +59,7 @@ impl InputState {
     }
     pub(super) fn move_to(&mut self, at: usize, shift: bool, cx: &mut Context<Self>) {
         self.last_edit = None;
-        let at = self.boundary(at);
+        let at = self.table_caret(self.cursor(), self.boundary(at));
         let anchor = if !shift {
             at
         } else if self.reversed {
@@ -72,53 +72,182 @@ impl InputState {
         self.caret_after_wrap = false;
         self.moved(cx);
     }
-    fn navigation_destination(&mut self, key: &str, ctrl: bool, shift: bool) -> Option<usize> {
+    fn navigation_destination(
+        &mut self,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+    ) -> Option<(usize, bool)> {
         let cursor = self.cursor();
-        match key {
-            "left" => Some(if !shift && !self.selection.is_empty() {
-                self.selection.start
-            } else if ctrl {
-                self.word(cursor, true)
-            } else {
-                self.prev(cursor)
-            }),
-            "right" => Some(if !shift && !self.selection.is_empty() {
-                self.selection.end
-            } else if ctrl {
-                self.word(cursor, false)
-            } else {
-                self.next(cursor)
-            }),
-            "home" => Some(if ctrl {
-                0
-            } else {
-                self.visual_edge(cursor, false)
-            }),
-            "end" => Some(if ctrl {
-                self.content.len()
-            } else {
-                self.visual_edge(cursor, true)
-            }),
+        if !ctrl && let Some(cell) = self.visual_cell(cursor) {
+            match key {
+                "home" => return Some((cell.start, false)),
+                "end" => return Some((cell.end, false)),
+                _ => {}
+            }
+        }
+        let at = match key {
+            "left" | "right" => {
+                let backwards = key == "left";
+                if !shift && !self.selection.is_empty() {
+                    if backwards {
+                        self.selection.start
+                    } else {
+                        self.selection.end
+                    }
+                } else if ctrl {
+                    let target = self.table_caret(cursor, self.word(cursor, backwards));
+                    if self.visual_document().is_some()
+                        && self.position(target) == self.position(cursor)
+                    {
+                        self.horizontal_visual_caret(cursor, backwards)
+                            .unwrap_or(target)
+                    } else {
+                        target
+                    }
+                } else {
+                    self.horizontal_visual_caret(cursor, backwards)
+                        .unwrap_or_else(|| {
+                            if backwards {
+                                self.prev(cursor)
+                            } else {
+                                self.next(cursor)
+                            }
+                        })
+                }
+            }
+            "home" | "end" if ctrl => {
+                if key == "home" {
+                    0
+                } else {
+                    self.content.len()
+                }
+            }
+            "home" | "end" => {
+                let p = self.caret_position();
+                return Some(self.navigation_target(point(
+                    if key == "end" { px(1e8) } else { px(0.) },
+                    p.y + px(0.5),
+                )));
+            }
             "up" | "down" | "pageup" | "pagedown" if self.multiline => {
                 let p = self.caret_position();
                 let x = self.preferred_x.unwrap_or(p.x);
                 self.preferred_x = Some(x);
+                if matches!(key, "up" | "down") && self.visual_document().is_some() {
+                    let upwards = key == "up";
+                    if let Some(target) = self.vertical_visual_cell(cursor, upwards, x) {
+                        return Some(target);
+                    }
+                    let distance = if upwards {
+                        -px(0.5)
+                    } else {
+                        self.visual_caret_height(cursor) + px(0.5)
+                    };
+                    let target = self.navigation_target(point(x, p.y + distance));
+                    let target_y = self.position_with_wrap_side(target.0, target.1).y;
+                    if (upwards && target_y < p.y) || (!upwards && target_y > p.y) {
+                        return Some(target);
+                    }
+                    return Some(
+                        self.neighboring_visual_caret(cursor, upwards, x)
+                            .unwrap_or((cursor, self.caret_after_wrap)),
+                    );
+                }
                 let step = if key.starts_with("page") {
                     self.bounds.size.height.max(self.line_height)
+                } else if key == "up" {
+                    // A point just above the current visual row also works
+                    // when the preceding heading or block is taller.
+                    px(0.5)
                 } else {
-                    self.line_height
+                    self.row_at_y(p.y)
+                        .map_or(self.line_height, |row| row.line_height)
                 };
-                Some(self.index_at(point(
+                return Some(self.navigation_target(point(
                     x,
                     p.y + if key == "up" || key == "pageup" {
                         -step
                     } else {
                         step
                     },
-                )))
+                )));
             }
-            _ => None,
+            _ => return None,
+        };
+        let after_wrap = key == "left" && self.wrap_side_at_y(at, self.caret_position().y);
+        Some((at, after_wrap))
+    }
+
+    fn navigation_target(&self, point: Point<Pixels>) -> (usize, bool) {
+        let at = self.table_caret(self.cursor(), self.index_at(point));
+        (at, self.wrap_side_at_y(at, point.y))
+    }
+
+    fn wrap_side_at_y(&self, at: usize, y: Pixels) -> bool {
+        let before = self.position(at).y;
+        let after = self.position_with_wrap_side(at, true).y;
+        after > before && y >= after
+    }
+
+    pub(super) fn neighboring_visual_caret(
+        &self,
+        at: usize,
+        backwards: bool,
+        x: Pixels,
+    ) -> Option<(usize, bool)> {
+        let index = self
+            .lines
+            .partition_point(|line| line.start <= at)
+            .checked_sub(1)?;
+        if backwards {
+            self.lines[..index]
+                .iter()
+                .rev()
+                .find_map(|row| self.caret_on_neighbor(row, backwards, x))
+        } else {
+            self.lines[index + 1..]
+                .iter()
+                .find_map(|row| self.caret_on_neighbor(row, backwards, x))
         }
+    }
+
+    fn caret_on_neighbor(
+        &self,
+        neighbor: &Paragraph,
+        backwards: bool,
+        x: Pixels,
+    ) -> Option<(usize, bool)> {
+        if neighbor.compact {
+            return None;
+        }
+        let y = if backwards {
+            neighbor.top + neighbor.height() - px(0.5)
+        } else {
+            neighbor.top + px(0.5)
+        };
+        if let Some(rich) = neighbor.rich {
+            let document = self.visual_document()?;
+            let visual = self.visual.as_ref()?;
+            if let Some(byte) = visual.geometry.hit(neighbor.start, point(x, y)) {
+                return Some((byte, self.wrap_side_at_y(byte, y)));
+            }
+            let blocks = document.rich_blocks(rich.index);
+            let mut text = blocks.iter().flat_map(|block| {
+                block
+                    .content
+                    .pieces
+                    .iter()
+                    .chain(block.cells.iter().flat_map(|cell| cell.pieces.iter()))
+            });
+            let byte = if backwards {
+                text.next_back().map(|piece| piece.source.end)
+            } else {
+                text.next().map(|piece| piece.source.start)
+            }?;
+            return Some((byte, false));
+        }
+        Some(self.navigation_target(point(x, y)))
     }
     fn deletion_range(
         &self,
@@ -140,6 +269,9 @@ impl InputState {
         } else {
             self.next(cursor)
         };
+        let target = self
+            .visual_text_bounds(cursor)
+            .map_or(target, |cell| target.clamp(cell.start, cell.end));
         if backward {
             target..cursor
         } else {
@@ -176,10 +308,19 @@ impl InputState {
             };
             let prefix = &self.content[start..end];
             let indent_len = prefix.len() - prefix.trim_start_matches([' ', '\t']).len();
-            texts.push(format!("\n{}", &prefix[..indent_len]));
             if below {
                 *range = end..end;
             }
+            let Some(target) = self.visual_table_input_range(range.clone()) else {
+                return;
+            };
+            *range = target;
+            let newline = format!("\n{}", &prefix[..indent_len]);
+            let newline = match self.visual_cell_input(range, &newline) {
+                Cow::Borrowed(_) => newline,
+                Cow::Owned(text) => text,
+            };
+            texts.push(newline);
         }
         if self.extra.is_empty() {
             self.commit(ranges.pop().unwrap(), &texts[0], !below, cx);
@@ -215,6 +356,7 @@ impl InputState {
         let command = cx
             .global::<ActiveShortcuts>()
             .command(&event.keystroke, macos);
+        self.ensure_visual(cx);
         match command {
             Some(Command::Undo) => self.undo(&Undo, window, cx),
             Some(Command::Redo) => self.redo(&Redo, window, cx),
@@ -300,6 +442,30 @@ impl InputState {
         }
         let mut dest = None;
         match key {
+            "escape" if self.close_visual_block_edit(cx) => {
+                cx.stop_propagation();
+                return;
+            }
+            "enter"
+                if primary
+                    && !shift
+                    && self.extra.is_empty()
+                    && self.insert_after_visual_table(cx) =>
+            {
+                cx.stop_propagation();
+                return;
+            }
+            "tab" | "enter"
+                if !primary
+                    && self.extra.is_empty()
+                    && self.visual_cell(self.cursor()).is_some() =>
+            {
+                if let Some(next) = self.step_visual_cell(self.cursor(), shift) {
+                    self.move_to(next, false, cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
             "left" | "right" | "home" | "end" => {
                 dest = self.navigation_destination(key, ctrl, shift);
             }
@@ -312,8 +478,11 @@ impl InputState {
                 let ranges = self
                     .selected_ranges()
                     .map(|range| self.deletion_range(range, key == "backspace", ctrl, line))
-                    .collect();
-                self.commit_deletion(ranges, event, cx);
+                    .map(|range| self.visual_table_input_range(range))
+                    .collect::<Option<Vec<_>>>();
+                if let Some(ranges) = ranges {
+                    self.commit_deletion(ranges, event, cx);
+                }
             }
             "enter" => {
                 if self.multiline {
@@ -328,7 +497,7 @@ impl InputState {
         if !matches!(key, "up" | "down" | "pageup" | "pagedown") {
             self.preferred_x = None;
         }
-        if let Some(at) = dest {
+        if let Some((at, after_wrap)) = dest {
             // Reuse the same navigation rules for every additional caret.
             let extra = std::mem::take(&mut self.extra);
             let primary = self.selection.clone();
@@ -344,8 +513,9 @@ impl InputState {
                 } else {
                     None
                 };
-                if let Some(at) = self.navigation_destination(key, ctrl, shift) {
+                if let Some((at, after_wrap)) = self.navigation_destination(key, ctrl, shift) {
                     self.move_to(at, shift, cx);
+                    self.caret_after_wrap = after_wrap;
                 }
                 moved.push(Selection {
                     range: self.selection.clone(),
@@ -358,6 +528,7 @@ impl InputState {
             self.reversed = reversed;
             self.preferred_x = preferred;
             self.move_to(at, shift, cx);
+            self.caret_after_wrap = after_wrap;
             self.extra = moved;
             self.deduplicate_selections();
             self.occurrence_word = false;
@@ -372,10 +543,7 @@ impl InputState {
         self.position_with_wrap_side(at, false)
     }
     pub(super) fn caret_position(&self) -> Point<Pixels> {
-        self.position_with_wrap_side(
-            self.cursor(),
-            self.caret_after_wrap || self.reversed && !self.selection.is_empty(),
-        )
+        self.position_with_wrap_side(self.cursor(), self.caret_after_wrap)
     }
     pub(super) fn position_with_wrap_side(&self, at: usize, after_wrap: bool) -> Point<Pixels> {
         let i = self
@@ -385,11 +553,16 @@ impl InputState {
         self.lines.get(i).map_or(
             point(self.content_padding.left, self.content_padding.top),
             |p| {
+                if p.rich.is_some()
+                    && let Some((position, _)) = self.rich_caret(p.start, at, after_wrap)
+                {
+                    return position;
+                }
                 let byte = at.min(p.end) - p.start;
                 let pos = if after_wrap {
-                    p.position_after_wrap(byte, self.line_height)
+                    p.position_after_wrap(byte)
                 } else {
-                    p.position(byte, self.line_height)
+                    p.position(byte)
                 };
                 pos + point(self.content_padding.left, p.top)
             },
@@ -404,20 +577,29 @@ impl InputState {
             if self.lines.first().is_some_and(|l| p.y < l.top) {
                 return 0;
             }
-            if self
-                .lines
-                .last()
-                .is_some_and(|l| p.y >= l.top + l.line.size(self.line_height).height)
-            {
+            if self.lines.last().is_some_and(|l| p.y >= l.top + l.height()) {
                 return self.content.len();
             }
         }
         let p = point(p.x - self.content_padding.left, p.y);
-        let i = self
-            .lines
-            .partition_point(|l| l.top <= p.y)
-            .saturating_sub(1);
-        self.lines.get(i).map_or(0, |l| {
+        self.row_at_y(p.y).map_or(0, |l| {
+            if l.rich.is_some() {
+                if let Some(at) = self.visual.as_ref().and_then(|visual| {
+                    visual
+                        .geometry
+                        .hit(l.start, p + point(self.content_padding.left, px(0.)))
+                }) {
+                    return self.boundary(at);
+                }
+                let fraction = ((p.y - l.top) / l.height()).clamp(0., 1.);
+                let target =
+                    self.boundary(l.start + ((l.end - l.start) as f32 * fraction) as usize);
+                return self.content[l.start..target]
+                    .rfind(['\r', '\n'])
+                    .map_or(l.start, |offset| l.start + offset + 1)
+                    .min(l.end);
+            }
+            let x = p.x;
             // A single-line field's vertical padding must still use its text row.
             let y = if self.multiline {
                 (p.y - l.top).max(px(0.))
@@ -428,7 +610,7 @@ impl InputState {
                 l.start
                     + l.source_index(
                         l.line
-                            .index_for_position(point(p.x, y), self.line_height)
+                            .index_for_position(point(x, y), l.line_height)
                             .unwrap_or_else(|i| i),
                     ),
             );
@@ -444,13 +626,17 @@ impl InputState {
                     .expect("complete text")
                     .unwrap_or(0)
             };
-            let end = self.next(start).min(l.end);
-            let left = l.position(start - l.start, self.line_height);
-            let right = l.position(end - l.start, self.line_height);
+            let end = l
+                .display
+                .substitution_end(start - l.start)
+                .map_or_else(|| self.next(start), |end| l.start + end)
+                .min(l.end);
+            let left = l.position(start - l.start);
+            let right = l.position(end - l.start);
             // A wrap boundary's caret is represented at the preceding row's end.
-            let row_top = (y / self.line_height).floor() * self.line_height;
+            let row_top = (y / l.line_height).floor() * l.line_height;
             let left_x = if left.y < row_top { px(0.) } else { left.x };
-            if right.y == row_top && p.x > (left_x + right.x) / 2. {
+            if right.y == row_top && x > (left_x + right.x) / 2. {
                 end
             } else {
                 start
@@ -534,18 +720,51 @@ impl InputState {
         self.selection_auto_scroll.last_drag_position = Some(e.position);
         self.clear_extra_selections();
         self.preferred_x = None;
-        let at = self.mouse_index(e.position);
+        let local = e.position - self.bounds.origin - self.scroll;
+        if !e.modifiers.shift
+            && let Some(row) = self.row_at_y(local.y)
+            && let Some(rich) = row.rich
+            && local.y >= row.top
+            && local.y < row.top + row.height()
+            && self
+                .visual
+                .as_ref()
+                .is_some_and(|visual| visual.geometry.diagram_hit(row.start, local).is_none())
+            && self.visual_document().is_some_and(|document| {
+                matches!(
+                    document.rich_blocks(rich.index)[0].kind,
+                    super::reading_document::Kind::Mermaid(Ok(_))
+                )
+            })
+        {
+            self.set_selected_range(row.start..row.end, cx);
+            self.reveal = false;
+            cx.stop_propagation();
+            return;
+        }
+        let (at, after_wrap) = self.navigation_target(local);
         if e.click_count >= 3 {
-            let start = self.content[..at].rfind(['\n', '\r']).map_or(0, |i| i + 1);
-            let end = self.content[at..]
-                .find(['\n', '\r'])
-                .map_or(self.content.len(), |i| at + i);
-            self.set_selected_range(start..end, cx);
+            let range = self.visual_cell(at).unwrap_or_else(|| {
+                let start = self.content[..at].rfind(['\n', '\r']).map_or(0, |i| i + 1);
+                let end = self.content[at..]
+                    .find(['\n', '\r'])
+                    .map_or(self.content.len(), |i| at + i);
+                start..end
+            });
+            self.set_selected_range(range, cx);
         } else if e.click_count == 2 {
-            let range = self.word_at(at).unwrap_or(at..self.next(at));
+            let mut range = self.word_at(at).unwrap_or(at..self.next(at));
+            if let Some(cell) = self.visual_cell(at) {
+                range.start = range.start.max(cell.start);
+                range.end = range.end.min(cell.end);
+            }
             self.set_selected_range(range, cx);
         } else {
             self.move_to(at, e.modifiers.shift, cx);
+            self.caret_after_wrap = after_wrap;
+        }
+        if self.visual_document().is_some() {
+            self.reveal = false;
         }
         cx.stop_propagation();
     }
@@ -625,7 +844,22 @@ impl InputState {
         if self.column_anchor.is_some() {
             self.update_column_selection(position, cx);
         } else {
-            self.move_to(self.mouse_index(position), true, cx);
+            let anchor = if self.reversed {
+                self.selection.end
+            } else {
+                self.selection.start
+            };
+            let local = position - self.bounds.origin - self.scroll;
+            let diagram = self
+                .visual
+                .as_ref()
+                .and_then(|visual| visual.geometry.diagram_drag(anchor, local));
+            let (at, after_wrap) = diagram.map_or_else(
+                || self.navigation_target(local),
+                |at| (at, self.wrap_side_at_y(at, local.y)),
+            );
+            self.move_to(at, true, cx);
+            self.caret_after_wrap = after_wrap;
         }
         // Timer-driven scrolling uses the pointer, rather than revealing a caret
         // that may lie several rows beyond the viewport.

@@ -24,8 +24,20 @@ pub(super) struct Span {
 pub(super) fn parse(text: &str) -> Vec<Span> {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
-    let mut boundaries = Vec::new();
-    for (event, mut range) in Parser::new_ext(text, options).into_offset_iter() {
+    let mut builder = SpanBuilder::default();
+    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        builder.observe(text, &event, range);
+    }
+    builder.finish()
+}
+
+#[derive(Default)]
+pub(super) struct SpanBuilder {
+    boundaries: Vec<(usize, u8, i8)>,
+}
+
+impl SpanBuilder {
+    pub(super) fn observe(&mut self, text: &str, event: &Event<'_>, mut range: Range<usize>) {
         let style = match event {
             Event::Start(Tag::Heading { .. }) => HEADING,
             Event::Start(Tag::Strong | Tag::TableHead) => STRONG,
@@ -48,48 +60,52 @@ pub(super) fn parse(text: &str) -> Vec<Span> {
                     range.end = range.start + end;
                     MARKER
                 } else {
-                    continue;
+                    return;
                 }
             }
             Event::TaskListMarker(_) => MARKER,
             Event::Rule => RULE,
-            _ => continue,
+            _ => return,
         };
         if !range.is_empty() {
             let bit = style.trailing_zeros() as u8;
-            boundaries.push((range.start, bit, 1i8));
-            boundaries.push((range.end, bit, -1i8));
+            self.boundaries.push((range.start, bit, 1i8));
+            self.boundaries.push((range.end, bit, -1i8));
         }
     }
-    boundaries.sort_unstable_by_key(|&(offset, _, _)| offset);
-    let mut spans: Vec<Span> = Vec::new();
-    let mut counts = [0i32; 9];
-    let mut style = 0;
-    let mut previous = 0;
-    for (offset, bit, delta) in boundaries {
-        if previous < offset && style != 0 {
-            if let Some(last) = spans
-                .last_mut()
-                .filter(|s| s.range.end == previous && s.style == style)
-            {
-                last.range.end = offset;
-            } else {
-                spans.push(Span {
-                    range: previous..offset,
-                    style,
-                });
+
+    pub(super) fn finish(self) -> Vec<Span> {
+        let mut boundaries = self.boundaries;
+        boundaries.sort_unstable_by_key(|&(offset, _, _)| offset);
+        let mut spans: Vec<Span> = Vec::new();
+        let mut counts = [0i32; 9];
+        let mut style = 0;
+        let mut previous = 0;
+        for (offset, bit, delta) in boundaries {
+            if previous < offset && style != 0 {
+                if let Some(last) = spans
+                    .last_mut()
+                    .filter(|s| s.range.end == previous && s.style == style)
+                {
+                    last.range.end = offset;
+                } else {
+                    spans.push(Span {
+                        range: previous..offset,
+                        style,
+                    });
+                }
             }
+            let count = &mut counts[usize::from(bit)];
+            *count += i32::from(delta);
+            if *count > 0 {
+                style |= 1 << bit;
+            } else {
+                style &= !(1 << bit);
+            }
+            previous = offset;
         }
-        let count = &mut counts[usize::from(bit)];
-        *count += i32::from(delta);
-        if *count > 0 {
-            style |= 1 << bit;
-        } else {
-            style &= !(1 << bit);
-        }
-        previous = offset;
+        spans
     }
-    spans
 }
 
 #[cfg(test)]

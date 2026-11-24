@@ -159,20 +159,11 @@ pub(super) fn editor_menu(
     weak: WeakEntity<Edot>,
     cx: &App,
 ) -> PopupMenu {
-    let read_only = editor.read(cx).is_read_only();
-    let mut menu = if read_only {
-        reading_menu(menu, editor.read(cx).focus_handle(cx), cx)
-    } else {
-        editing_menu(menu, editor.read(cx).focus_handle(cx), false, cx)
-    }
-    .separator();
+    let mut menu = editing_menu(menu, editor.read(cx).focus_handle(cx), false, cx).separator();
     for (label, shortcut, replace) in [
         ("찾기", Command::Find, false),
         ("바꾸기", Command::Replace, true),
     ] {
-        if read_only && replace {
-            continue;
-        }
         let weak = weak.clone();
         menu = menu.item(
             PopupMenuItem::new(label)
@@ -183,20 +174,6 @@ pub(super) fn editor_menu(
         );
     }
     menu
-}
-
-fn reading_menu(menu: PopupMenu, focus: FocusHandle, cx: &App) -> PopupMenu {
-    menu.action_context(focus)
-        .menu(
-            "복사",
-            label(Command::Copy, cx),
-            Box::new(component::input::Copy),
-        )
-        .menu(
-            "전체 선택",
-            label(Command::SelectAll, cx),
-            Box::new(component::input::SelectAll),
-        )
 }
 
 impl Edot {
@@ -300,9 +277,6 @@ impl Edot {
         let weak = cx.entity().downgrade();
         let focus = window.focused(cx).unwrap_or_else(|| self.focus.clone());
         let tree = self.tree_focus.is_focused(window);
-        let read_only = self
-            .active_editor()
-            .is_some_and(|e| e.read(cx).is_read_only());
         let id = if tree {
             self.caret
         } else {
@@ -314,8 +288,6 @@ impl Edot {
         let menu = PopupMenu::build(window, cx, |menu, _, cx| {
             if tree {
                 self.note_menu(menu.action_context(focus), weak, id, cx)
-            } else if read_only {
-                reading_menu(menu, focus, cx)
             } else {
                 editing_menu(menu, focus, true, cx)
             }

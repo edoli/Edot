@@ -5,20 +5,60 @@ use std::{ops::Range, sync::Arc};
 
 #[derive(Default)]
 pub(super) struct Inline {
-    pub offset: usize,
     pub text: String,
     pub spans: Vec<Span>,
     pub links: Vec<(Range<usize>, String)>,
     pub images: Vec<ReadingImage>,
+    pub source: Range<usize>,
+    pub pieces: Vec<SourcePiece>,
+    pub cell: Option<Range<usize>>,
+}
+
+#[derive(Clone)]
+pub(super) struct SourcePiece {
+    pub source: Range<usize>,
+    pub display: Range<usize>,
+    pub verbatim: bool,
 }
 pub(super) struct ReadingImage {
     pub source: String,
     pub alt: String,
+    pub source_range: Range<usize>,
 }
 impl Inline {
-    fn push(&mut self, text: &str, style: u16) {
+    fn push(&mut self, text: &str, style: u16, mut source: Range<usize>, original: &str) {
         let start = self.text.len();
         self.text.push_str(text);
+        if !text.is_empty() {
+            if style & CODE != 0
+                && let Some(at) = original[source.clone()].find(text)
+            {
+                source.start += at;
+                source.end = source.start + text.len();
+            }
+            if original[source.clone()].contains("\r\n")
+                && original[source.clone()].replace("\r\n", "\n") == text
+            {
+                let mut source_start = source.start;
+                let mut display_start = start;
+                for (index, _) in original[source.clone()].match_indices("\r\n") {
+                    let end = source.start + index;
+                    let display_end = display_start + end - source_start;
+                    self.add_piece(source_start..end, display_start..display_end, true);
+                    self.add_piece(end..end + 2, display_end..display_end + 1, false);
+                    source_start = end + 2;
+                    display_start = display_end + 1;
+                }
+                self.add_piece(
+                    source_start..source.end,
+                    display_start..self.text.len(),
+                    true,
+                );
+            } else {
+                let verbatim = original[source.clone()] == *text;
+                self.add_piece(source, start..self.text.len(), verbatim);
+            }
+        }
         if style != 0 && start < self.text.len() {
             if let Some(last) = self
                 .spans
@@ -32,6 +72,16 @@ impl Inline {
                     style,
                 });
             }
+        }
+    }
+
+    fn add_piece(&mut self, source: Range<usize>, display: Range<usize>, verbatim: bool) {
+        if !display.is_empty() {
+            self.pieces.push(SourcePiece {
+                source,
+                display,
+                verbatim,
+            });
         }
     }
 }
@@ -54,7 +104,6 @@ pub(super) enum Align {
     Right,
 }
 pub(super) struct Block {
-    pub offset: usize,
     pub kind: Kind,
     pub content: Inline,
     pub cells: Vec<Inline>,
@@ -67,76 +116,7 @@ pub(super) struct Block {
 #[derive(Default)]
 pub(super) struct Document {
     pub blocks: Vec<Block>,
-    pub len: usize,
 }
-impl Document {
-    #[cfg(test)]
-    pub fn text(&self) -> String {
-        self.text_range(0..self.len)
-    }
-    pub fn text_range(&self, range: Range<usize>) -> String {
-        if range.is_empty() {
-            return String::new();
-        }
-        let mut text = String::with_capacity(range.end.saturating_sub(range.start));
-        let mut append = |offset: usize, value: &str| {
-            let start = range.start.max(offset);
-            let end = range.end.min(offset + value.len());
-            if start < end {
-                text.push_str(&value[start - offset..end - offset]);
-            }
-        };
-        let first = self
-            .blocks
-            .partition_point(|b| b.offset <= range.start)
-            .saturating_sub(1);
-        for block in &self.blocks[first..] {
-            if block.offset.saturating_sub(2) >= range.end {
-                break;
-            }
-            if block.offset > 0 {
-                append(block.offset - 2, "\n\n");
-            }
-            append(block.offset, &block.prefix);
-            if !block.prefix.is_empty() {
-                append(block.offset + block.prefix.len(), " ");
-            }
-            if block.cells.is_empty() {
-                append(block.content.offset, &block.content.text);
-            } else {
-                for (i, cell) in block.cells.iter().enumerate() {
-                    if i > 0 {
-                        append(cell.offset - 1, "\t");
-                    }
-                    append(cell.offset, &cell.text);
-                }
-            }
-        }
-        text
-    }
-    fn index_text(&mut self) {
-        let mut offset = 0;
-        for block in &mut self.blocks {
-            if offset > 0 {
-                offset += 2;
-            }
-            block.offset = offset;
-            offset += block.prefix.len() + usize::from(!block.prefix.is_empty());
-            block.content.offset = offset;
-            if block.cells.is_empty() {
-                offset += block.content.text.len();
-            } else {
-                for (i, cell) in block.cells.iter_mut().enumerate() {
-                    offset += usize::from(i > 0);
-                    cell.offset = offset;
-                    offset += cell.text.len();
-                }
-            }
-        }
-        self.len = offset;
-    }
-}
-
 struct Builder {
     document: Document,
     current: Option<Block>,
@@ -166,9 +146,11 @@ impl Builder {
     fn start(&mut self, kind: Kind, range: Range<usize>) {
         self.flush();
         self.current = Some(Block {
-            offset: 0,
             kind,
-            content: Inline::default(),
+            content: Inline {
+                source: range.clone(),
+                ..Default::default()
+            },
             cells: Vec::new(),
             prefix: std::mem::take(&mut self.prefix),
             task_marker: None,
@@ -183,16 +165,19 @@ impl Builder {
         }
         let block = self.current.as_mut().unwrap();
         block.source.end = block.source.end.max(range.end);
+        block.content.source.end = block.source.end;
         block
     }
-    fn push(&mut self, text: &str, range: Range<usize>, extra: u16) {
+    fn push(&mut self, text: &str, range: Range<usize>, extra: u16, original: &str) {
         let mut style = extra;
         for (count, bit) in self.counts.iter().zip([STRONG, EMPHASIS, STRIKE, LINK]) {
             if *count > 0 {
                 style |= bit;
             }
         }
-        self.ensure(range).content.push(text, style);
+        self.ensure(range.clone())
+            .content
+            .push(text, style, range, original);
     }
     fn row(&mut self, header: bool, range: Range<usize>) {
         self.start(
@@ -213,7 +198,15 @@ impl Builder {
     }
 }
 
-pub(super) fn parse(text: &str) -> Document {
+#[cfg(test)]
+fn parse(text: &str) -> Document {
+    parse_with(text, |_, _| {})
+}
+
+pub(super) fn parse_with(
+    text: &str,
+    mut observe: impl FnMut(&Event<'_>, &Range<usize>),
+) -> Document {
     let mut b = Builder {
         document: Document::default(),
         current: None,
@@ -229,6 +222,7 @@ pub(super) fn parse(text: &str) -> Document {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
     for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        observe(&event, &range);
         // Image descriptions belong to the image, not the visible paragraph.
         // Ignore their formatting so it cannot leak into surrounding text.
         if let Some((depth, image)) = &mut b.image {
@@ -296,12 +290,13 @@ pub(super) fn parse(text: &str) -> Document {
                     b.counts[3] += 1;
                 }
                 Tag::Image { dest_url, .. } => {
-                    b.ensure(range);
+                    b.ensure(range.clone());
                     b.image = Some((
                         1,
                         ReadingImage {
                             source: dest_url.to_string(),
                             alt: String::new(),
+                            source_range: range,
                         },
                     ));
                 }
@@ -318,7 +313,29 @@ pub(super) fn parse(text: &str) -> Document {
                 }
                 Tag::TableHead => b.row(true, range),
                 Tag::TableRow => b.row(false, range),
-                Tag::TableCell => b.start(Kind::Paragraph, range),
+                Tag::TableCell => {
+                    let cell = b.row.as_ref().and_then(|row| {
+                        let line_end = text[row.source.start..]
+                            .find(['\r', '\n'])
+                            .map_or(text.len(), |end| row.source.start + end);
+                        if range.start >= line_end {
+                            return None;
+                        }
+                        let end = range.end.min(line_end);
+                        let raw = &text[range.start..end];
+                        let trimmed = raw.trim_matches([' ', '\t']);
+                        if trimmed.is_empty() {
+                            let at = range.start + raw.len();
+                            Some(at..at)
+                        } else {
+                            let start =
+                                range.start + raw.len() - raw.trim_start_matches([' ', '\t']).len();
+                            Some(start..start + trimmed.len())
+                        }
+                    });
+                    b.start(Kind::Paragraph, range);
+                    b.current.as_mut().unwrap().content.cell = cell;
+                }
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -340,9 +357,13 @@ pub(super) fn parse(text: &str) -> Document {
                 TagEnd::Emphasis => b.counts[1] -= 1,
                 TagEnd::Strikethrough => b.counts[2] -= 1,
                 TagEnd::Link => {
-                    if let Some((start, target)) = b.link.take() {
+                    if let Some((start, target)) = b.link.take()
+                        && super::links::is_markdown_target(&target)
+                    {
                         let inline = &mut b.ensure(range).content;
-                        inline.links.push((start..inline.text.len(), target));
+                        if start < inline.text.len() {
+                            inline.links.push((start..inline.text.len(), target));
+                        }
                     }
                     b.counts[3] -= 1;
                 }
@@ -361,11 +382,10 @@ pub(super) fn parse(text: &str) -> Document {
                 _ => {}
             },
             Event::Text(value) | Event::Html(value) | Event::InlineHtml(value) => {
-                b.push(&value, range, 0)
+                b.push(&value, range, 0, text)
             }
-            Event::Code(value) => b.push(&value, range, CODE),
-            Event::SoftBreak => b.push(" ", range, 0),
-            Event::HardBreak => b.push("\n", range, 0),
+            Event::Code(value) => b.push(&value, range, CODE, text),
+            Event::SoftBreak | Event::HardBreak => b.push("\n", range, 0, text),
             Event::TaskListMarker(checked) => {
                 let marker = range.start;
                 let valid = matches!(text.get(marker..marker + 3), Some("[ ]" | "[x]" | "[X]"));
@@ -381,7 +401,6 @@ pub(super) fn parse(text: &str) -> Document {
         }
     }
     b.flush();
-    b.document.index_text();
     b.document
 }
 
@@ -405,8 +424,11 @@ mod tests {
                 .style,
             STRONG | EMPHASIS
         );
-        assert_eq!(p.links[0].1, "https://example.org");
-        assert_eq!(&p.text[p.links[0].0.clone()], "링크");
+        assert!(
+            p.spans
+                .iter()
+                .any(|span| span.style & LINK != 0 && &p.text[span.range.clone()] == "링크")
+        );
         assert!(
             doc.blocks
                 .iter()
@@ -437,7 +459,6 @@ mod tests {
         assert_eq!(image.content.images[0].source, "image.png");
         assert_eq!(image.content.images[0].alt, "그림");
         assert!(image.content.text.is_empty());
-        assert!(!doc.text().contains("그림"));
         let images = parse(
             "앞 **![한글 *설명* `코드` &amp; ![안쪽](inner.png)](<images/공백 이름.png>)뒤**\n\n![](empty.png)",
         );
@@ -450,7 +471,11 @@ mod tests {
         assert_eq!(paragraph.spans[0].style, STRONG);
         assert!(images.blocks[1].content.text.is_empty());
         assert!(images.blocks[1].content.images[0].alt.is_empty());
-        assert!(doc.text().contains("<script>alert(1)</script>"));
+        assert!(
+            doc.blocks
+                .iter()
+                .any(|block| block.content.text.contains("<script>alert(1)</script>"))
+        );
         let diagrams = parse(
             "```Mermaid\nflowchart TB\n A[한글] --> B[끝]\n```\n\n```rust\nmermaid\n```\n\n    mermaid\n",
         );
@@ -464,7 +489,6 @@ mod tests {
                 .iter()
                 .all(|b| matches!(b.kind, Kind::Code))
         );
-        assert!(diagrams.text().contains("A[한글] --> B[끝]"));
         for block in &doc.blocks {
             for inline in std::iter::once(&block.content).chain(&block.cells) {
                 assert!(

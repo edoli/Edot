@@ -24,13 +24,29 @@ pub enum ThemeMode {
     System,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditorMode {
+    #[default]
+    Source,
+    Visual,
+}
+
+impl EditorMode {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Source => Self::Visual,
+            Self::Visual => Self::Source,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub theme: ThemeMode,
     pub font: String,
     pub font_size: u32,
     pub wrap: bool,
-    pub read_only: bool,
+    pub editor_mode: EditorMode,
     pub confirm_delete: bool,
     pub shortcuts: crate::shortcuts::Bindings,
 }
@@ -42,7 +58,7 @@ impl Default for Settings {
             font: DEFAULT_FONT.into(),
             font_size: DEFAULT_FONT_SIZE,
             wrap: true,
-            read_only: false,
+            editor_mode: EditorMode::Source,
             confirm_delete: true,
             shortcuts: Default::default(),
         }
@@ -67,8 +83,6 @@ impl Settings {
             ("theme", "system") => self.theme = ThemeMode::System,
             ("confirm_delete", "true") => self.confirm_delete = true,
             ("confirm_delete", "false") => self.confirm_delete = false,
-            ("read_only", "true") => self.read_only = true,
-            ("read_only", "false") => self.read_only = false,
             ("font", font) if valid_font(font) => self.font = font.into(),
             ("font_size", size) => {
                 if let Ok(size @ MIN_FONT_SIZE..=MAX_FONT_SIZE) = size.parse::<u32>() {

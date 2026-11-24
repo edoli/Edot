@@ -1,5 +1,5 @@
 //! A small UTF-8 INI reader/writer shared by preferences and Space metadata.
-use super::{Settings, ThemeMode};
+use super::{EditorMode, Settings, ThemeMode};
 use std::{collections::HashSet, io, ops::Range};
 
 struct Field {
@@ -75,6 +75,8 @@ impl Document {
 
     pub(super) fn settings(&self) -> io::Result<Settings> {
         let mut settings = Settings::default();
+        let mut mode = None;
+        let mut legacy_mode = EditorMode::Source;
         for field in &self.fields {
             match field.key.as_str() {
                 "version" if &self.text[field.range.clone()] != "1" => {
@@ -88,9 +90,20 @@ impl Document {
                     "false" => settings.wrap = false,
                     _ => {}
                 },
+                "editor_mode" => match field.value.as_str() {
+                    "source" => mode = Some(EditorMode::Source),
+                    "visual" => mode = Some(EditorMode::Visual),
+                    _ => {}
+                },
+                "read_only" => match field.value.as_str() {
+                    "true" => legacy_mode = EditorMode::Visual,
+                    "false" => legacy_mode = EditorMode::Source,
+                    _ => {}
+                },
                 key => settings.apply_stored(key, &field.value),
             }
         }
+        settings.editor_mode = mode.unwrap_or(legacy_mode);
         settings
             .shortcuts
             .validate()
@@ -111,7 +124,14 @@ impl Document {
             ("font", format!("\"{font}\"")),
             ("font_size", settings.font_size.to_string()),
             ("wrap", settings.wrap.to_string()),
-            ("read_only", settings.read_only.to_string()),
+            (
+                "editor_mode",
+                match settings.editor_mode {
+                    EditorMode::Source => "source",
+                    EditorMode::Visual => "visual",
+                }
+                .into(),
+            ),
             ("confirm_delete", settings.confirm_delete.to_string()),
         ];
         let keys: Vec<_> = crate::shortcuts::COMMANDS

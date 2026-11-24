@@ -68,9 +68,20 @@ impl EntityInputHandler for InputState {
         if self.is_read_only() {
             return;
         }
+        self.ensure_visual(cx);
         if !self.extra.is_empty() {
-            let ranges = self.input_ranges(r.as_ref().map(|r| self.range_from_utf16(r)));
-            let texts = vec![text.to_owned(); ranges.len()];
+            let Some(ranges) = self
+                .input_ranges(r.as_ref().map(|r| self.range_from_utf16(r)))
+                .into_iter()
+                .map(|range| self.visual_table_input_range(range))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let texts: Vec<_> = ranges
+                .iter()
+                .map(|range| self.visual_cell_input(range, text).into_owned())
+                .collect();
             if self.composition.is_some() {
                 let changed = self
                     .apply_multiple(ranges, &texts)
@@ -92,10 +103,13 @@ impl EntityInputHandler for InputState {
             .map(|r| self.range_from_utf16(r))
             .or_else(|| self.marked.clone())
             .unwrap_or_else(|| self.selection.clone());
+        let Some(r) = self.visual_table_input_range(r) else {
+            return;
+        };
         let text = if self.multiline {
-            text.to_string()
+            self.visual_cell_input(&r, text)
         } else {
-            text.replace(['\r', '\n'], " ")
+            text.replace(['\r', '\n'], " ").into()
         };
         if self.composition.is_some() {
             let changed = self.content[r.clone()] != *text;
@@ -127,6 +141,24 @@ impl EntityInputHandler for InputState {
             self.replace_text_in_range(r, text, window, cx);
             return;
         }
+        self.ensure_visual(cx);
+        let single = r
+            .as_ref()
+            .map(|r| self.range_from_utf16(r))
+            .or_else(|| self.marked.clone())
+            .unwrap_or_else(|| self.selection.clone());
+        let targets = if self.extra.is_empty() {
+            vec![single]
+        } else {
+            self.input_ranges(r.as_ref().map(|r| self.range_from_utf16(r)))
+        };
+        let Some(mut targets) = targets
+            .into_iter()
+            .map(|range| self.visual_table_input_range(range))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return;
+        };
         if self.composition.is_none() {
             self.composition = Some(Composition {
                 before: self.content.clone(),
@@ -140,8 +172,7 @@ impl EntityInputHandler for InputState {
             });
         }
         if !self.extra.is_empty() {
-            let ranges = self.input_ranges(r.as_ref().map(|r| self.range_from_utf16(r)));
-            self.apply_multiple(ranges, &vec![text.to_owned(); self.extra.len() + 1]);
+            self.apply_multiple(targets, &vec![text.to_owned(); self.extra.len() + 1]);
             self.marked = Some(self.selection.end - text.len()..self.selection.end);
             self.extra_marked = self
                 .extra
@@ -160,11 +191,7 @@ impl EntityInputHandler for InputState {
             self.changed(cx);
             return;
         }
-        let r = r
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .or_else(|| self.marked.clone())
-            .unwrap_or_else(|| self.selection.clone());
+        let r = targets.pop().unwrap();
         let start = r.start;
         self.apply(r, text);
         self.marked = Some(start..start + text.len());
@@ -195,7 +222,7 @@ impl EntityInputHandler for InputState {
                 } else {
                     px(1.)
                 },
-                self.line_height,
+                self.visual_caret_height(r.start),
             ),
         ))
     }

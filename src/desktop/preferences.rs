@@ -119,17 +119,17 @@ impl Edot {
         true
     }
 
-    pub(super) fn set_read_only(
+    pub(super) fn set_editor_mode(
         &mut self,
-        read_only: bool,
+        mode: EditorMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if cx.global::<AppState>().settings.read_only == read_only {
+        if cx.global::<AppState>().settings.editor_mode == mode {
             return true;
         }
         let mut next = cx.global::<AppState>().settings.clone();
-        next.read_only = read_only;
+        next.editor_mode = mode;
         self.change_settings(next, window, cx)
     }
 
@@ -150,7 +150,7 @@ impl Edot {
                     let offset = state.scroll_offset();
                     state.set_soft_wrap(cx.global::<AppState>().settings.wrap, window, cx);
                     state.set_scroll_offset(offset, cx);
-                    state.set_read_only(cx.global::<AppState>().settings.read_only, cx);
+                    state.set_editor_mode(cx.global::<AppState>().settings.editor_mode, cx);
                 });
             }
         }

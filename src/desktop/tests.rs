@@ -1,5 +1,5 @@
 //! Headless GPUI event tests. The interactive Windows probe is explicitly ignored.
-use super::{AppState, Edot, LoadedSpace, NoteId, Settings, StoreLock};
+use super::{AppState, EditorMode, Edot, LoadedSpace, NoteId, Settings, StoreLock};
 use crate::{model::Notebook, session::Session, settings::ThemeMode};
 use gpui::{
     AnyWindowHandle, AppContext, Bounds, Context, ElementInputHandler, Entity, InputHandler,

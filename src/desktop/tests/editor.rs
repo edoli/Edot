@@ -38,16 +38,25 @@ fn macos_app_commands_preserve_system_tab_switching_and_replace_shortcuts(cx: &m
     for key in ["cmd-e", "cmd-shift-p"] {
         press(key, cx);
         f.update(cx, |_, _, cx| {
-            assert!(!cx.global::<AppState>().settings.read_only);
+            assert_eq!(
+                cx.global::<AppState>().settings.editor_mode,
+                EditorMode::Source
+            );
         });
     }
     press("cmd-shift-v", cx);
     f.update(cx, |_, _, cx| {
-        assert!(cx.global::<AppState>().settings.read_only);
+        assert_eq!(
+            cx.global::<AppState>().settings.editor_mode,
+            EditorMode::Visual
+        );
     });
     press("cmd-shift-v", cx);
     f.update(cx, |_, _, cx| {
-        assert!(!cx.global::<AppState>().settings.read_only);
+        assert_eq!(
+            cx.global::<AppState>().settings.editor_mode,
+            EditorMode::Source
+        );
     });
 }
 
@@ -207,30 +216,41 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
     });
     f.press(cx, "ctrl-shift-p");
     f.update(cx, |_, _, cx| {
-        assert!(!cx.global::<AppState>().settings.read_only);
+        assert_eq!(
+            cx.global::<AppState>().settings.editor_mode,
+            EditorMode::Source
+        );
     });
     f.press(cx, "ctrl-shift-v");
     f.update(cx, |this, _, cx| {
-        assert!(cx.global::<AppState>().settings.read_only);
-        assert!(
+        assert_eq!(
+            cx.global::<AppState>().settings.editor_mode,
+            EditorMode::Visual
+        );
+        assert_eq!(
             Settings::load(&cx.global::<AppState>().config_dir)
                 .unwrap()
-                .read_only
+                .editor_mode,
+            EditorMode::Visual
         );
         assert!(
             this.open
                 .iter()
                 .filter_map(|tab| tab.editor.as_ref())
-                .all(|editor| editor.read(cx).is_read_only())
+                .all(|editor| editor.read(cx).editor_mode() == EditorMode::Visual)
         );
     });
-    for key in ["ctrl-b", "ctrl-i", "ctrl-shift-`", "ctrl-~", "ctrl-e"] {
-        f.press(cx, key);
-    }
-    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), "plain"));
+    f.press(cx, "ctrl-b");
+    f.update(cx, |_, _, cx| {
+        assert_eq!(editor.read(cx).value(), "**plain**")
+    });
+    f.press(cx, "ctrl-z");
     f.press(cx, "ctrl-shift-v");
     f.update(cx, |_, _, cx| {
-        assert!(!cx.global::<AppState>().settings.read_only);
+        assert_eq!(
+            cx.global::<AppState>().settings.editor_mode,
+            EditorMode::Source
+        );
         assert!(!editor.read(cx).is_read_only());
     });
     // Window shortcuts also work while an overlay owns keyboard focus.
@@ -376,7 +396,7 @@ fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut T
             })
         })
     };
-    for (reading, column, wrap) in [
+    for (visual_mode, column, wrap) in [
         (false, false, true),
         (false, false, false),
         (false, true, false),
@@ -384,10 +404,16 @@ fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut T
     ] {
         f.update(cx, |this, w, cx| {
             editor.update(cx, |s, cx| {
-                s.set_read_only(false, cx);
                 s.set_value(source.clone(), w, cx);
                 s.set_soft_wrap(wrap, w, cx);
-                s.set_read_only(reading, cx);
+                s.set_editor_mode(
+                    if visual_mode {
+                        EditorMode::Visual
+                    } else {
+                        EditorMode::Source
+                    },
+                    cx,
+                );
             });
             this.focus_editor(w, cx);
         });
@@ -396,16 +422,11 @@ fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut T
         draw(&mut visual);
         assert!(hover(&mut visual), "normal sidebar hover must work");
         let body = visual.debug_bounds("body-editor").unwrap();
-        let start = if reading {
-            let block = visual.debug_bounds("reading-block-0").unwrap();
-            point(block.left() + px(50.), block.top() + px(14.))
-        } else {
-            visual.update(|w, cx| {
-                let mut handler = ElementInputHandler::new(Bounds::default(), editor.clone());
-                let bounds = handler.bounds_for_range(4..5, w, cx).unwrap();
-                point(bounds.left() + px(0.1), bounds.center().y)
-            })
-        };
+        let start = visual.update(|w, cx| {
+            let mut handler = ElementInputHandler::new(Bounds::default(), editor.clone());
+            let bounds = handler.bounds_for_range(4..5, w, cx).unwrap();
+            point(bounds.left() + px(0.1), bounds.center().y)
+        });
         let modifiers = gpui::Modifiers {
             alt: column,
             shift: column,
@@ -417,16 +438,14 @@ fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut T
         draw(&mut visual);
         assert!(
             !hover(&mut visual),
-            "sidebar hover during reading={reading}, column={column}, wrap={wrap}"
+            "sidebar hover during visual={visual_mode}, column={column}, wrap={wrap}"
         );
         visual.update(|w, cx| w.press("ctrl-c", cx));
         cx.update(|cx| assert!(!cx.read_from_clipboard().unwrap().text().unwrap().is_empty()));
 
-        if !reading {
-            visual.simulate_mouse_move(point(-px(30.), -px(30.)), MouseButton::Left, modifiers);
-            assert_eq!(editor.read_with(cx, |s, _| s.cursor()), 0);
-        }
-        if !reading && !wrap {
+        visual.simulate_mouse_move(point(-px(30.), -px(30.)), MouseButton::Left, modifiers);
+        assert_eq!(editor.read_with(cx, |s, _| s.cursor()), 0);
+        if !wrap {
             // Ordinary and rectangular selection both scroll unwrapped lines.
             let right = point(body.right() + px(50.), start.y);
             visual.simulate_mouse_move(right, MouseButton::Left, modifiers);
@@ -502,84 +521,75 @@ fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut T
 }
 
 #[gpui::test]
-fn markdown_reading_renders_links_and_blocks_edits_without_losing_source_history(
-    cx: &mut TestAppContext,
-) {
+fn visual_editor_clicks_original_offsets_and_shares_ime_history(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
-    let source = "# 제목\r\n\r\n[문서 링크](https://example.org/docs)\r\n\r\n**굵게** *기울임*\r\n\r\n- 목록\r\n\r\n> 인용\r\n\r\n~~~\r\ncode\r\n~~~\r\n\r\n| A | B |\r\n|---|---|\r\n| a | b |\r\n";
+    let source = "# 제목\r\n\r\n**한글🙂** [문서](https://example.org/docs)\r\n\r\nhttps://example.net/bare\r\n";
     let editor = f.update(cx, |this, window, cx| {
         let editor = this.active_editor().unwrap();
-        editor.update(cx, |s, cx| {
-            s.set_value(source, window, cx);
-            s.set_selected_range(source.len()..source.len(), cx);
-            s.replace("추가", window, cx);
-            s.set_selected_range(2..8, cx);
-        });
+        editor.update(cx, |state, cx| state.set_value(source, window, cx));
+        assert!(this.set_editor_mode(EditorMode::Visual, window, cx));
         this.focus_editor(window, cx);
         editor
     });
-    let original = editor.read_with(cx, |s, _| s.value());
-    let revision = editor.read_with(cx, |s, _| s.revision);
     let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
     visual.update(|window, cx| window.render_frame(cx));
-    let trigger = visual.debug_bounds("reading-mode-control").unwrap();
-    visual.simulate_mouse_down(
-        trigger.center(),
-        gpui::MouseButton::Left,
-        Default::default(),
+    let glyph = |visual: &mut gpui::VisualTestContext, label| {
+        let byte = source.find(label).unwrap();
+        let start = source[..byte].encode_utf16().count();
+        visual.update(|window, cx| {
+            let mut handler = ElementInputHandler::new(Bounds::default(), editor.clone());
+            let bounds = handler
+                .bounds_for_range(start..start + 1, window, cx)
+                .unwrap();
+            point(bounds.left() + px(1.), bounds.top() + px(4.))
+        })
+    };
+    let link = glyph(&mut visual, "문서");
+    visual.simulate_click(
+        link,
+        gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        },
     );
-    visual.simulate_mouse_up(
-        trigger.center(),
-        gpui::MouseButton::Left,
-        Default::default(),
-    );
-    visual.update(|window, cx| window.render_frame(cx));
-    assert!(visual.debug_bounds("markdown-reading").is_some());
-    let block = visual.debug_bounds("reading-block-1").unwrap();
-    let link = point(block.left() + px(32.), block.center().y);
-    visual.simulate_mouse_down(link, gpui::MouseButton::Left, Default::default());
-    visual.simulate_mouse_up(link, gpui::MouseButton::Left, Default::default());
     assert_eq!(cx.opened_url().as_deref(), Some("https://example.org/docs"));
-    for key in [
-        "backspace",
-        "delete",
-        "enter",
-        "ctrl-enter",
-        "tab",
-        "ctrl-v",
-        "ctrl-x",
-        "ctrl-z",
-        "ctrl-y",
-        "f5",
-        "f6",
-    ] {
-        f.press(cx, key);
-    }
-    cx.update_window(f.window, |_, window, cx| {
+    let bare = glyph(&mut visual, "https://example.net/bare");
+    visual.simulate_click(
+        bare,
+        gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(cx.opened_url().as_deref(), Some("https://example.net/bare"));
+    assert_eq!(editor.read_with(cx, |s, _| s.cursor()), 0);
+    let at = source.find("한글").unwrap();
+    let position = glyph(&mut visual, "한글");
+    visual.simulate_click(position, Default::default());
+    assert_eq!(editor.read_with(cx, |s, _| s.cursor()), at);
+    visual.update(|window, cx| {
+        window.render_frame(cx);
         let mut handler = ElementInputHandler::new(Bounds::default(), editor.clone());
-        handler.replace_text_in_range(None, "키보드 입력", window, cx);
-        handler.replace_and_mark_text_in_range(None, "한글 조합", Some(1..1), window, cx);
-    })
-    .unwrap();
-    f.update(cx, |this, window, cx| {
-        assert!(editor.read(cx).is_read_only());
-        assert_eq!(editor.read(cx).value(), original);
-        assert_eq!(editor.read(cx).revision, revision);
-        assert_eq!(editor.read(cx).selected_range(), 2..8);
-        assert!(!editor.read(cx).is_composing());
-        this.replace_local(true, window, cx);
-        editor.update(cx, |s, cx| s.set_read_only(false, cx));
-        this.focus_editor(window, cx);
+        handler.replace_and_mark_text_in_range(None, "ㅎ", Some(1..1), window, cx);
+        handler.replace_text_in_range(None, "새", window, cx);
     });
+    let expected = source.replacen("한글", "새한글", 1);
+    assert_eq!(editor.read_with(cx, |state, _| state.value()), expected);
+    f.press(cx, "ctrl-shift-v");
     f.press(cx, "ctrl-z");
-    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), source));
+    assert_eq!(
+        editor.read_with(cx, |state, _| (state.value().to_string(), state.cursor())),
+        (source.into(), at)
+    );
     f.press(cx, "ctrl-y");
-    f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), original));
+    f.press(cx, "ctrl-shift-v");
     f.press(cx, "ctrl-s");
+    let path = f.dir.join(format!("notes/{}.txt", f.ids[0]));
+    assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+
     let external = "# 외부 변경\n\n**새 본문**";
-    fs::write(f.dir.join(format!("notes/{}.txt", f.ids[0])), external).unwrap();
+    fs::write(&path, external).unwrap();
     f.update(cx, |this, window, cx| {
-        editor.update(cx, |s, cx| s.set_read_only(true, cx));
         this.request_file_sync(
             crate::watch::Changes {
                 notes: std::collections::HashSet::from([f.ids[0]]),
@@ -592,140 +602,81 @@ fn markdown_reading_renders_links_and_blocks_edits_without_losing_source_history
     cx.run_until_parked();
     f.update(cx, |this, _, cx| {
         assert_eq!(editor.read(cx).value(), external);
-        assert!(editor.read(cx).is_read_only());
+        assert_eq!(editor.read(cx).editor_mode(), EditorMode::Visual);
         assert!(!this.open[0].dirty);
-    });
-    f.press(cx, "ctrl-a");
-    f.press(cx, "ctrl-c");
-    cx.update(|cx| {
-        assert_eq!(
-            cx.read_from_clipboard().unwrap().text().unwrap(),
-            "외부 변경\n\n새 본문"
-        )
     });
 }
 
 #[gpui::test]
-fn status_toggles_markdown_reading_for_existing_and_newly_opened_tabs(cx: &mut TestAppContext) {
+fn status_switch_preserves_source_selection_and_applies_to_other_tabs(cx: &mut TestAppContext) {
     use gpui::Focusable;
     let f = Fixture::new(cx);
-    let existing_path = f.dir.join(format!("notes/{}.txt", f.ids[2]));
-    let existing_source = "# 기존 메모\n\n**문서**";
-    fs::write(&existing_path, existing_source).unwrap();
+    let path = f.dir.join(format!("notes/{}.txt", f.ids[2]));
+    let source = "# 기존 메모\n\n**문서**";
+    fs::write(&path, source).unwrap();
     let (editor, original, revision) = f.update(cx, |this, window, cx| {
         this.focus_editor(window, cx);
         let editor = this.active_editor().unwrap();
         editor.update(cx, |s, cx| s.set_selected_range(0..4, cx));
-        let state = editor.read(cx);
-        (editor.clone(), state.value(), state.revision)
+        (
+            editor.clone(),
+            editor.read(cx).value(),
+            editor.read(cx).revision,
+        )
     });
     let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
     visual.update(|window, cx| window.render_frame(cx));
-    assert!(visual.debug_bounds("text-mode-control").is_none());
-    assert!(visual.debug_bounds("text-input").is_some());
-    let trigger = visual.debug_bounds("reading-mode-control").unwrap();
-    visual.simulate_mouse_down(
-        trigger.center(),
-        gpui::MouseButton::Left,
-        Default::default(),
-    );
-    visual.simulate_mouse_up(
-        trigger.center(),
-        gpui::MouseButton::Left,
-        Default::default(),
-    );
-    visual.update(|window, cx| window.render_frame(cx));
-    assert!(visual.debug_bounds("text-input").is_none());
-    assert!(visual.debug_bounds("markdown-reading").is_some());
-    for key in [
-        "backspace",
-        "delete",
-        "enter",
-        "ctrl-enter",
-        "ctrl-v",
-        "ctrl-x",
-        "ctrl-z",
-        "ctrl-y",
-        "f5",
-        "f6",
-    ] {
-        f.press(cx, key);
-    }
-    cx.update_window(f.window, |_, window, cx| {
-        let mut handler = ElementInputHandler::new(Bounds::default(), editor.clone());
-        handler.replace_text_in_range(None, "입력", window, cx);
-        handler.replace_and_mark_text_in_range(None, "한글", Some(1..1), window, cx);
-    })
-    .unwrap();
+    let trigger = visual.debug_bounds("editor-mode-control").unwrap();
+    visual.simulate_click(trigger.center(), Default::default());
     f.update(cx, |this, window, cx| {
-        assert!(editor.read(cx).is_read_only());
-        assert_eq!(editor.read(cx).value(), original);
-        assert_eq!(editor.read(cx).revision, revision);
+        assert_eq!(editor.read(cx).editor_mode(), EditorMode::Visual);
         assert_eq!(editor.read(cx).selected_range(), 0..4);
-        assert!(!editor.read(cx).is_composing());
-        assert!(!this.open.iter().find(|t| t.id == f.ids[0]).unwrap().dirty);
-        assert!(this.open_note(f.ids[1], true, window, cx));
-        assert!(this.active_editor().unwrap().read(cx).is_read_only());
-        assert!(cx.global::<AppState>().settings.read_only);
-        assert!(
+        assert_eq!(
             Settings::load(&cx.global::<AppState>().config_dir)
                 .unwrap()
-                .read_only
+                .editor_mode,
+            EditorMode::Visual
         );
         assert!(this.open_note(f.ids[2], true, window, cx));
-        let existing = this.active_editor().unwrap();
-        assert!(existing.read(cx).is_read_only());
-        assert_eq!(existing.read(cx).value(), existing_source);
+        let opened = this.active_editor().unwrap();
+        assert_eq!(opened.read(cx).editor_mode(), EditorMode::Visual);
+        assert_eq!(opened.read(cx).value(), source);
     });
     f.press(cx, "ctrl-a");
     f.press(cx, "ctrl-c");
-    cx.update(|cx| {
-        assert_eq!(
-            cx.read_from_clipboard().unwrap().text().unwrap(),
-            "기존 메모\n\n문서"
-        )
-    });
-    assert_eq!(fs::read_to_string(existing_path).unwrap(), existing_source);
+    cx.update(|cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), source));
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
     f.update(cx, |this, window, cx| {
         assert!(this.open_note(f.ids[0], true, window, cx));
-        assert!(editor.read(cx).is_read_only());
     });
     visual.update(|window, cx| window.render_frame(cx));
-    assert!(visual.debug_bounds("markdown-reading").is_some());
-    let trigger = visual.debug_bounds("reading-mode-control").unwrap();
-    visual.simulate_mouse_down(
-        trigger.center(),
-        gpui::MouseButton::Left,
-        Default::default(),
-    );
-    visual.simulate_mouse_up(
-        trigger.center(),
-        gpui::MouseButton::Left,
-        Default::default(),
-    );
+    let trigger = visual.debug_bounds("editor-mode-control").unwrap();
+    visual.simulate_click(trigger.center(), Default::default());
     f.update(cx, |this, window, cx| {
-        assert!(!editor.read(cx).is_read_only());
         assert_eq!(editor.read(cx).value(), original);
         assert_eq!(editor.read(cx).revision, revision);
         assert_eq!(editor.read(cx).selected_range(), 0..4);
         assert!(editor.read(cx).focus_handle(cx).is_focused(window));
-        assert!(!cx.global::<AppState>().settings.read_only);
-        assert!(
-            !Settings::load(&cx.global::<AppState>().config_dir)
+        assert!(!this.open[0].dirty);
+        assert_eq!(
+            Settings::load(&cx.global::<AppState>().config_dir)
                 .unwrap()
-                .read_only
+                .editor_mode,
+            EditorMode::Source
         );
-        for tab in &this.open {
-            assert!(!tab.editor.as_ref().unwrap().read(cx).is_read_only());
-        }
-        // Failed persistence must leave every editor and the saved setting intact.
         fs::remove_file(cx.global::<AppState>().config_dir.join("settings.ini")).unwrap();
         fs::create_dir(cx.global::<AppState>().config_dir.join("settings.ini")).unwrap();
-        assert!(!this.set_read_only(true, window, cx));
-        assert!(!cx.global::<AppState>().settings.read_only);
-        for tab in &this.open {
-            assert!(!tab.editor.as_ref().unwrap().read(cx).is_read_only());
-        }
+        assert!(!this.set_editor_mode(EditorMode::Visual, window, cx));
+        assert_eq!(
+            cx.global::<AppState>().settings.editor_mode,
+            EditorMode::Source
+        );
+        assert!(
+            this.open
+                .iter()
+                .filter_map(|tab| tab.editor.as_ref())
+                .all(|editor| editor.read(cx).editor_mode() == EditorMode::Source)
+        );
     });
 }
 

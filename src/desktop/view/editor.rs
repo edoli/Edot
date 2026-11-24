@@ -133,9 +133,6 @@ impl Edot {
                 },
                 metrics.total
             );
-            if state.is_read_only() {
-                position = format!("읽기 전용   {}자", metrics.total);
-            }
         }
         div()
             .h_flex()
@@ -169,39 +166,37 @@ impl Edot {
                         cx.notify();
                     })),
             )
-            .child(self.reading_mode_view(cx))
+            .child(self.editor_mode_view(cx))
             .into_any_element()
     }
 
-    fn reading_mode_view(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn editor_mode_view(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.active_editor().is_none() {
             return div().into_any_element();
         }
-        let read_only = cx.global::<AppState>().settings.read_only;
+        let mode = cx.global::<AppState>().settings.editor_mode;
         div()
-            .id("reading-mode-control")
-            .debug_selector(|| "reading-mode-control".into())
+            .id("editor-mode-control")
+            .debug_selector(|| "editor-mode-control".into())
             .flex_shrink_0()
             .child(
-                Button::new("toggle-reading-mode")
+                Button::new("toggle-editor-mode")
                     .small()
-                    .icon(if read_only {
-                        IconName::Pencil
-                    } else {
-                        IconName::BookOpen
+                    .label(match mode {
+                        EditorMode::Source => "원문 편집",
+                        EditorMode::Visual => "서식 편집",
                     })
                     .tooltip(tip(
-                        Command::ReadOnly,
-                        if read_only {
-                            "편집 모드로 전환"
-                        } else {
-                            "읽기 모드로 전환"
+                        Command::ToggleEditorMode,
+                        match mode {
+                            EditorMode::Source => "서식 편집으로 전환",
+                            EditorMode::Visual => "원문 편집으로 전환",
                         },
                         cx,
                     ))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if this.set_read_only(
-                            !cx.global::<AppState>().settings.read_only,
+                        if this.set_editor_mode(
+                            cx.global::<AppState>().settings.editor_mode.toggled(),
                             window,
                             cx,
                         ) {

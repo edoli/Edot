@@ -1,5 +1,6 @@
 //! A deliberately small flowchart grammar and deterministic layout, without GPUI.
 use std::collections::{HashMap, VecDeque};
+use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Shape {
@@ -9,12 +10,14 @@ pub(super) enum Shape {
 }
 pub(super) struct Node {
     pub label: String,
+    pub label_source: Range<usize>,
     pub shape: Shape,
 }
 pub(super) struct Edge {
     pub from: usize,
     pub to: usize,
     pub label: String,
+    pub label_source: Option<Range<usize>>,
     pub arrow: bool,
 }
 pub(super) struct Graph {
@@ -121,10 +124,16 @@ fn label(text: &str) -> Result<String, &'static str> {
 }
 
 struct Parser<'a> {
+    source: &'a str,
     rest: &'a str,
     graph: Graph,
     ids: HashMap<String, usize>,
 }
+struct ParsedLabel {
+    text: String,
+    source: Range<usize>,
+}
+
 fn closing_label(source: &str, close: char) -> Option<usize> {
     let mut quoted = false;
     let mut escaped = false;
@@ -144,6 +153,24 @@ fn closing_label(source: &str, close: char) -> Option<usize> {
     None
 }
 impl Parser<'_> {
+    fn source_range(&self, text: &str) -> Range<usize> {
+        let start = text.as_ptr() as usize - self.source.as_ptr() as usize;
+        start..start + text.len()
+    }
+
+    fn parse_label(&self, raw: &str) -> Result<ParsedLabel, &'static str> {
+        let value = label(raw)?;
+        let raw = raw.trim();
+        let content = raw
+            .strip_prefix('"')
+            .and_then(|raw| raw.strip_suffix('"'))
+            .unwrap_or(raw);
+        Ok(ParsedLabel {
+            text: value,
+            source: self.source_range(content),
+        })
+    }
+
     fn node(&mut self) -> Result<usize, &'static str> {
         self.rest = self.rest.trim_start();
         let end = self
@@ -180,48 +207,64 @@ impl Parser<'_> {
                     _ => ('}', Shape::Diamond),
                 };
                 let end = closing_label(&self.rest[1..], close).ok_or(UNSUPPORTED)? + 1;
-                let text = label(&self.rest[1..end])?;
+                let label = self.parse_label(&self.rest[1..end])?;
                 self.rest = self.rest[end + 1..].trim_start();
-                Some((text, shape))
+                Some((label, shape))
             }
             _ => None,
         };
         if let Some(&index) = self.ids.get(id) {
             if let Some((label, shape)) = declaration {
-                self.graph.nodes[index] = Node { label, shape };
+                self.graph.nodes[index] = Node {
+                    label: label.text,
+                    label_source: label.source,
+                    shape,
+                };
             }
             return Ok(index);
         }
         if self.graph.nodes.len() == 128 {
             return Err(LIMIT);
         }
-        let (label, shape) = declaration.unwrap_or_else(|| (id.to_owned(), Shape::Rectangle));
+        let (label, shape) = declaration.unwrap_or_else(|| {
+            (
+                ParsedLabel {
+                    text: id.to_owned(),
+                    source: self.source_range(id),
+                },
+                Shape::Rectangle,
+            )
+        });
         let index = self.graph.nodes.len();
-        self.graph.nodes.push(Node { label, shape });
+        self.graph.nodes.push(Node {
+            label: label.text,
+            label_source: label.source,
+            shape,
+        });
         self.ids.insert(id.to_owned(), index);
         Ok(index)
     }
-    fn edge(&mut self) -> Result<(String, bool), &'static str> {
+    fn edge(&mut self) -> Result<(Option<ParsedLabel>, bool), &'static str> {
         let (mut text, arrow) = if let Some(rest) = self.rest.strip_prefix("-->") {
             self.rest = rest.trim_start();
-            (String::new(), true)
+            (None, true)
         } else if let Some(rest) = self.rest.strip_prefix("---") {
             self.rest = rest.trim_start();
-            (String::new(), false)
+            (None, false)
         } else if let Some(rest) = self.rest.strip_prefix("-- ") {
             let end = rest.find("-->").ok_or(UNSUPPORTED)?;
-            let text = label(&rest[..end])?;
+            let text = self.parse_label(&rest[..end])?;
             self.rest = rest[end + 3..].trim_start();
-            (text, true)
+            (Some(text), true)
         } else {
             return Err(UNSUPPORTED);
         };
         if let Some(rest) = self.rest.strip_prefix('|') {
-            if !text.is_empty() {
+            if text.as_ref().is_some_and(|label| !label.text.is_empty()) {
                 return Err(UNSUPPORTED);
             }
             let end = closing_label(rest, '|').ok_or(UNSUPPORTED)?;
-            text = label(&rest[..end])?;
+            text = Some(self.parse_label(&rest[..end])?);
             self.rest = rest[end + 1..].trim_start();
         }
         Ok((text, arrow))
@@ -248,6 +291,7 @@ pub(super) fn parse(source: &str) -> Result<Graph, &'static str> {
         return Err(UNSUPPORTED);
     }
     let mut parser = Parser {
+        source,
         rest: "",
         ids: HashMap::new(),
         graph: Graph {
@@ -267,10 +311,15 @@ pub(super) fn parse(source: &str) -> Result<Graph, &'static str> {
             if parser.graph.edges.len() == 256 {
                 return Err(LIMIT);
             }
+            let (label, label_source) = label.map_or_else(
+                || (String::new(), None),
+                |label| (label.text, Some(label.source)),
+            );
             parser.graph.edges.push(Edge {
                 from,
                 to,
                 label,
+                label_source,
                 arrow,
             });
             from = to;

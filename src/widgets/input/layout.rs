@@ -11,38 +11,46 @@ pub(super) fn display_index(byte: usize, tabs: &[(usize, usize, usize)]) -> usiz
 
 impl Paragraph {
     fn display_index(&self, byte: usize) -> usize {
-        display_index(byte, &self.tabs)
+        self.display.display_index(byte)
     }
-    pub(super) fn position(&self, byte: usize, height: Pixels) -> Point<Pixels> {
+    pub(super) fn height(&self) -> Pixels {
+        if self.compact {
+            return px(0.);
+        }
+        self.rich.map_or_else(
+            || self.line.size(self.line_height).height,
+            |rich| rich.height,
+        )
+    }
+    pub(super) fn position(&self, byte: usize) -> Point<Pixels> {
+        if let Some(rich) = self.rich {
+            let fraction = byte as f32 / (self.end - self.start).max(1) as f32;
+            return point(
+                px(0.),
+                (rich.height - self.line_height).max(px(0.)) * fraction,
+            );
+        }
         self.line
-            .position_for_index(self.display_index(byte), height)
+            .position_for_index(self.display_index(byte), self.line_height)
             .unwrap_or_default()
     }
-    pub(super) fn position_after_wrap(&self, byte: usize, height: Pixels) -> Point<Pixels> {
-        let pos = self.position(byte, height);
-        let row = (pos.y / height).round() as usize;
+    pub(super) fn position_after_wrap(&self, byte: usize) -> Point<Pixels> {
+        let pos = self.position(byte);
+        let row = (pos.y / self.line_height).round() as usize;
         if self.line.wrap_boundaries.get(row).is_some_and(|boundary| {
             self.line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
                 == self.display_index(byte)
         }) {
             // The same byte is both the preceding row's end and this row's start.
-            point(px(0.), pos.y + height)
+            point(px(0.), pos.y + self.line_height)
         } else {
             pos
         }
     }
     pub(super) fn source_index(&self, display: usize) -> usize {
-        let mut removed = 0;
-        for &(source, start, spaces) in &self.tabs {
-            if display < start {
-                break;
-            }
-            if display < start + spaces {
-                return source;
-            }
-            removed += spaces - 1;
-        }
-        display.saturating_sub(removed).min(self.end - self.start)
+        self.display
+            .source_index(display)
+            .min(self.end - self.start)
     }
 }
 pub(super) fn expand_tabs(text: &str) -> (SharedString, Vec<(usize, usize, usize)>) {
@@ -67,6 +75,44 @@ pub(super) fn expand_tabs(text: &str) -> (SharedString, Vec<(usize, usize, usize
 }
 
 impl InputState {
+    pub(super) fn top_source_anchor(&self) -> Option<(usize, Pixels)> {
+        let first = self
+            .lines
+            .partition_point(|row| row.top + row.height() <= -self.scroll.y);
+        self.lines
+            .get(first)
+            .map(|row| (row.start, row.top + self.scroll.y))
+    }
+
+    pub(super) fn restore_top_source_anchor(&mut self, anchor: (usize, Pixels)) {
+        let (source, y) = anchor;
+        let index = self
+            .lines
+            .partition_point(|row| row.start <= source)
+            .saturating_sub(1);
+        if let Some(row) = self.lines.get(index) {
+            self.scroll.y = y - row.top;
+        }
+    }
+
+    pub(super) fn remember_projection_anchor(&mut self) {
+        if self
+            .layout_key
+            .as_ref()
+            .is_some_and(|key| key.0 == self.revision)
+        {
+            self.projection_anchor = self.top_source_anchor();
+        }
+    }
+
+    pub(super) fn row_at_y(&self, y: Pixels) -> Option<&Paragraph> {
+        self.lines.get(
+            self.lines
+                .partition_point(|row| row.top <= y)
+                .saturating_sub(1),
+        )
+    }
+
     pub(super) fn clamp_scroll(&mut self) {
         self.scroll.x = self
             .scroll
@@ -86,6 +132,11 @@ impl InputState {
         cx: &mut Context<Self>,
     ) {
         self.ensure_highlighting(cx);
+        self.ensure_visual(cx);
+        if self.selection.is_empty() && !self.is_composing() {
+            let at = self.table_caret(self.cursor(), self.cursor());
+            self.selection = at..at;
+        }
         self.bounds = bounds;
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -131,60 +182,160 @@ impl InputState {
             color,
             link_color,
         );
-        if self.layout_key.as_ref() != Some(&key) {
-            self.lines.clear();
+        let revealed = self.visual_reveal_points();
+        let metrics_match = self.layout_key.as_ref() == Some(&key);
+        let mut rich_style_changed = false;
+        if let Some(visual) = &mut self.visual {
+            let rich_style = (bounds.size.width, font_size, style.font());
+            if visual.rich_style.as_ref() != Some(&rich_style) {
+                visual.rich_style = Some(rich_style);
+                visual.rich_heights.fill(None);
+                visual.rich_width = px(0.);
+                rich_style_changed = true;
+            }
+        }
+        if let Some(start) = self.visual.as_ref().and_then(|visual| visual.raw_block)
+            && !self.selecting
+            && self.visual_document().is_some_and(|document| {
+                document.rich_at(start).is_some_and(|(_, source)| {
+                    self.cursor() < source.start || self.cursor() > source.end
+                }) || document.rich_at(start).is_none() && self.cursor() < start
+            })
+        {
+            self.remember_projection_anchor();
+            self.visual.as_mut().unwrap().raw_block = None;
+            self.layout_key = None;
+        }
+        let metrics_match = metrics_match && self.layout_key.is_some();
+        let visual_changed = self
+            .visual
+            .as_ref()
+            .is_some_and(|visual| visual.revealed != revealed);
+        if !metrics_match || visual_changed || rich_style_changed {
+            let scroll_anchor = self.projection_anchor.take().or_else(|| {
+                if (visual_changed || rich_style_changed)
+                    && self
+                        .layout_key
+                        .as_ref()
+                        .is_some_and(|key| key.0 == self.revision)
+                {
+                    self.top_source_anchor()
+                } else {
+                    None
+                }
+            });
+            let mut output_lines = Vec::with_capacity(self.lines.len());
+            let mut previous = std::mem::take(&mut self.lines).into_iter().peekable();
+            let visual = self.visual_document();
             let mut start = 0;
-            let mut top = self.content_padding.top;
+            let mut top = if visual.is_some() {
+                px(0.)
+            } else {
+                self.content_padding.top
+            };
             let mut max_width = px(0.);
             loop {
-                let end = display[start..]
-                    .find(['\r', '\n'])
-                    .map_or(display.len(), |i| start + i);
-                let (value, tabs) = expand_tabs(&display[start..end]);
-                let links = if self.multiline && !self.content.is_empty() {
-                    links::ranges(&display[start..end])
-                } else {
-                    Vec::new()
-                };
-                let run = TextRun {
-                    len: value.len(),
-                    font: style.font(),
-                    color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                let runs = highlighting::text_runs(
-                    start..end,
-                    &tabs,
-                    &self.highlighting.spans,
-                    &links,
-                    &run,
-                    palette,
-                );
-                if let Ok(lines) = window.text_system().shape_text(
-                    value,
-                    font_size,
-                    if runs.is_empty() {
-                        std::slice::from_ref(&run)
-                    } else {
-                        &runs
+                let rich = visual.and_then(|visual| visual.rich_at(start)).filter(|_| {
+                    self.visual
+                        .as_ref()
+                        .is_none_or(|visual| visual.raw_block != Some(start))
+                });
+                let end = rich.as_ref().map_or_else(
+                    || {
+                        display[start..]
+                            .find(['\r', '\n'])
+                            .map_or(display.len(), |i| start + i)
                     },
-                    self.wrap.then_some(width),
-                    None,
-                ) {
-                    for line in lines {
-                        max_width = max_width.max(line.width());
-                        let height = line.size(self.line_height).height;
-                        self.lines.push(Paragraph {
-                            start,
-                            end,
-                            top,
-                            line,
-                            tabs: tabs.clone(),
-                            links: links.clone(),
-                        });
-                        top += height;
+                    |(_, source)| source.end,
+                );
+                let compact = rich.is_none() && self.is_table_separator(start);
+                let rich = rich.map(|(index, _)| visual::RichRow {
+                    index,
+                    height: self.visual.as_ref().unwrap().rich_heights[index]
+                        .unwrap_or(self.line_height * 3.),
+                });
+                while previous.peek().is_some_and(|row| row.start < start) {
+                    previous.next();
+                }
+                if metrics_match
+                    && !rich_style_changed
+                    && previous.peek().is_some_and(|row| {
+                        row.start == start
+                            && row.end == end
+                            && row.compact == compact
+                            && row.rich.map(|row| row.index) == rich.map(|row| row.index)
+                    })
+                {
+                    let mut row = previous.next().unwrap();
+                    row.top = top;
+                    top += row.height();
+                    if row.rich.is_none() {
+                        max_width = max_width.max(row.line.width());
+                    }
+                    output_lines.push(row);
+                } else {
+                    let (value, tabs) = if rich.is_some() {
+                        ("".into(), Vec::new())
+                    } else {
+                        expand_tabs(&display[start..end])
+                    };
+                    let map = visual::DisplayMap::from_tabs(&tabs);
+                    let links = if self.multiline && !self.content.is_empty() && rich.is_none() {
+                        links::ranges(&display[start..end])
+                    } else {
+                        Vec::new()
+                    };
+                    let run = TextRun {
+                        len: value.len(),
+                        font: style.font(),
+                        color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let runs = if rich.is_some() {
+                        Vec::new()
+                    } else {
+                        highlighting::text_runs(
+                            start..end,
+                            &tabs,
+                            visual.map_or(self.highlighting.spans_for(self.revision), |document| {
+                                &document.spans
+                            }),
+                            &links,
+                            &run,
+                            palette,
+                        )
+                    };
+                    if let Ok(lines) = window.text_system().shape_text(
+                        value,
+                        font_size,
+                        if runs.is_empty() {
+                            std::slice::from_ref(&run)
+                        } else {
+                            &runs
+                        },
+                        self.wrap.then_some(width),
+                        None,
+                    ) {
+                        for line in lines {
+                            if rich.is_none() {
+                                max_width = max_width.max(line.width());
+                            }
+                            let row = Paragraph {
+                                start,
+                                end,
+                                top,
+                                line,
+                                display: map.clone(),
+                                links: links.clone(),
+                                compact,
+                                line_height: self.line_height,
+                                rich,
+                            };
+                            top += row.height();
+                            output_lines.push(row);
+                        }
                     }
                 }
                 if end == display.len() {
@@ -197,37 +348,65 @@ impl InputState {
                         1
                     };
             }
+            self.lines = output_lines;
+            if let Some(visual) = &mut self.visual {
+                visual.revealed = revealed;
+            }
+            if let Some(anchor) = scroll_anchor {
+                self.restore_top_source_anchor(anchor);
+            }
             self.content_size = size(
                 if self.wrap {
                     bounds.size.width
                 } else {
-                    self.content_padding.left + max_width + self.content_padding.right.max(px(4.))
+                    let source_width = self.content_padding.left
+                        + max_width
+                        + self.content_padding.right.max(px(4.));
+                    self.visual
+                        .as_ref()
+                        .map_or(source_width, |visual| source_width.max(visual.rich_width))
                 },
                 top.max(self.content_padding.top + self.line_height) + self.content_padding.bottom,
             );
             self.layout_key = Some(key);
         }
-        if self.reveal {
-            let caret = self.caret_position();
-            if self.cursor() == 0 {
-                self.scroll = Point::default();
+        if self.visual_document().is_none() {
+            if self.reveal {
+                if self.cursor() == 0 {
+                    self.scroll = Point::default();
+                }
+                self.scroll = self.scroll_to_caret(self.caret_position(), self.line_height);
+                self.reveal = false;
             }
-            if caret.y + self.scroll.y < px(0.) {
-                self.scroll.y = -(caret.y - self.content_padding.top).max(px(0.));
-            }
-            if caret.y + self.line_height + self.scroll.y > bounds.size.height {
-                self.scroll.y = bounds.size.height - caret.y - self.line_height;
-            }
-            if caret.x + self.scroll.x < px(0.) {
-                self.scroll.x = -(caret.x - self.content_padding.left).max(px(0.));
-            }
-            if caret.x + px(3.) + self.scroll.x > bounds.size.width {
-                self.scroll.x = bounds.size.width - caret.x - px(3.);
-            }
-            self.reveal = false;
+            self.clamp_scroll();
         }
-        self.clamp_scroll();
     }
+
+    pub(super) fn scroll_to_caret(&self, caret: Point<Pixels>, height: Pixels) -> Point<Pixels> {
+        let mut scroll = self.scroll;
+        if caret.y + scroll.y < px(0.) {
+            scroll.y = -(caret.y - self.content_padding.top).max(px(0.));
+        }
+        if caret.y + height + scroll.y > self.bounds.size.height {
+            scroll.y = self.bounds.size.height - caret.y - height;
+        }
+        if caret.x + scroll.x < px(0.) {
+            scroll.x = -(caret.x - self.content_padding.left).max(px(0.));
+        }
+        if caret.x + px(3.) + scroll.x > self.bounds.size.width {
+            scroll.x = self.bounds.size.width - caret.x - px(3.);
+        }
+        scroll
+    }
+
+    pub(super) fn row_for_source(&self, at: usize) -> Option<&Paragraph> {
+        let index = self
+            .lines
+            .partition_point(|row| row.start <= at)
+            .saturating_sub(1);
+        self.lines.get(index)
+    }
+
     pub(super) fn paint(&mut self, window: &mut Window, cx: &mut App) {
         let origin = self.bounds.origin + self.scroll;
         let focused = self.focus.is_focused(window);
@@ -254,18 +433,49 @@ impl InputState {
         }
         let first = self
             .lines
-            .partition_point(|l| l.top + l.line.size(self.line_height).height < -self.scroll.y);
+            .partition_point(|l| l.top + l.height() < -self.scroll.y);
         for l in &self.lines[first..] {
             if l.top + self.scroll.y > self.bounds.size.height {
                 break;
             }
-            let height = l.line.size(self.line_height).height;
+            let height = l.height();
             if l.top + height + self.scroll.y < px(0.)
                 || l.top + self.scroll.y > self.bounds.size.height
             {
                 continue;
             }
+            if l.rich.is_some() {
+                if self
+                    .visual
+                    .as_ref()
+                    .is_some_and(|visual| !visual.geometry.has_text(l.start))
+                    && self.selected_ranges().any(|range| {
+                        if self
+                            .visual
+                            .as_ref()
+                            .is_some_and(|visual| visual.geometry.has_diagram_labels(l.start))
+                        {
+                            range.start <= l.start && l.end <= range.end
+                        } else {
+                            range.start < l.end && range.end > l.start
+                        }
+                    })
+                {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(self.bounds.left(), origin.y + l.top),
+                            size(self.bounds.size.width, height),
+                        ),
+                        selection_color.opacity(0.35),
+                    ));
+                }
+                continue;
+            }
+            if l.compact {
+                continue;
+            }
             let pos = origin + point(self.content_padding.left, l.top);
+            let line_height = l.line_height;
             for selection in self.selected_ranges() {
                 let start = selection.start.max(l.start);
                 let end = selection.end.min(l.end);
@@ -274,8 +484,8 @@ impl InputState {
                     && selection.end > l.start
                     && selection.start <= l.end
                 {
-                    let a = l.position_after_wrap(start - l.start, self.line_height);
-                    let b = l.position(end - l.start, self.line_height);
+                    let a = l.position_after_wrap(start - l.start);
+                    let b = l.position(end - l.start);
                     let mut y = a.y;
                     while y <= b.y {
                         let x = if y == a.y { a.x } else { px(0.) };
@@ -287,23 +497,23 @@ impl InputState {
                         window.paint_quad(fill(
                             Bounds::new(
                                 pos + point(x, y),
-                                size((right - x).max(px(2.)), self.line_height),
+                                size((right - x).max(px(2.)), line_height),
                             ),
                             selection_color,
                         ));
-                        y += self.line_height;
+                        y += line_height;
                     }
                 }
             }
             let _ = l
                 .line
-                .paint(pos, self.line_height, TextAlign::Left, None, window, cx);
+                .paint(pos, line_height, TextAlign::Left, None, window, cx);
             for marked in self.extra_marked.iter().chain(self.marked.iter()) {
                 let start = marked.start.max(l.start);
                 let end = marked.end.min(l.end);
                 if start < end {
-                    let a = l.position_after_wrap(start - l.start, self.line_height);
-                    let b = l.position(end - l.start, self.line_height);
+                    let a = l.position_after_wrap(start - l.start);
+                    let b = l.position(end - l.start);
                     let mut y = a.y;
                     while y <= b.y {
                         let x = if y == a.y { a.x } else { px(0.) };
@@ -314,12 +524,12 @@ impl InputState {
                         };
                         window.paint_quad(fill(
                             Bounds::new(
-                                pos + point(x, y + self.line_height - px(2.)),
+                                pos + point(x, y + line_height - px(2.)),
                                 size((right - x).max(px(1.)), px(1.)),
                             ),
                             cx.theme().foreground,
                         ));
-                        y += self.line_height;
+                        y += line_height;
                     }
                 }
             }
@@ -352,13 +562,8 @@ impl InputState {
                 };
                 window.paint_quad(fill(
                     Bounds::new(
-                        origin
-                            + self.position_with_wrap_side(
-                                at,
-                                selection.after_wrap
-                                    || selection.reversed && !selection.range.is_empty(),
-                            ),
-                        size(px(1.5), self.line_height),
+                        origin + self.position_with_wrap_side(at, selection.after_wrap),
+                        size(px(1.5), self.visual_caret_height(at)),
                     ),
                     cx.theme().foreground,
                 ));
@@ -366,7 +571,7 @@ impl InputState {
             window.paint_quad(fill(
                 Bounds::new(
                     origin + self.caret_position(),
-                    size(px(1.5), self.line_height),
+                    size(px(1.5), self.visual_caret_height(self.cursor())),
                 ),
                 cx.theme().foreground,
             ));

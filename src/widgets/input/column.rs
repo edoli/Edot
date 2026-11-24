@@ -3,19 +3,16 @@ use super::*;
 
 impl InputState {
     fn column_point(&self, p: Point<Pixels>) -> Point<Pixels> {
-        let top = self.content_padding.top;
-        let last = if self.content.is_empty() {
-            top
-        } else {
-            self.lines.last().map_or(top, |line| {
-                line.top + line.line.size(self.line_height).height - self.line_height
-            })
-        };
-        let row = ((p.y - top) / self.line_height).floor().max(0.);
-        point(
-            p.x.max(self.content_padding.left),
-            (top + self.line_height * row).min(last),
-        )
+        let y = self.row_at_y(p.y).map_or(self.content_padding.top, |line| {
+            let row = ((p.y - line.top) / line.line_height).floor();
+            let max = if line.rich.is_some() {
+                0.
+            } else {
+                line.line.wrap_boundaries.len() as f32
+            };
+            line.top + line.line_height * row.clamp(0., max)
+        });
+        point(p.x.max(self.content_padding.left), y)
     }
 
     pub(super) fn begin_column_selection(
@@ -39,15 +36,35 @@ impl InputState {
             return;
         };
         let head = self.column_point(position - self.bounds.origin - self.scroll);
-        let count = ((head.y - anchor.y).abs() / self.line_height).round() as usize + 1;
-        let direction = if head.y >= anchor.y { 1. } else { -1. };
+        let start = anchor.y.min(head.y);
+        let end = anchor.y.max(head.y);
+        let first = self
+            .lines
+            .partition_point(|line| line.top + line.height() <= start);
+        let mut rows: Vec<_> = self.lines[first..]
+            .iter()
+            .take_while(|line| line.top <= end)
+            .flat_map(|line| {
+                let last_wrap = if line.rich.is_some() {
+                    0
+                } else {
+                    line.line.wrap_boundaries.len()
+                };
+                (0..=last_wrap).map(|row| line.top + line.line_height * row as f32)
+            })
+            .filter(|&y| start <= y && y <= end)
+            .collect();
+        if rows.is_empty() {
+            rows.push(head.y);
+        } else if head.y < anchor.y {
+            rows.reverse();
+        }
         let left = anchor.x.min(head.x);
         let right = anchor.x.max(head.x);
-        let mut selections = Vec::with_capacity(count);
-        for row in 0..count {
-            let y = anchor.y + self.line_height * (direction * row as f32);
-            let start = self.index_at(point(anchor.x, y + self.line_height / 2.));
-            let end = self.index_at(point(head.x, y + self.line_height / 2.));
+        let mut selections = Vec::with_capacity(rows.len());
+        for &y in &rows {
+            let start = self.index_at(point(anchor.x, y + px(0.5)));
+            let end = self.index_at(point(head.x, y + px(0.5)));
             // Hit testing clamps beyond a row's text. Reject that row if the
             // resulting caret interval lies outside the horizontal rectangle.
             // At a soft-wrap start, the same byte also represents the prior
@@ -76,9 +93,8 @@ impl InputState {
         if selections.is_empty() {
             // Match VS Code's all-outside fallback: retain one end-of-row caret
             // per visual row rather than leaving the editor without a caret.
-            for row in 0..count {
-                let y = anchor.y + self.line_height * (direction * row as f32);
-                let end = self.index_at(point(px(1e8), y + self.line_height / 2.));
+            for y in rows {
+                let end = self.index_at(point(px(1e8), y + px(0.5)));
                 selections.push(Selection {
                     range: end..end,
                     reversed: false,

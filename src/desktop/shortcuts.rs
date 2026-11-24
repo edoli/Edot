@@ -52,7 +52,7 @@ const SECTIONS: &[ShortcutSection] = &[
                 "해당 순번 탭 / 마지막 탭으로 이동",
             ),
             (C(&[Sidebar]), "사이드바 표시 / 숨기기"),
-            (C(&[ReadOnly]), "읽기 / 편집 모드 전환"),
+            (C(&[ToggleEditorMode]), "원문 편집 / 서식 편집 전환"),
             (C(&[Settings]), "설정 열기 / 닫기"),
             (C(&[Wrap]), "자동 줄 바꿈 켜기 / 끄기"),
             (C(&[Rename]), "항목 이름 바꾸기"),

@@ -10,10 +10,21 @@ pub(super) struct Highlighting {
     task: Option<Task<()>>,
 }
 
+impl Highlighting {
+    pub(super) fn spans_for(&self, revision: u64) -> &[Span] {
+        if self.revision == Some(revision) {
+            &self.spans
+        } else {
+            &[]
+        }
+    }
+}
+
 impl InputState {
     pub(super) fn ensure_highlighting(&mut self, cx: &mut Context<Self>) {
         if !self.multiline
             || self.is_read_only()
+            || self.visual.is_some()
             || self.highlighting.revision == Some(self.revision)
         {
             return;
@@ -38,7 +49,7 @@ impl InputState {
                     .spawn(async move { markdown::parse(&content) })
                     .await;
                 let Ok(next) = this.update(cx, |s, cx| {
-                    if s.is_read_only() {
+                    if s.is_read_only() || s.visual.is_some() {
                         s.highlighting.task = None;
                         return None;
                     }

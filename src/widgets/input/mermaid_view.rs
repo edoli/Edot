@@ -1,11 +1,14 @@
 //! Native vector paths and DirectWrite text; no SVG, images or font loader.
 use super::mermaid::{self, Graph, Layout, Rect, Shape};
+use super::reading::BlockView;
+use super::reading_document::Inline;
+use super::reading_geometry::{BlockGeometry, DiagramLabel, Projection};
 use crate::widgets::ActiveTheme;
 use gpui::*;
-use std::sync::Arc;
+use std::{ops::Range, rc::Rc, sync::Arc};
 
 struct Text {
-    lines: Vec<WrappedLine>,
+    lines: Vec<Rc<WrappedLine>>,
     size: [f32; 2],
 }
 fn text(
@@ -35,6 +38,7 @@ fn text(
         )
         .unwrap_or_default()
         .into_iter()
+        .map(Rc::new)
         .collect();
     let height = font_size * 1.4;
     let size = [
@@ -49,12 +53,13 @@ fn text(
 
 pub(super) fn render(
     graph: Arc<Graph>,
-    font_size: Pixels,
+    source: &Inline,
+    view: &BlockView<'_>,
     window: &Window,
     cx: &App,
 ) -> AnyElement {
     let font = window.text_style().font();
-    let font_size = font_size * 0.9;
+    let font_size = view.font_size * 0.9;
     let unit = f32::from(font_size) / 16.;
     let width = px(240. * unit);
     let node_text: Vec<_> = graph
@@ -91,6 +96,12 @@ pub(super) fn render(
     let layout = Arc::new(mermaid::layout(&graph, &sizes, &labels, unit));
     let paint_layout = layout.clone();
     let paint_graph = graph.clone();
+    let editing = DiagramEditing {
+        block: view.source,
+        code: Projection::new(source, view.raw, &[], false),
+        geometry: view.geometry.clone(),
+    };
+    let selected = view.selected.to_vec();
     div()
         .w_full()
         .max_w(px(layout.width))
@@ -99,22 +110,68 @@ pub(super) fn render(
             canvas(
                 move |bounds, w, cx| {
                     let scale = f32::from(bounds.size.width) / layout.width;
-                    if (scale - 1.).abs() < 0.0001 {
-                        return (scale, node_text, edge_text);
-                    }
-                    let node_text = graph
+                    let (node_text, edge_text) = if (scale - 1.).abs() < 0.0001 {
+                        (node_text, edge_text)
+                    } else {
+                        (
+                            graph
+                                .nodes
+                                .iter()
+                                .map(|n| {
+                                    text(&n.label, &font, font_size * scale, width * scale, w, cx)
+                                })
+                                .collect(),
+                            graph
+                                .edges
+                                .iter()
+                                .map(|e| {
+                                    text(&e.label, &font, font_size * scale, width * scale, w, cx)
+                                })
+                                .collect(),
+                        )
+                    };
+                    let line_height = font_size * scale * 1.4;
+                    let node_labels = graph
                         .nodes
                         .iter()
-                        .map(|n| text(&n.label, &font, font_size * scale, width * scale, w, cx))
-                        .collect::<Vec<_>>();
-                    let edge_text = graph
+                        .zip(&layout.nodes)
+                        .zip(&node_text)
+                        .map(|((node, rect), text)| {
+                            editing.register(
+                                &node.label,
+                                node.label_source.clone(),
+                                rect_at(*rect, bounds.origin, scale),
+                                text,
+                                line_height,
+                            )
+                        })
+                        .collect();
+                    let edge_labels = graph
                         .edges
                         .iter()
-                        .map(|e| text(&e.label, &font, font_size * scale, width * scale, w, cx))
-                        .collect::<Vec<_>>();
-                    (scale, node_text, edge_text)
+                        .zip(&layout.routes)
+                        .zip(&edge_text)
+                        .map(|((edge, route), text)| {
+                            editing.register(
+                                &edge.label,
+                                edge.label_source.clone()?,
+                                rect_at(route.label, bounds.origin, scale),
+                                text,
+                                line_height,
+                            )
+                        })
+                        .collect();
+                    (
+                        scale,
+                        node_text,
+                        edge_text,
+                        Labels {
+                            node: node_labels,
+                            edge: edge_labels,
+                        },
+                    )
                 },
-                move |bounds, (scale, node_text, edge_text), w, cx| {
+                move |bounds, (scale, node_text, edge_text, labels), w, cx| {
                     paint(
                         &paint_graph,
                         &paint_layout,
@@ -123,6 +180,8 @@ pub(super) fn render(
                         font_size * scale,
                         &node_text,
                         &edge_text,
+                        &labels,
+                        &selected,
                         w,
                         cx,
                     );
@@ -131,6 +190,50 @@ pub(super) fn render(
             .size_full(),
         )
         .into_any_element()
+}
+
+struct DiagramEditing {
+    block: usize,
+    code: Projection,
+    geometry: BlockGeometry,
+}
+
+impl DiagramEditing {
+    fn register(
+        &self,
+        label: &str,
+        range: Range<usize>,
+        mut rect: Bounds<Pixels>,
+        text: &Text,
+        line_height: Pixels,
+    ) -> Option<Rc<DiagramLabel>> {
+        if label.is_empty() {
+            return None;
+        }
+        rect.origin.y += (rect.size.height - px(text.size[1])) / 2.;
+        rect.size.height = px(text.size[1]);
+        let label = Rc::new(DiagramLabel {
+            block: self.block,
+            projection: self.code.diagram_label(range, label)?,
+            line: text.lines.first()?.clone(),
+            rect,
+            line_height,
+        });
+        self.geometry.register_diagram_label(label.clone());
+        Some(label)
+    }
+}
+
+struct Labels {
+    node: Vec<Option<Rc<DiagramLabel>>>,
+    edge: Vec<Option<Rc<DiagramLabel>>>,
+}
+
+fn rect_at(rect: Rect, origin: Point<Pixels>, scale: f32) -> Bounds<Pixels> {
+    Bounds::new(
+        origin + point(px(rect.x * scale), px(rect.y * scale)),
+        size(px(rect.width * scale), px(rect.height * scale)),
+    )
 }
 
 fn path(
@@ -182,17 +285,14 @@ fn paint(
     font_size: Pixels,
     node_text: &[Text],
     edge_text: &[Text],
+    labels: &Labels,
+    selected: &[Range<usize>],
     w: &mut Window,
     cx: &mut App,
 ) {
     let colors = cx.theme().colors;
     let point_at = |p: [f32; 2]| origin + point(px(p[0] * scale), px(p[1] * scale));
-    let bounds_at = |r: Rect| {
-        Bounds::new(
-            point_at([r.x, r.y]),
-            size(px(r.width * scale), px(r.height * scale)),
-        )
-    };
+    let bounds_at = |rect| rect_at(rect, origin, scale);
     let stroke = px((1.3 * scale).max(0.6));
     let clip = w.content_mask().bounds;
     // Edges go behind nodes and their text.
@@ -232,7 +332,13 @@ fn paint(
             }
         }
     }
-    for ((node, rect), text) in graph.nodes.iter().zip(&layout.nodes).zip(node_text) {
+    for (index, ((node, rect), text)) in graph
+        .nodes
+        .iter()
+        .zip(&layout.nodes)
+        .zip(node_text)
+        .enumerate()
+    {
         let bounds = bounds_at(*rect);
         if !bounds.intersects(&clip) {
             continue;
@@ -259,15 +365,27 @@ fn paint(
                     }),
             );
         }
+        if let Some(label) = &labels.node[index] {
+            label.paint_selection(selected, colors.selection, w);
+        }
         paint_text(text, bounds, font_size * 1.4, w, cx);
     }
-    for ((edge, route), text) in graph.edges.iter().zip(&layout.routes).zip(edge_text) {
+    for (index, ((edge, route), text)) in graph
+        .edges
+        .iter()
+        .zip(&layout.routes)
+        .zip(edge_text)
+        .enumerate()
+    {
         if !edge.label.is_empty() {
             let bounds = bounds_at(route.label);
             if !bounds.intersects(&clip) {
                 continue;
             }
             w.paint_quad(fill(bounds, colors.background).corner_radii(px(3. * scale)));
+            if let Some(label) = &labels.edge[index] {
+                label.paint_selection(selected, colors.selection, w);
+            }
             paint_text(text, bounds, font_size * 1.4, w, cx);
         }
     }
@@ -276,9 +394,10 @@ fn paint(
 #[cfg(test)]
 mod tests {
     use super::text;
+    use crate::settings::EditorMode;
     use crate::widgets::ActiveTheme;
     use crate::widgets::input::{Copy, InputState, SelectAll, reading_document::Kind};
-    use gpui::{AppContext, px};
+    use gpui::{AppContext, MouseButton, point, px};
     use std::sync::Arc;
 
     #[gpui::test]
@@ -295,7 +414,7 @@ mod tests {
         let editor = window.root(cx).unwrap();
         cx.update_window(window.into(), |_, w, cx| {
             editor.update(cx, |s, cx| {
-                s.set_read_only(true, cx);
+                s.set_editor_mode(EditorMode::Visual, cx);
                 s.focus(w, cx);
             });
             let text = text("한글🙂", &w.text_style().font(), px(16.), px(240.), w, cx);
@@ -311,8 +430,36 @@ mod tests {
             });
         };
         draw(&mut visual);
-        let bounds = visual.debug_bounds("mermaid-diagram-1").unwrap();
+        let bounds = visual.debug_bounds("mermaid-diagram-0").unwrap();
         assert!(bounds.size.width > px(50.) && bounds.size.height > px(20.));
+        visual.simulate_click(
+            point(bounds.left() + px(1.), bounds.top() + px(1.)),
+            Default::default(),
+        );
+        draw(&mut visual);
+        assert!(visual.debug_bounds("mermaid-diagram-0").is_some());
+        assert!(editor.read_with(cx, |s, _| s.selected_value().starts_with("```mermaid")));
+        for label in ["시작", "아니오"] {
+            let start = source.find(label).unwrap();
+            let (first, last) = editor.read_with(cx, |s, _| {
+                let origin = s.bounds.origin + s.scroll;
+                let y = s.visual_caret_height(start) / 2.;
+                let offset = point(px(0.5), y);
+                (
+                    origin + s.position(start) + offset,
+                    origin + s.position(start + label.len()) + offset,
+                )
+            });
+            visual.simulate_mouse_down(first, MouseButton::Left, Default::default());
+            visual.simulate_mouse_move(last, MouseButton::Left, Default::default());
+            visual.simulate_mouse_up(last, MouseButton::Left, Default::default());
+            draw(&mut visual);
+            assert!(visual.debug_bounds("mermaid-diagram-0").is_some());
+            assert_eq!(
+                editor.read_with(cx, |s, _| s.selected_value().to_owned()),
+                label
+            );
+        }
         visual.update(|w, cx| {
             let colors = cx.theme().colors;
             assert!(
@@ -329,7 +476,7 @@ mod tests {
         });
         let graph = editor.read_with(cx, |s, _| {
             assert_eq!(s.value(), source);
-            let Kind::Mermaid(Ok(g)) = &s.reading.document.blocks[1].kind else {
+            let Kind::Mermaid(Ok(g)) = &s.visual_document().unwrap().rich_blocks(1)[0].kind else {
                 panic!("missing graph")
             };
             g.clone()
@@ -352,7 +499,7 @@ mod tests {
         });
         draw(&mut visual);
         editor.read_with(cx, |s, _| {
-            let Kind::Mermaid(Ok(g)) = &s.reading.document.blocks[1].kind else {
+            let Kind::Mermaid(Ok(g)) = &s.visual_document().unwrap().rich_blocks(1)[0].kind else {
                 panic!("missing dark graph")
             };
             assert!(Arc::ptr_eq(&graph, g));
@@ -364,7 +511,7 @@ mod tests {
         });
         draw(&mut visual);
         editor.read_with(cx, |s, _| {
-            let Kind::Mermaid(Ok(g)) = &s.reading.document.blocks[1].kind else {
+            let Kind::Mermaid(Ok(g)) = &s.visual_document().unwrap().rich_blocks(1)[0].kind else {
                 panic!("missing updated graph")
             };
             assert!(!Arc::ptr_eq(&graph, g));
@@ -375,20 +522,25 @@ mod tests {
             editor.update(cx, |s, cx| s.set_value(invalid, w, cx));
         });
         draw(&mut visual);
-        assert!(visual.debug_bounds("mermaid-diagram-1").is_none());
+        assert!(visual.debug_bounds("mermaid-diagram-0").is_none());
         editor.read_with(cx, |s, _| {
             assert_eq!(s.value(), invalid);
             assert!(matches!(
-                s.reading.document.blocks[1].kind,
+                s.visual_document().unwrap().rich_blocks(1)[0].kind,
                 Kind::Mermaid(Err(_))
             ));
-            assert!(s.reading.document.text().contains("A->>B: 한글"));
+            assert!(
+                s.visual_document().unwrap().rich_blocks(1)[0]
+                    .content
+                    .text
+                    .contains("A->>B: 한글")
+            );
         });
         visual.update(|_, cx| {
-            editor.update(cx, |s, cx| s.set_read_only(false, cx));
+            editor.update(cx, |s, cx| s.set_editor_mode(EditorMode::Source, cx));
         });
         draw(&mut visual);
-        assert!(visual.debug_bounds("markdown-reading").is_none());
+        assert!(visual.debug_bounds("mermaid-diagram-0").is_none());
         assert!(visual.debug_bounds("text-input").is_some());
     }
 }

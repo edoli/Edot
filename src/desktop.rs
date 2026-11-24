@@ -8,7 +8,7 @@ use crate::{
     search::{Cache, Pattern},
     selection::Selection,
     session::Session,
-    settings::{Settings, ThemeMode},
+    settings::{EditorMode, Settings, ThemeMode},
     space, startup,
     storage::replace_file,
     store_lock::StoreLock,

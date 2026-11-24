@@ -203,7 +203,7 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
             state.replace_all("saved before switching", window, cx)
         });
         this.changed(f.ids[0], window, cx);
-        assert!(this.set_read_only(true, window, cx));
+        assert!(this.set_editor_mode(EditorMode::Visual, window, cx));
         this.set_collapsed(f.folder, true, cx);
         // Switching does not read external settings edits or rebuild the font cache.
         Settings::default()
@@ -218,11 +218,14 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
         assert_eq!(
             cx.global::<AppState>().settings,
             Settings {
-                read_only: true,
+                editor_mode: EditorMode::Visual,
                 ..settings.clone()
             }
         );
-        assert!(this.active_editor().unwrap().read(cx).is_read_only());
+        assert_eq!(
+            this.active_editor().unwrap().read(cx).editor_mode(),
+            EditorMode::Visual
+        );
         assert_eq!(this.collapsed, HashSet::from([root]));
         assert_eq!(this.session.active, Some(child));
         assert_eq!(
@@ -236,7 +239,10 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
             this.active_editor().unwrap().read(cx).value(),
             "saved before switching"
         );
-        assert!(this.active_editor().unwrap().read(cx).is_read_only());
+        assert_eq!(
+            this.active_editor().unwrap().read(cx).editor_mode(),
+            EditorMode::Visual
+        );
         assert!(this.switch_space(other.clone(), window, cx));
         assert!(!this.collapsed.contains(&root));
         assert_eq!(
@@ -337,13 +343,19 @@ fn space_switch_saves_dirty_body_restores_tree_and_shares_global_ini(cx: &mut Te
     };
     let loaded = LoadedSpace::open(&paths).unwrap();
     let state = AppState::load(paths.config).unwrap();
-    assert!(state.settings.read_only);
+    assert_eq!(state.settings.editor_mode, EditorMode::Visual);
     cx.update(|cx| cx.set_global(state));
     let restarted = cx.add_window(|window, cx| Edot::new(paths.space, Ok(loaded), window, cx));
     restarted
         .update(cx, |this, _, cx| {
-            assert!(cx.global::<AppState>().settings.read_only);
-            assert!(this.active_editor().unwrap().read(cx).is_read_only());
+            assert_eq!(
+                cx.global::<AppState>().settings.editor_mode,
+                EditorMode::Visual
+            );
+            assert_eq!(
+                this.active_editor().unwrap().read(cx).editor_mode(),
+                EditorMode::Visual
+            );
         })
         .unwrap();
 }

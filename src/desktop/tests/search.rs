@@ -45,7 +45,7 @@ fn global_replace_updates_open_and_closed_notes_and_preserves_undo(cx: &mut Test
         assert_eq!(editor.read(cx).value(), "loaded needle")
     });
     f.update(cx, |this, window, cx| {
-        assert!(this.set_read_only(true, window, cx));
+        assert!(this.set_editor_mode(EditorMode::Visual, window, cx));
         let range = crate::search::Pattern::compile("needle", false, false)
             .unwrap()
             .edits_text("loaded needle", "바뀜")[0]
@@ -59,14 +59,21 @@ fn global_replace_updates_open_and_closed_notes_and_preserves_undo(cx: &mut Test
             cx,
         );
         assert_eq!(editor.read(cx).value(), "loaded 바뀜");
-        assert!(!cx.global::<AppState>().settings.read_only);
-        assert!(
-            !Settings::load(&cx.global::<AppState>().config_dir)
+        assert_eq!(
+            cx.global::<AppState>().settings.editor_mode,
+            EditorMode::Visual
+        );
+        assert_eq!(
+            Settings::load(&cx.global::<AppState>().config_dir)
                 .unwrap()
-                .read_only
+                .editor_mode,
+            EditorMode::Visual
         );
         for tab in &this.open {
-            assert!(!tab.editor.as_ref().unwrap().read(cx).is_read_only());
+            assert_eq!(
+                tab.editor.as_ref().unwrap().read(cx).editor_mode(),
+                EditorMode::Visual
+            );
         }
     });
 }

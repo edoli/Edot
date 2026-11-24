@@ -1,16 +1,27 @@
 //! Web URL detection, decorations and exact glyph hit testing.
 use super::*;
 
+pub(super) fn is_web_url(target: &str) -> bool {
+    target
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || target
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+}
+
+pub(super) fn is_markdown_target(target: &str) -> bool {
+    is_web_url(target)
+        || target
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
+}
+
 pub(super) fn pasted_markdown_link(label: &str, url: &str) -> Option<String> {
     if label.is_empty()
         || label.contains(['\r', '\n'])
         || url.chars().any(|c| c.is_whitespace() || c.is_control())
-        || !url
-            .get(..7)
-            .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
-            && !url
-                .get(..8)
-                .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+        || !is_web_url(url)
     {
         return None;
     }
@@ -165,7 +176,7 @@ pub(super) fn text_runs(
 }
 
 impl InputState {
-    pub(super) fn link_at(&self, position: Point<Pixels>) -> Option<Range<usize>> {
+    pub(super) fn link_target_at(&self, position: Point<Pixels>) -> Option<SharedString> {
         if !self.multiline
             || self.is_composing()
             || self.content.is_empty()
@@ -181,37 +192,41 @@ impl InputState {
         {
             return None;
         }
-        let local =
-            position - self.bounds.origin - self.scroll - point(self.content_padding.left, px(0.));
-        let index = self
-            .lines
-            .partition_point(|line| line.top <= local.y)
-            .checked_sub(1)?;
-        let line = &self.lines[index];
-        if local.y >= line.top + line.line.size(self.line_height).height {
+        let local = position - self.bounds.origin - self.scroll;
+        let line = self.row_at_y(local.y)?;
+        if local.y < line.top || local.y >= line.top + line.height() {
             return None;
+        }
+        if line.rich.is_some() {
+            return self.visual.as_ref()?.geometry.link_at(line.start, local);
         }
         let byte = line.source_index(
             line.line
-                .index_for_position(point(local.x, local.y - line.top), self.line_height)
+                .index_for_position(
+                    point(local.x - self.content_padding.left, local.y - line.top),
+                    line.line_height,
+                )
                 .ok()?,
         );
         let link = line.links.iter().find(|link| link.contains(&byte))?;
-        Some(line.start + link.start..line.start + link.end)
+        Some(
+            self.content[line.start + link.start..line.start + link.end]
+                .to_owned()
+                .into(),
+        )
     }
 
     pub(super) fn open_link_at(&self, position: Point<Pixels>, cx: &App) -> bool {
-        let Some(range) = self.link_at(position) else {
+        let Some(url) = self.link_target_at(position) else {
             return false;
         };
-        let url = &self.content[range];
         if url
             .get(..4)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("www."))
         {
             cx.open_url(&format!("https://{url}"));
         } else {
-            cx.open_url(url);
+            cx.open_url(&url);
         }
         true
     }
