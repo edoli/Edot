@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod desktop;
+mod error_log;
 mod image_http;
 #[cfg(target_os = "windows")]
 mod platform;
@@ -14,5 +15,6 @@ use edot::{
 };
 
 fn main() {
+    error_log::install();
     desktop::run();
 }
