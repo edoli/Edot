@@ -226,9 +226,7 @@ impl InputState {
                 self.select_next_occurrence(cx)
             }
             Some(Command::Bold | Command::Italic | Command::Strike | Command::Code)
-                if self.multiline
-                    && self.text_mode == TextMode::Markdown
-                    && !self.is_read_only() =>
+                if self.multiline && !self.is_read_only() =>
             {
                 if !event.is_held {
                     let marker = match command.unwrap() {
@@ -637,7 +635,7 @@ impl InputState {
 
 #[cfg(test)]
 mod tests {
-    use super::{InputState, TextMode, Undo};
+    use super::{InputState, Undo};
     use gpui::{AppContext, EntityInputHandler, KeyDownEvent, Keystroke};
 
     fn event(key: &str) -> KeyDownEvent {
@@ -840,7 +838,6 @@ mod tests {
                 assert_eq!(s.selected_range(), 0..0);
                 s.key_on(&event("ctrl-e"), true, w, cx);
                 assert_eq!(s.selected_range(), 7..7);
-                s.set_text_mode(TextMode::Markdown, cx);
                 s.set_selected_range(0..3, cx);
                 s.key_on(&event("cmd-e"), true, w, cx);
                 assert_eq!(s.value(), "`one` two\n한글🙂");

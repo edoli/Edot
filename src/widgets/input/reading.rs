@@ -202,19 +202,21 @@ impl InputState {
         self.reading.auto_scroll.stop();
     }
     pub fn is_read_only(&self) -> bool {
-        self.read_only
+        self.access != Access::Edit
     }
     pub(super) fn is_markdown_reading(&self) -> bool {
-        self.read_only && self.text_mode == TextMode::Markdown
+        self.multiline && self.access == Access::Read
     }
     pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
-        if self.read_only == read_only {
+        if self.access == Access::SourcePreview || self.is_read_only() == read_only {
             return;
         }
-        if read_only {
+        self.access = if read_only {
             self.finish_composition();
-        }
-        self.read_only = read_only;
+            Access::Read
+        } else {
+            Access::Edit
+        };
         self.blink = true;
         self.stop_pointer_drag();
         self.layout_key = None;
@@ -1105,7 +1107,7 @@ fn web_url(target: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Copy, InputState, SelectAll, TextMode};
+    use super::{Copy, InputState, SelectAll};
     use gpui::{AppContext, MouseButton, point, px};
 
     #[gpui::test]
@@ -1115,7 +1117,9 @@ mod tests {
         cx.update(crate::widgets::init);
         let source = "앞🙂 [ ] 일반 텍스트\r\n\r\n- [ ] 한글 **항목**\r\n  - [X] 하위 완료\r\n\r\n```\r\n- [ ] 코드\r\n```\r\n";
         let window = cx.add_window(|w, cx| {
-            let mut state = InputState::new(w, cx).default_value("이전 일반 편집".into());
+            let mut state = InputState::new(w, cx)
+                .soft_wrap(true)
+                .default_value("이전 일반 편집".into());
             state.replace_all(source, w, cx);
             state.set_selected_range(0.."앞🙂".len(), cx);
             state.set_read_only(true, cx);
@@ -1191,7 +1195,9 @@ mod tests {
         cx.update(crate::widgets::init);
         let source = "긴 한글 본문입니다.\r\n\r\n".repeat(4000) + "- [ ] 마지막 항목\r\n";
         let window = cx.add_window(|w, cx| {
-            let mut state = InputState::new(w, cx).default_value(source.clone());
+            let mut state = InputState::new(w, cx)
+                .soft_wrap(true)
+                .default_value(source.clone());
             state.set_read_only(true, cx);
             state.focus(w, cx);
             state
@@ -1235,7 +1241,9 @@ mod tests {
         cx.update(crate::widgets::init);
         let source = "# 제목\n\n```rust\n\tlet 한글 = \"🙂\";\n\n```\n\n    indented\tcode\n\n```mermaid\nflowchart LR\nA-->B\n```\n\n```mermaid\nsequenceDiagram\nA->>B: hello\n```";
         let window = cx.add_window(|w, cx| {
-            let mut state = InputState::new(w, cx).default_value(source.into());
+            let mut state = InputState::new(w, cx)
+                .soft_wrap(true)
+                .default_value(source.into());
             state.set_selected_range(0..2, cx);
             state.set_read_only(true, cx);
             state.reading.anchor = 0;
@@ -1302,6 +1310,7 @@ mod tests {
         cx.update(crate::widgets::init);
         let window = cx.add_window(|w, cx| {
             let mut state = InputState::new(w, cx)
+                .soft_wrap(true)
                 .source_directory(std::env::current_dir().unwrap())
                 .default_value("![스크린샷 **설명**](assets/app-icon/edot.png)".into());
             state.set_read_only(true, cx);
@@ -1526,7 +1535,6 @@ mod tests {
         cx.update_window(window.into(), |_, w, cx| {
             editor.update(cx, |s, cx| {
                 s.set_selected_range(2..8, cx);
-                s.set_text_mode(TextMode::Markdown, cx);
                 s.set_read_only(true, cx);
                 s.focus(w, cx);
             })
@@ -1665,7 +1673,6 @@ mod tests {
         let editor = window.root(cx).unwrap();
         cx.update_window(window.into(), |_, w, cx| {
             editor.update(cx, |s, cx| {
-                s.set_text_mode(TextMode::Markdown, cx);
                 s.set_read_only(true, cx);
                 assert!(s.reading.task.is_some());
                 s.set_value(latest.clone(), w, cx);
@@ -1685,7 +1692,7 @@ mod tests {
                 s.set_value("# 오래된 결과\n\n본문\n\n".repeat(4000), w, cx);
                 s.ensure_reading(cx);
                 assert!(s.reading.task.is_some());
-                s.set_text_mode(TextMode::PlainText, cx);
+                s.set_read_only(false, cx);
                 s.set_value("# 작은 문서", w, cx);
             });
         })
@@ -1695,7 +1702,6 @@ mod tests {
             editor.update(cx, |s, cx| {
                 assert!(s.reading.task.is_none());
                 assert_ne!(s.reading.revision, Some(s.revision));
-                s.set_text_mode(TextMode::Markdown, cx);
                 s.set_read_only(true, cx);
                 assert_eq!(s.reading.document.blocks[0].content.text, "작은 문서");
                 assert_eq!(s.reading.revision, Some(s.revision));

@@ -111,8 +111,9 @@ fn pasted_images_replace_selection_follow_edits_and_undo(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn pasted_image_files_and_text_respect_editor_mode(cx: &mut TestAppContext) {
-    use crate::widgets::TextMode;
+fn pasted_images_are_blocked_in_reading_and_files_and_text_work_in_editing(
+    cx: &mut TestAppContext,
+) {
     use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat};
     let f = Fixture::new(cx);
     let png = fs::read("assets/app-icon/edot.png").unwrap();
@@ -123,9 +124,9 @@ fn pasted_image_files_and_text_respect_editor_mode(cx: &mut TestAppContext) {
             state.set_value("keep", window, cx);
             state.select_all(window, cx);
             state.focus(window, cx);
-            state.set_text_mode(TextMode::PlainText, cx);
+            state.set_read_only(true, cx);
         });
-        cx.write_to_clipboard(image.clone());
+        cx.write_to_clipboard(image);
         editor
     });
     f.press(cx, "ctrl-v");
@@ -133,14 +134,7 @@ fn pasted_image_files_and_text_respect_editor_mode(cx: &mut TestAppContext) {
     assert!(!f.dir.join("images").exists());
     f.update(cx, |_, _, cx| {
         assert_eq!(editor.read(cx).value(), "keep");
-        editor.update(cx, |state, cx| {
-            state.set_text_mode(TextMode::Markdown, cx);
-            state.set_read_only(true, cx);
-        });
     });
-    f.press(cx, "ctrl-v");
-    cx.run_until_parked();
-    assert!(!f.dir.join("images").exists());
 
     let sources = f.dir.join("paste-sources");
     fs::create_dir_all(&sources).unwrap();
@@ -386,9 +380,7 @@ fn browser_image_drops_show_positions_and_import_downloaded_images(cx: &mut Test
     let data = native::html(&html);
     let mut effect = DROPEFFECT_COPY;
     f.update(cx, |_, _, cx| {
-        editor.update(cx, |state, cx| {
-            state.set_text_mode(crate::widgets::TextMode::PlainText, cx)
-        })
+        editor.update(cx, |state, cx| state.set_read_only(true, cx))
     });
     cx.update_window(f.window, |_, window, cx| window.render_frame(cx))
         .unwrap();
@@ -411,9 +403,7 @@ fn browser_image_drops_show_positions_and_import_downloaded_images(cx: &mut Test
         });
     }
     f.update(cx, |_, _, cx| {
-        editor.update(cx, |state, cx| {
-            state.set_text_mode(crate::widgets::TextMode::Markdown, cx)
-        })
+        editor.update(cx, |state, cx| state.set_read_only(false, cx))
     });
     cx.update_window(f.window, |_, window, cx| window.render_frame(cx))
         .unwrap();
@@ -606,11 +596,9 @@ fn image_drops_use_space_paths_preserve_files_and_follow_edits(cx: &mut TestAppC
         })
         .unwrap();
 
-    // Plain Text, read-only and non-image drops must not create an images directory.
+    // Read-only and non-image drops must not create an images directory.
     f.update(cx, |_, _, cx| {
-        editor.update(cx, |state, cx| {
-            state.set_text_mode(crate::widgets::TextMode::PlainText, cx)
-        })
+        editor.update(cx, |state, cx| state.set_read_only(true, cx))
     });
     drop_files(&f, cx, std::slice::from_ref(&first), position);
     f.update(cx, |this, window, cx| {
@@ -627,18 +615,7 @@ fn image_drops_use_space_paths_preserve_files_and_follow_edits(cx: &mut TestAppC
     assert!(!f.dir.join("images").exists());
     f.update(cx, |_, _, cx| {
         assert_eq!(editor.read(cx).value(), "AB🙂CD\n");
-        editor.update(cx, |state, cx| {
-            state.set_text_mode(crate::widgets::TextMode::Markdown, cx)
-        });
-    });
-    f.update(cx, |_, _, cx| {
-        editor.update(cx, |state, cx| state.set_read_only(true, cx))
-    });
-    drop_files(&f, cx, std::slice::from_ref(&first), position);
-    cx.run_until_parked();
-    assert!(!f.dir.join("images").exists());
-    f.update(cx, |_, _, cx| {
-        editor.update(cx, |state, cx| state.set_read_only(false, cx))
+        editor.update(cx, |state, cx| state.set_read_only(false, cx));
     });
     drop_files(&f, cx, std::slice::from_ref(&unsupported), position);
     cx.run_until_parked();
@@ -793,19 +770,15 @@ fn image_drops_use_space_paths_preserve_files_and_follow_edits(cx: &mut TestAppC
     let composed = "A한![second](<images/second-2.png>)B";
     f.update(cx, |_, _, cx| assert_eq!(editor.read(cx).value(), composed));
 
-    // Switching to Plain Text while copying must not insert a Markdown tag.
+    // Switching to reading while copying must not insert a Markdown tag.
     drop_files(&f, cx, std::slice::from_ref(&second), position);
     f.update(cx, |_, _, cx| {
-        editor.update(cx, |state, cx| {
-            state.set_text_mode(crate::widgets::TextMode::PlainText, cx)
-        })
+        editor.update(cx, |state, cx| state.set_read_only(true, cx))
     });
     cx.run_until_parked();
     f.update(cx, |_, _, cx| {
         assert_eq!(editor.read(cx).value(), composed);
-        editor.update(cx, |state, cx| {
-            state.set_text_mode(crate::widgets::TextMode::Markdown, cx)
-        });
+        editor.update(cx, |state, cx| state.set_read_only(false, cx));
     });
 
     // Closing the owning tab while a copy is queued must not edit another note.

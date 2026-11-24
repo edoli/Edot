@@ -115,7 +115,8 @@ fn empty_bin_confirms_a_snapshot_and_preserves_unrecognized_files(cx: &mut TestA
 #[gpui::test]
 fn recycle_bin_preview_restore_and_keyboard_preserve_the_existing_note(cx: &mut TestAppContext) {
     let f = Fixture::new(cx);
-    let original = fs::read(f.dir.join("notes").join(format!("{}.txt", f.ids[2]))).unwrap();
+    let original = "# 삭제한 메모\n\n- [ ] **원문**\n".as_bytes();
+    fs::write(f.dir.join(format!("notes/{}.txt", f.ids[2])), original).unwrap();
     f.update(cx, |this, window, cx| {
         assert!(this.delete_confirmed(&[f.folder], window, cx));
     });

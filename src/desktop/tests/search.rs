@@ -45,9 +45,6 @@ fn global_replace_updates_open_and_closed_notes_and_preserves_undo(cx: &mut Test
         assert_eq!(editor.read(cx).value(), "loaded needle")
     });
     f.update(cx, |this, window, cx| {
-        editor.update(cx, |s, cx| {
-            s.set_text_mode(crate::widgets::TextMode::PlainText, cx)
-        });
         assert!(this.set_read_only(true, window, cx));
         let range = crate::search::Pattern::compile("needle", false, false)
             .unwrap()
@@ -62,10 +59,6 @@ fn global_replace_updates_open_and_closed_notes_and_preserves_undo(cx: &mut Test
             cx,
         );
         assert_eq!(editor.read(cx).value(), "loaded 바뀜");
-        assert_eq!(
-            editor.read(cx).text_mode(),
-            crate::widgets::TextMode::PlainText
-        );
         assert!(!cx.global::<AppState>().settings.read_only);
         assert!(
             !Settings::load(&cx.global::<AppState>().config_dir)

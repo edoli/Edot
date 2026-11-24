@@ -1,4 +1,4 @@
-//! Edot's plain-text editor. Byte offsets internally, UTF-16 only at the IME boundary.
+//! Edot's text inputs and Markdown editor. Byte offsets internally, UTF-16 only at IME boundaries.
 use super::scroll::AutoScroll;
 use super::*;
 use std::{ops::Range, time::Duration};
@@ -24,19 +24,11 @@ pub enum InputEvent {
         insertion: DropInsertion,
     },
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TextMode {
-    PlainText,
-    #[default]
-    Markdown,
-}
-impl TextMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::PlainText => "Plain Text",
-            Self::Markdown => "Markdown",
-        }
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Edit,
+    Read,
+    SourcePreview,
 }
 #[derive(Clone)]
 struct Edit {
@@ -103,8 +95,7 @@ pub struct InputState {
     link_hover: bool,
     wheel_gesture: OngoingScroll,
     multiline: bool,
-    text_mode: TextMode,
-    read_only: bool,
+    access: Access,
     wrap: bool,
     scroll: Point<Pixels>,
     bounds: Bounds<Pixels>,
@@ -199,8 +190,7 @@ impl InputState {
             link_hover: false,
             wheel_gesture: OngoingScroll::default(),
             multiline: false,
-            text_mode: TextMode::default(),
-            read_only: false,
+            access: Access::Edit,
             wrap: false,
             scroll: point(px(0.), px(0.)),
             bounds: Bounds::default(),
@@ -228,6 +218,11 @@ impl InputState {
     pub fn soft_wrap(mut self, value: bool) -> Self {
         self.multiline = true;
         self.wrap = value;
+        self
+    }
+
+    pub fn read_only_source(mut self) -> Self {
+        self.access = Access::SourcePreview;
         self
     }
 

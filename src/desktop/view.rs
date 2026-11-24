@@ -283,7 +283,7 @@ impl Render for Edot {
                 deferred(
                     anchored()
                         .position(self.menu_position)
-                        .anchor(self.menu_anchor)
+                        .anchor(Anchor::TopLeft)
                         .snap_to_window()
                         .child(menu.clone()),
                 )

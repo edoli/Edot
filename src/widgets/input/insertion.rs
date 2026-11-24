@@ -10,7 +10,7 @@ pub struct DropInsertion {
 
 impl InputState {
     pub fn can_insert_images(&self) -> bool {
-        self.multiline && self.text_mode == TextMode::Markdown && !self.is_read_only()
+        self.multiline && !self.is_read_only()
     }
     #[cfg(test)]
     pub(crate) fn image_drop_feedback(&self) -> Option<usize> {

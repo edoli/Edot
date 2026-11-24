@@ -114,7 +114,7 @@ fn format_edit(content: &str, mut selection: Selection, marker: &str) -> FormatE
 
 impl InputState {
     pub(super) fn toggle_inline_format(&mut self, marker: &str, cx: &mut Context<Self>) {
-        if !self.multiline || self.text_mode != TextMode::Markdown || self.is_read_only() {
+        if !self.multiline || self.is_read_only() {
             return;
         }
         self.finish_composition();

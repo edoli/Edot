@@ -11,31 +11,9 @@ pub(super) struct Highlighting {
 }
 
 impl InputState {
-    pub fn text_mode(&self) -> TextMode {
-        self.text_mode
-    }
-
-    pub fn set_text_mode(&mut self, mode: TextMode, cx: &mut Context<Self>) {
-        if self.text_mode == mode {
-            return;
-        }
-        self.text_mode = mode;
-        self.stop_pointer_drag();
-        if self.is_read_only() {
-            self.finish_composition();
-        }
-        self.highlighting.spans = Vec::new();
-        self.highlighting.revision = None;
-        self.layout_key = None;
-        self.ensure_highlighting(cx);
-        self.ensure_reading(cx);
-        cx.notify();
-    }
-
     pub(super) fn ensure_highlighting(&mut self, cx: &mut Context<Self>) {
         if !self.multiline
             || self.is_read_only()
-            || self.text_mode != TextMode::Markdown
             || self.highlighting.revision == Some(self.revision)
         {
             return;
@@ -60,7 +38,7 @@ impl InputState {
                     .spawn(async move { markdown::parse(&content) })
                     .await;
                 let Ok(next) = this.update(cx, |s, cx| {
-                    if s.text_mode != TextMode::Markdown || s.is_read_only() {
+                    if s.is_read_only() {
                         s.highlighting.task = None;
                         return None;
                     }
@@ -310,12 +288,12 @@ mod tests {
             assert!(s.highlighting.task.is_none());
         });
 
-        // Turning Markdown off must also discard a result already in flight.
+        // Entering reading mode discards a highlighting result already in flight.
         cx.update_window(window.into(), |_, w, cx| {
             editor.update(cx, |s, cx| {
                 s.set_value("**큰 본문**\r\n\r\n".repeat(9000), w, cx);
                 assert!(s.highlighting.task.is_some());
-                s.set_text_mode(super::TextMode::PlainText, cx);
+                s.set_read_only(true, cx);
                 assert!(s.highlighting.spans.is_empty());
             });
         })
@@ -326,16 +304,16 @@ mod tests {
             assert_eq!(s.revision, 4);
             assert!(s.highlighting.spans.is_empty());
             assert!(s.highlighting.task.is_none());
-            assert_eq!(s.highlighting.revision, None);
+            assert_eq!(s.highlighting.revision, Some(3));
         });
         cx.update_window(window.into(), |_, w, cx| {
             editor.update(cx, |s, cx| {
-                s.set_value("**일반 텍스트**\r\n\r\n".repeat(9000), w, cx);
+                s.set_value("**새 본문**\r\n\r\n".repeat(9000), w, cx);
                 assert!(s.highlighting.task.is_none());
-                s.set_text_mode(super::TextMode::Markdown, cx);
+                s.set_read_only(false, cx);
                 assert!(s.highlighting.task.is_some());
-                s.set_text_mode(super::TextMode::PlainText, cx);
-                s.set_text_mode(super::TextMode::Markdown, cx);
+                s.set_read_only(true, cx);
+                s.set_read_only(false, cx);
             });
         })
         .unwrap();

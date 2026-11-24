@@ -40,10 +40,9 @@ impl Edot {
         let previous_focus = window.focused(cx);
         let browser = cx.new(|cx| {
             let preview = cx.new(|cx| {
-                let mut input = TextareaState::new(window, cx).soft_wrap(true);
-                input.set_text_mode(component::input::TextMode::PlainText, cx);
-                input.set_read_only(true, cx);
-                input
+                TextareaState::new(window, cx)
+                    .soft_wrap(true)
+                    .read_only_source()
             });
             TrashBrowser {
                 dir,

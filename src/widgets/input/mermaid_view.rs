@@ -277,7 +277,7 @@ fn paint(
 mod tests {
     use super::text;
     use crate::widgets::ActiveTheme;
-    use crate::widgets::input::{Copy, InputState, SelectAll, TextMode, reading_document::Kind};
+    use crate::widgets::input::{Copy, InputState, SelectAll, reading_document::Kind};
     use gpui::{AppContext, px};
     use std::sync::Arc;
 
@@ -295,7 +295,6 @@ mod tests {
         let editor = window.root(cx).unwrap();
         cx.update_window(window.into(), |_, w, cx| {
             editor.update(cx, |s, cx| {
-                s.set_text_mode(TextMode::Markdown, cx);
                 s.set_read_only(true, cx);
                 s.focus(w, cx);
             });
@@ -386,7 +385,7 @@ mod tests {
             assert!(s.reading.document.text().contains("A->>B: 한글"));
         });
         visual.update(|_, cx| {
-            editor.update(cx, |s, cx| s.set_text_mode(TextMode::PlainText, cx));
+            editor.update(cx, |s, cx| s.set_read_only(false, cx));
         });
         draw(&mut visual);
         assert!(visual.debug_bounds("markdown-reading").is_none());

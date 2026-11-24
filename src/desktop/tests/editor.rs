@@ -100,7 +100,6 @@ fn app_shortcuts_leave_altgr_and_composing_title_input_to_the_platform(cx: &mut 
 fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
     cx: &mut TestAppContext,
 ) {
-    use crate::widgets::TextMode;
     use gpui::InputEvent as _;
     let f = Fixture::new(cx);
     let editor = f.update(cx, |this, window, cx| {
@@ -194,12 +193,7 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
         editor.update(cx, |s, cx| {
             s.set_value("plain", window, cx);
             s.select_all(window, cx);
-            s.set_text_mode(TextMode::PlainText, cx);
         });
-        for key in ["ctrl-b", "ctrl-i", "ctrl-shift-`", "ctrl-~", "ctrl-e"] {
-            window.press(key, cx);
-        }
-        assert_eq!(editor.read(cx).value(), "plain");
     })
     .unwrap();
     let sidebar = f.update(cx, |this, _, _| this.session.sidebar_visible);
@@ -229,9 +223,6 @@ fn markdown_shortcuts_toggle_formats_preserve_history_and_update_app_modes(
                 .filter_map(|tab| tab.editor.as_ref())
                 .all(|editor| editor.read(cx).is_read_only())
         );
-    });
-    f.update(cx, |_, _, cx| {
-        editor.update(cx, |s, cx| s.set_text_mode(TextMode::Markdown, cx))
     });
     for key in ["ctrl-b", "ctrl-i", "ctrl-shift-`", "ctrl-~", "ctrl-e"] {
         f.press(cx, key);
@@ -365,7 +356,7 @@ fn shortcut_search_filters_rows_and_preserves_input_and_editor_focus(cx: &mut Te
 
 #[gpui::test]
 fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut TestAppContext) {
-    use crate::widgets::{input::TextMode, theme::ActiveTheme as _};
+    use crate::widgets::theme::ActiveTheme as _;
     use gpui::{InputEvent as _, MouseButton, MouseMoveEvent};
     let f = Fixture::new(cx);
     let source = ("abcdefghij".repeat(80) + "\n\n").repeat(80);
@@ -385,20 +376,18 @@ fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut T
             })
         })
     };
-    for (mode, read_only, column, wrap) in [
-        (TextMode::Markdown, false, false, true),
-        (TextMode::Markdown, false, false, false),
-        (TextMode::PlainText, true, false, false),
-        (TextMode::PlainText, false, true, false),
-        (TextMode::Markdown, true, false, false),
+    for (reading, column, wrap) in [
+        (false, false, true),
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
     ] {
         f.update(cx, |this, w, cx| {
             editor.update(cx, |s, cx| {
                 s.set_read_only(false, cx);
                 s.set_value(source.clone(), w, cx);
-                s.set_text_mode(mode, cx);
                 s.set_soft_wrap(wrap, w, cx);
-                s.set_read_only(read_only, cx);
+                s.set_read_only(reading, cx);
             });
             this.focus_editor(w, cx);
         });
@@ -406,7 +395,6 @@ fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut T
         visual.simulate_mouse_move(sidebar, None, Default::default());
         draw(&mut visual);
         assert!(hover(&mut visual), "normal sidebar hover must work");
-        let reading = read_only && mode == TextMode::Markdown;
         let body = visual.debug_bounds("body-editor").unwrap();
         let start = if reading {
             let block = visual.debug_bounds("reading-block-0").unwrap();
@@ -429,7 +417,7 @@ fn body_drag_selects_outside_and_suppresses_other_hover_until_release(cx: &mut T
         draw(&mut visual);
         assert!(
             !hover(&mut visual),
-            "sidebar hover during {mode:?}, reading={read_only}, column={column}"
+            "sidebar hover during reading={reading}, column={column}, wrap={wrap}"
         );
         visual.update(|w, cx| w.press("ctrl-c", cx));
         cx.update(|cx| assert!(!cx.read_from_clipboard().unwrap().text().unwrap().is_empty()));
@@ -618,60 +606,23 @@ fn markdown_reading_renders_links_and_blocks_edits_without_losing_source_history
 }
 
 #[gpui::test]
-fn status_text_mode_is_per_note_and_reading_mode_is_global(cx: &mut TestAppContext) {
-    use crate::widgets::TextMode;
+fn status_toggles_markdown_reading_for_existing_and_newly_opened_tabs(cx: &mut TestAppContext) {
     use gpui::Focusable;
     let f = Fixture::new(cx);
+    let existing_path = f.dir.join(format!("notes/{}.txt", f.ids[2]));
+    let existing_source = "# 기존 메모\n\n**문서**";
+    fs::write(&existing_path, existing_source).unwrap();
     let (editor, original, revision) = f.update(cx, |this, window, cx| {
         this.focus_editor(window, cx);
         let editor = this.active_editor().unwrap();
         editor.update(cx, |s, cx| s.set_selected_range(0..4, cx));
         let state = editor.read(cx);
-        assert_eq!(state.text_mode(), TextMode::Markdown);
         (editor.clone(), state.value(), state.revision)
     });
     let mut visual = gpui::VisualTestContext::from_window(f.window, cx);
     visual.update(|window, cx| window.render_frame(cx));
-    let trigger = visual.debug_bounds("text-mode-control").unwrap();
-    visual.simulate_mouse_down(
-        trigger.center(),
-        gpui::MouseButton::Left,
-        Default::default(),
-    );
-    visual.simulate_mouse_up(
-        trigger.center(),
-        gpui::MouseButton::Left,
-        Default::default(),
-    );
-    f.update(cx, |this, _, _| {
-        assert!(this.keyboard_menu.is_some());
-        assert!(this.context_note.is_none());
-        assert_eq!(this.menu_anchor, gpui::Anchor::BottomRight);
-    });
-    f.press(cx, "up"); // The selected row initially follows the current Markdown mode.
-    f.press(cx, "enter");
-    f.update(cx, |this, window, cx| {
-        let state = editor.read(cx);
-        assert_eq!(state.text_mode(), TextMode::PlainText);
-        assert_eq!(state.value(), original);
-        assert_eq!(state.revision, revision);
-        assert_eq!(state.selected_range(), 0..4);
-        assert!(!state.is_read_only());
-        assert!(!this.open.iter().find(|t| t.id == f.ids[0]).unwrap().dirty);
-        assert!(state.focus_handle(cx).is_focused(window));
-        assert!(this.keyboard_menu.is_none());
-        assert!(this.open_note(f.ids[1], true, window, cx));
-        assert_eq!(
-            this.active_editor().unwrap().read(cx).text_mode(),
-            TextMode::Markdown
-        );
-        assert!(this.open_note(f.ids[0], true, window, cx));
-        assert_eq!(
-            this.active_editor().unwrap().read(cx).text_mode(),
-            TextMode::PlainText
-        );
-    });
-    visual.update(|window, cx| window.render_frame(cx));
+    assert!(visual.debug_bounds("text-mode-control").is_none());
+    assert!(visual.debug_bounds("text-input").is_some());
     let trigger = visual.debug_bounds("reading-mode-control").unwrap();
     visual.simulate_mouse_down(
         trigger.center(),
@@ -684,8 +635,8 @@ fn status_text_mode_is_per_note_and_reading_mode_is_global(cx: &mut TestAppConte
         Default::default(),
     );
     visual.update(|window, cx| window.render_frame(cx));
-    assert!(visual.debug_bounds("text-input").is_some());
-    assert!(visual.debug_bounds("markdown-reading").is_none());
+    assert!(visual.debug_bounds("text-input").is_none());
+    assert!(visual.debug_bounds("markdown-reading").is_some());
     for key in [
         "backspace",
         "delete",
@@ -708,7 +659,6 @@ fn status_text_mode_is_per_note_and_reading_mode_is_global(cx: &mut TestAppConte
     .unwrap();
     f.update(cx, |this, window, cx| {
         assert!(editor.read(cx).is_read_only());
-        assert_eq!(editor.read(cx).text_mode(), TextMode::PlainText);
         assert_eq!(editor.read(cx).value(), original);
         assert_eq!(editor.read(cx).revision, revision);
         assert_eq!(editor.read(cx).selected_range(), 0..4);
@@ -723,42 +673,22 @@ fn status_text_mode_is_per_note_and_reading_mode_is_global(cx: &mut TestAppConte
                 .read_only
         );
         assert!(this.open_note(f.ids[2], true, window, cx));
-        assert!(this.active_editor().unwrap().read(cx).is_read_only());
-        assert!(this.open_note(f.ids[0], true, window, cx));
-        assert!(editor.read(cx).is_read_only());
+        let existing = this.active_editor().unwrap();
+        assert!(existing.read(cx).is_read_only());
+        assert_eq!(existing.read(cx).value(), existing_source);
     });
-    f.press(cx, "ctrl-home");
-    f.press(cx, "shift-right");
-    f.press(cx, "ctrl-c");
-    cx.update(|cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "🙂"));
     f.press(cx, "ctrl-a");
     f.press(cx, "ctrl-c");
     cx.update(|cx| {
         assert_eq!(
             cx.read_from_clipboard().unwrap().text().unwrap(),
-            original.as_ref()
+            "기존 메모\n\n문서"
         )
     });
-    visual.update(|window, cx| window.render_frame(cx));
-    let trigger = visual.debug_bounds("text-mode-control").unwrap();
-    visual.simulate_mouse_down(
-        trigger.center(),
-        gpui::MouseButton::Left,
-        Default::default(),
-    );
-    visual.simulate_mouse_up(
-        trigger.center(),
-        gpui::MouseButton::Left,
-        Default::default(),
-    );
-    f.press(cx, "down");
-    f.press(cx, "enter");
-    f.update(cx, |this, _, cx| {
-        assert_eq!(editor.read(cx).text_mode(), TextMode::Markdown);
+    assert_eq!(fs::read_to_string(existing_path).unwrap(), existing_source);
+    f.update(cx, |this, window, cx| {
+        assert!(this.open_note(f.ids[0], true, window, cx));
         assert!(editor.read(cx).is_read_only());
-        assert_eq!(editor.read(cx).value(), original);
-        assert_eq!(editor.read(cx).revision, revision);
-        assert!(this.keyboard_menu.is_none());
     });
     visual.update(|window, cx| window.render_frame(cx));
     assert!(visual.debug_bounds("markdown-reading").is_some());
@@ -775,7 +705,9 @@ fn status_text_mode_is_per_note_and_reading_mode_is_global(cx: &mut TestAppConte
     );
     f.update(cx, |this, window, cx| {
         assert!(!editor.read(cx).is_read_only());
-        assert_eq!(editor.read(cx).text_mode(), TextMode::Markdown);
+        assert_eq!(editor.read(cx).value(), original);
+        assert_eq!(editor.read(cx).revision, revision);
+        assert_eq!(editor.read(cx).selected_range(), 0..4);
         assert!(editor.read(cx).focus_handle(cx).is_focused(window));
         assert!(!cx.global::<AppState>().settings.read_only);
         assert!(
@@ -876,7 +808,6 @@ fn newline_keeps_indentation_and_ctrl_enter_inserts_below(cx: &mut TestAppContex
 fn markdown_url_paste_links_single_line_selections_and_preserves_paste_history(
     cx: &mut TestAppContext,
 ) {
-    use crate::widgets::TextMode;
     use gpui::ClipboardItem;
     let f = Fixture::new(cx);
     let editor = f.update(cx, |this, window, cx| {
@@ -886,78 +817,47 @@ fn markdown_url_paste_links_single_line_selections_and_preserves_paste_history(
     cx.update_window(f.window, |_, window, cx| {
         window.render_frame(cx);
         let url = "https://example.com/docs?q=1&lang=ko#part";
-        for (source, selection, clipboard, mode, expected) in [
+        for (source, selection, clipboard, expected) in [
             (
                 "앞 공식 문서🙂 뒤",
                 "앞 ".len().."앞 공식 문서🙂".len(),
                 url,
-                TextMode::Markdown,
                 "앞 [공식 문서🙂](https://example.com/docs?q=1&lang=ko#part) 뒤",
             ),
             (
                 "문서",
                 0..6,
                 "HTTP://localhost:3000",
-                TextMode::Markdown,
                 "[문서](HTTP://localhost:3000)",
             ),
             (
                 "문서",
                 0..0,
                 url,
-                TextMode::Markdown,
                 "https://example.com/docs?q=1&lang=ko#part문서",
             ),
-            ("a\nb", 0..3, url, TextMode::Markdown, url),
-            ("a\rb", 0..3, url, TextMode::Markdown, url),
-            ("문서", 0..6, url, TextMode::PlainText, url),
-            (
-                "문서",
-                0..6,
-                "www.example.com",
-                TextMode::Markdown,
-                "www.example.com",
-            ),
-            ("문서", 0..6, "https://", TextMode::Markdown, "https://"),
-            (
-                "문서",
-                0..6,
-                "javascript:alert(1)",
-                TextMode::Markdown,
-                "javascript:alert(1)",
-            ),
+            ("a\nb", 0..3, url, url),
+            ("a\rb", 0..3, url, url),
+            ("문서", 0..6, "www.example.com", "www.example.com"),
+            ("문서", 0..6, "https://", "https://"),
+            ("문서", 0..6, "javascript:alert(1)", "javascript:alert(1)"),
             (
                 "문서",
                 0..6,
                 "https://a.test https://b.test",
-                TextMode::Markdown,
                 "https://a.test https://b.test",
             ),
-            (
-                "문서",
-                0..6,
-                "https://a.test\n",
-                TextMode::Markdown,
-                "https://a.test\n",
-            ),
+            ("문서", 0..6, "https://a.test\n", "https://a.test\n"),
             (
                 "문서",
                 0..6,
                 "https://a.test/\tpath",
-                TextMode::Markdown,
                 "https://a.test/\tpath",
             ),
-            (
-                "문서",
-                0..6,
-                "일반 텍스트",
-                TextMode::Markdown,
-                "일반 텍스트",
-            ),
+            ("문서", 0..6, "일반 텍스트", "일반 텍스트"),
         ] {
             editor.update(cx, |s, cx| {
                 s.set_value(source, window, cx);
-                s.set_text_mode(mode, cx);
                 s.set_selected_range(selection.clone(), cx);
             });
             cx.write_to_clipboard(ClipboardItem::new_string(clipboard.to_owned()));
@@ -972,7 +872,6 @@ fn markdown_url_paste_links_single_line_selections_and_preserves_paste_history(
         }
         editor.update(cx, |s, cx| {
             s.set_value("문서 문서", window, cx);
-            s.set_text_mode(TextMode::Markdown, cx);
             s.set_selected_range(0..6, cx);
         });
         window.press("secondary-d", cx);
