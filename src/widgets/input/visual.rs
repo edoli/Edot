@@ -92,7 +92,7 @@ pub(super) struct VisualDocument {
     scopes: Vec<InlineScope>,
     tasks: Vec<usize>,
     rich: Vec<RichBlock>,
-    cells: Vec<Range<usize>>,
+    cells: Vec<reading_document::TableCell>,
     tables: Vec<VisualTable>,
 }
 
@@ -249,11 +249,14 @@ impl InputState {
     }
 
     pub(super) fn visual_cell(&self, at: usize) -> Option<Range<usize>> {
+        let cell = self.visual_source_cell(at)?;
+        Some(cell.text.start.min(at)..cell.text.end.max(at))
+    }
+
+    fn visual_source_cell(&self, at: usize) -> Option<&reading_document::TableCell> {
         let document = self.visual_document()?;
         self.visual_table(at)?;
-        document
-            .cell_index(at)
-            .map(|index| document.cells[index].clone())
+        document.cell_index(at).map(|index| &document.cells[index])
     }
 
     fn visual_table(&self, at: usize) -> Option<&VisualTable> {
@@ -275,26 +278,30 @@ impl InputState {
         let Some(cells) = self.table_cells(table) else {
             return proposed;
         };
-        let index = cells.partition_point(|cell| cell.end < proposed);
+        let index = cells.partition_point(|cell| cell.source.end < proposed);
         if let Some(cell) = cells.get(index)
-            && cell.start <= proposed
+            && cell.source.start <= proposed
         {
             return proposed;
         }
         if proposed < from {
             cells.get(index.saturating_sub(1)).map_or(proposed, |cell| {
-                if index == 0 { cell.start } else { cell.end }
+                if index == 0 {
+                    cell.text.start
+                } else {
+                    cell.text.end
+                }
             })
         } else {
             cells
                 .get(index)
-                .map(|cell| cell.start)
-                .or_else(|| cells.last().map(|cell| cell.end))
+                .map(|cell| cell.text.start)
+                .or_else(|| cells.last().map(|cell| cell.text.end))
                 .unwrap_or(proposed)
         }
     }
 
-    fn table_cells(&self, table: &VisualTable) -> Option<&[Range<usize>]> {
+    fn table_cells(&self, table: &VisualTable) -> Option<&[reading_document::TableCell]> {
         let document = self.visual_document()?;
         let first = table.rows.first()?.start;
         let last = table.rows.last()?.end;
@@ -347,7 +354,7 @@ impl InputState {
     pub(super) fn step_visual_cell(&self, at: usize, backwards: bool) -> Option<usize> {
         let table = self.visual_table(at)?;
         let cells = self.table_cells(table)?;
-        let index = cells.partition_point(|cell| cell.end < at);
+        let index = cells.partition_point(|cell| cell.source.end < at);
         let next = if backwards {
             index.checked_sub(1)
         } else {
@@ -359,7 +366,13 @@ impl InputState {
                 self.table_exit(table, at, backwards, x)
                     .map_or(at, |target| target.0)
             },
-            |cell| if backwards { cell.end } else { cell.start },
+            |cell| {
+                if backwards {
+                    cell.text.end
+                } else {
+                    cell.text.start
+                }
+            },
         ))
     }
 
@@ -429,7 +442,7 @@ impl InputState {
         let cell_index = document.cell_index(at)?;
         let current_cell = &document.cells[cell_index];
         if let Some(wrapped) = self.visual.as_ref()?.geometry.wrapped_cell_caret(
-            current_cell,
+            &current_cell.source,
             at,
             upwards,
             self.caret_after_wrap,
@@ -454,9 +467,9 @@ impl InputState {
                     .unwrap_or((at, self.caret_after_wrap)),
             );
         };
-        let target_cell = &document.cells[(target_row.start + column).min(target_row.end - 1)];
+        let target_cell = &document.cells[(target_row.start + column).min(target_row.end - 1)].text;
         let offset = unicode_segmentation::UnicodeSegmentation::graphemes(
-            &self.content[current_cell.start..at],
+            &self.content[current_cell.text.start.min(at)..at],
             true,
         )
         .count();
@@ -480,8 +493,8 @@ impl InputState {
             .any(|table| {
                 !(range.start <= table.source.start && range.end >= table.source.end)
                     && !self
-                        .visual_cell(range.start)
-                        .is_some_and(|cell| range.end <= cell.end)
+                        .visual_source_cell(range.start)
+                        .is_some_and(|cell| range.end <= cell.source.end)
             })
         {
             // A partial selection of multiple cells can be copied as Markdown.
@@ -541,8 +554,8 @@ impl InputState {
     ) -> Cow<'a, str> {
         if !value.contains(['|', '\r', '\n'])
             || !self
-                .visual_cell(range.start)
-                .is_some_and(|cell| range.end <= cell.end)
+                .visual_source_cell(range.start)
+                .is_some_and(|cell| range.end <= cell.source.end)
         {
             return Cow::Borrowed(value);
         }
@@ -874,10 +887,10 @@ impl VisualDocument {
     }
 
     fn cell_index(&self, at: usize) -> Option<usize> {
-        let index = self.cells.partition_point(|cell| cell.end < at);
+        let index = self.cells.partition_point(|cell| cell.source.end < at);
         self.cells
             .get(index)
-            .filter(|cell| cell.start <= at)
+            .filter(|cell| cell.source.start <= at)
             .map(|_| index)
     }
     fn scope_at(&self, at: usize) -> Option<usize> {
@@ -973,7 +986,7 @@ fn inline_markers(event: &Event<'_>, source: &str) -> Option<[Range<usize>; 2]> 
             } else {
                 line.len()
             };
-            return (start <= end).then_some([0..start, end..line.len()]);
+            return (start <= end).then_some([0..start, end..trimmed.len().max(end)]);
         }
         Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough) => {
             let count = if matches!(event, Event::Start(Tag::Emphasis)) {
@@ -1587,6 +1600,66 @@ mod tests {
             }
             assert_eq!(s.position(before.len() + 3).y, y);
         });
+    }
+
+    #[gpui::test]
+    fn typed_spaces_have_caret_width_before_the_next_character(cx: &mut TestAppContext) {
+        cx.update(crate::widgets::init);
+        let window = cx.add_window(|window, cx| {
+            let mut input = InputState::new(window, cx).soft_wrap(true);
+            input.set_editor_mode(EditorMode::Visual, cx);
+            input.focus(window, cx);
+            input
+        });
+        let editor = window.root(cx).unwrap();
+        let mut view = VisualTestContext::from_window(window.into(), cx);
+        let draw = |view: &mut VisualTestContext| {
+            view.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        };
+        let table = "| A | B |\n| --- | ---: |\n| 왼쪽 |오른쪽|\n\n끝";
+        for (source, at) in [
+            ("마침", "마침".len()),
+            ("마침\r\n계속", "마침".len()),
+            ("# 제목", "# 제목".len()),
+            ("들여쓰기", 0),
+            ("앞\n계속", "앞\n".len()),
+            (table, table.find("왼쪽").unwrap() + "왼쪽".len()),
+            (table, table.find("오른쪽").unwrap() + "오른쪽".len()),
+        ] {
+            view.update(|window, cx| {
+                editor.update(cx, |s, cx| {
+                    s.set_value(source, window, cx);
+                    s.set_selected_range(at..at, cx);
+                });
+            });
+            draw(&mut view);
+            for count in 1..=3 {
+                view.update(|window, cx| editor.update(cx, |s, cx| s.replace(" ", window, cx)));
+                draw(&mut view);
+                editor.read_with(cx, |s, _| {
+                    let expected =
+                        format!("{}{}{}", &source[..at], " ".repeat(count), &source[at..]);
+                    assert_eq!(s.value(), expected, "{source:?}");
+                    assert_eq!(s.cursor(), at + count, "{source:?}");
+                    let before = s.position(at + count - 1);
+                    let caret = s.caret_position();
+                    assert_eq!(before.y, caret.y, "{source:?}");
+                    assert!(
+                        before.x < caret.x,
+                        "space {count} in {source:?}: {before:?} -> {caret:?}"
+                    );
+                });
+            }
+            view.update(|window, cx| editor.update(cx, |s, cx| s.replace("X", window, cx)));
+            draw(&mut view);
+            editor.read_with(cx, |s, _| {
+                assert_eq!(s.value(), format!("{}   X{}", &source[..at], &source[at..]));
+                assert_eq!(s.cursor(), at + 4);
+            });
+        }
     }
 
     #[gpui::test]

@@ -117,11 +117,35 @@ fn render_inline(inline: &Inline, view: &BlockView<'_>, cx: &App) -> AnyElement 
 }
 
 fn render_mapped_text(inline: &Inline, view: &BlockView<'_>, code: bool, cx: &App) -> AnyElement {
-    let markers = if code {
+    let mut markers = if code {
         Vec::new()
     } else {
         view.document.reveal_markers(view.revealed, &inline.source)
     };
+    if let Some(cell) = &inline.cell {
+        let mut show_leading = false;
+        let mut trailing_end = cell.text.end;
+        for at in view
+            .selected
+            .iter()
+            .flat_map(|range| [range.start, range.end])
+        {
+            show_leading |= (cell.source.start..=cell.text.start).contains(&at);
+            if (cell.text.end..=cell.source.end).contains(&at) {
+                trailing_end = trailing_end.max(at);
+            }
+        }
+        if show_leading {
+            // A normally padded cell keeps one outer space on the left hidden.
+            let leading = cell.source.start + usize::from(cell.text.end < cell.source.end);
+            if leading < cell.text.start {
+                markers.push(leading..cell.text.start);
+            }
+        }
+        if trailing_end > cell.text.end {
+            markers.push(cell.text.end..trailing_end);
+        }
+    }
     let projection = Rc::new(Projection::new(inline, view.raw, &markers, code));
     let spans: Vec<_> = if code {
         Vec::new()

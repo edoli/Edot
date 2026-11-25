@@ -34,7 +34,11 @@ impl Projection {
         let mut projection = Self {
             text: String::with_capacity(text.len()),
             pieces: Vec::with_capacity(inline.pieces.len() + positions.len()),
-            source: inline.cell.as_ref().unwrap_or(&inline.source).clone(),
+            source: inline
+                .cell
+                .as_ref()
+                .map_or(&inline.source, |cell| &cell.source)
+                .clone(),
             insertions: Vec::with_capacity(positions.len()),
         };
         let mut markers = positions.into_iter().peekable();

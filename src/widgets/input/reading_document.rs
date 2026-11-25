@@ -11,7 +11,13 @@ pub(super) struct Inline {
     pub images: Vec<ReadingImage>,
     pub source: Range<usize>,
     pub pieces: Vec<SourcePiece>,
-    pub cell: Option<Range<usize>>,
+    pub cell: Option<TableCell>,
+}
+
+#[derive(Clone)]
+pub(super) struct TableCell {
+    pub source: Range<usize>,
+    pub text: Range<usize>,
 }
 
 #[derive(Clone)]
@@ -117,7 +123,8 @@ pub(super) struct Block {
 pub(super) struct Document {
     pub blocks: Vec<Block>,
 }
-struct Builder {
+struct Builder<'a> {
+    original: &'a str,
     document: Document,
     current: Option<Block>,
     lists: Vec<Option<u64>>,
@@ -129,7 +136,7 @@ struct Builder {
     table: Vec<Align>,
     row: Option<Block>,
 }
-impl Builder {
+impl Builder<'_> {
     fn flush(&mut self) {
         if let Some(mut block) = self.current.take() {
             if matches!(block.kind, Kind::Mermaid(_)) {
@@ -139,6 +146,32 @@ impl Builder {
             if let Some(row) = &mut self.row {
                 row.cells.push(block.content);
             } else {
+                if matches!(block.kind, Kind::Paragraph | Kind::Heading(_))
+                    && !block.content.pieces.is_empty()
+                {
+                    let source = &block.content.source;
+                    let line = source.start
+                        + self.original[source.clone()]
+                            .trim_end_matches(['\r', '\n'])
+                            .len();
+                    let end = self.original[line..]
+                        .find(['\r', '\n'])
+                        .map_or(self.original.len(), |length| line + length);
+                    let start = self.original[..end]
+                        .trim_end_matches([' ', '\t'])
+                        .len()
+                        .max(block.content.pieces.last().unwrap().source.end);
+                    if start < end {
+                        block.content.push(
+                            &self.original[start..end],
+                            0,
+                            start..end,
+                            self.original,
+                        );
+                        block.content.source.end = block.content.source.end.max(end);
+                        block.source.end = block.source.end.max(end);
+                    }
+                }
                 self.document.blocks.push(block);
             }
         }
@@ -175,9 +208,54 @@ impl Builder {
                 style |= bit;
             }
         }
-        self.ensure(range.clone())
-            .content
-            .push(text, style, range, original);
+        let preserve_indent = self.row.is_none() && self.quote == 0 && self.lists.is_empty();
+        let block = self.ensure(range.clone());
+        let inline = &mut block.content;
+        if preserve_indent && matches!(block.kind, Kind::Paragraph) {
+            let start = if inline.text.ends_with('\n') {
+                inline.pieces.last().map(|piece| piece.source.end)
+            } else if inline.pieces.is_empty() && inline.images.is_empty() {
+                Some(
+                    original[..range.start]
+                        .rfind(['\r', '\n'])
+                        .map_or(0, |byte| byte + 1),
+                )
+            } else {
+                None
+            };
+            if let Some(start) = start
+                && let Some(leading) = original.get(start..range.start)
+            {
+                let end = start + leading.len() - leading.trim_start_matches([' ', '\t']).len();
+                if start < end {
+                    inline.source.start = inline.source.start.min(start);
+                    block.source.start = block.source.start.min(start);
+                    inline.push(&original[start..end], 0, start..end, original);
+                }
+            }
+        }
+        inline.push(text, style, range, original);
+    }
+
+    fn line_break(&mut self, mut range: Range<usize>) {
+        let end = range.start
+            + self.original[range.clone()]
+                .trim_end_matches(['\r', '\n'])
+                .len();
+        let covered = self
+            .current
+            .as_ref()
+            .and_then(|block| block.content.pieces.last())
+            .map_or(range.start, |piece| piece.source.end);
+        let start = self.original[..end]
+            .trim_end_matches([' ', '\t'])
+            .len()
+            .max(covered);
+        if start < end {
+            self.push(&self.original[start..end], start..end, 0, self.original);
+            range.start = end;
+        }
+        self.push("\n", range, 0, self.original);
     }
     fn row(&mut self, header: bool, range: Range<usize>) {
         self.start(
@@ -208,6 +286,7 @@ pub(super) fn parse_with(
     mut observe: impl FnMut(&Event<'_>, &Range<usize>),
 ) -> Document {
     let mut b = Builder {
+        original: text,
         document: Document::default(),
         current: None,
         lists: Vec::new(),
@@ -324,14 +403,17 @@ pub(super) fn parse_with(
                         let end = range.end.min(line_end);
                         let raw = &text[range.start..end];
                         let trimmed = raw.trim_matches([' ', '\t']);
-                        if trimmed.is_empty() {
-                            let at = range.start + raw.len();
-                            Some(at..at)
+                        let contents = if trimmed.is_empty() {
+                            end..end
                         } else {
                             let start =
                                 range.start + raw.len() - raw.trim_start_matches([' ', '\t']).len();
-                            Some(start..start + trimmed.len())
-                        }
+                            start..start + trimmed.len()
+                        };
+                        Some(TableCell {
+                            source: range.start..end,
+                            text: contents,
+                        })
                     });
                     b.start(Kind::Paragraph, range);
                     b.current.as_mut().unwrap().content.cell = cell;
@@ -385,7 +467,7 @@ pub(super) fn parse_with(
                 b.push(&value, range, 0, text)
             }
             Event::Code(value) => b.push(&value, range, CODE, text),
-            Event::SoftBreak | Event::HardBreak => b.push("\n", range, 0, text),
+            Event::SoftBreak | Event::HardBreak => b.line_break(range),
             Event::TaskListMarker(checked) => {
                 let marker = range.start;
                 let valid = matches!(text.get(marker..marker + 3), Some("[ ]" | "[x]" | "[X]"));
